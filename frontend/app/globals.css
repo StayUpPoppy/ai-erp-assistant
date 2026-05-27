@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 全局基础样式：保证拖拽区与日志区可读性 */
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply min-h-screen bg-gradient-to-b from-slate-100 via-slate-50 to-slate-100 text-slate-900 antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+}
+
+@layer utilities {
+  .focus-ring {
+    @apply outline-none ring-2 ring-sky-400/60 ring-offset-2 ring-offset-white transition;
+  }
+}

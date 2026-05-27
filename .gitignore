@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Build outputs
+dist/
+build/
+.next/
+frontend/.next/
+out/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+backend/api/.env
+backend/api/datynk-real.env.example
+backend/.env
+backend/.env.example
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+deploy/ecs-panel/prod.env
+
+# Local private configs
+backend/config/erp_qa_reports.json
+backend/scripts/datynk-probe.credentials.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/api/.venv/
+backend/worker/.venv/
+.pytest_cache/
+
+# Test and coverage outputs
+coverage/
+htmlcov/
+.coverage
+
+# Logs and temp files
+*.log
+logs/
+tmp/
+backend/api/logs/
+
+# Frontend cache
+*.tsbuildinfo
+frontend/tsconfig.tsbuildinfo
+
+# Runtime data
+uploads/
+data/
+minio_data/
+postgres_data/
+redis_data/
+
+# OS and IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

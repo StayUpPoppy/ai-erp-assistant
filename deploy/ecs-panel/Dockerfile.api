@@ -1,0 +1,40 @@
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+ARG DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
+RUN sed -i "s#http://deb.debian.org/debian#${DEBIAN_MIRROR}#g; s#http://security.debian.org/debian-security#${DEBIAN_MIRROR}-security#g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        libglib2.0-0 \
+        libgl1 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/backend/api
+
+COPY backend/packages /app/backend/packages
+COPY backend/api/requirements.txt backend/api/requirements-ocr-paddle.txt ./
+
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt
+
+ARG INSTALL_PADDLEOCR=true
+ARG PADDLEPADDLE_VERSION=3.2.0
+ARG PADDLEPADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cpu/
+RUN if [ "$INSTALL_PADDLEOCR" = "true" ]; then \
+        python -m pip install "paddlepaddle==${PADDLEPADDLE_VERSION}" -i "${PADDLEPADDLE_INDEX_URL}" && \
+        python -m pip install -r requirements-ocr-paddle.txt; \
+    fi
+
+COPY backend/api /app/backend/api
+COPY backend/worker /app/backend/worker
+
+EXPOSE 8020
+
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8020"]

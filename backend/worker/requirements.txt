@@ -1,0 +1,4 @@
+pydantic
+redis
+pytest>=8.0
+

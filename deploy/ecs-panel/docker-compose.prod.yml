@@ -1,0 +1,106 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_erp_assistant}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in prod.env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ai_erp_assistant}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in prod.env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in prod.env}
+    volumes:
+      - minio_data:/data
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/ecs-panel/Dockerfile.api
+      args:
+        INSTALL_PADDLEOCR: ${INSTALL_PADDLEOCR:-true}
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-https://mirrors.aliyun.com/debian}
+        PADDLEPADDLE_VERSION: ${PADDLEPADDLE_VERSION:-3.2.0}
+        PADDLEPADDLE_INDEX_URL: ${PADDLEPADDLE_INDEX_URL:-https://www.paddlepaddle.org.cn/packages/stable/cpu/}
+    restart: unless-stopped
+    env_file:
+      - prod.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8020:8020"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8020/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/ecs-panel/Dockerfile.api
+      args:
+        INSTALL_PADDLEOCR: ${INSTALL_PADDLEOCR:-true}
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-https://mirrors.aliyun.com/debian}
+        PADDLEPADDLE_VERSION: ${PADDLEPADDLE_VERSION:-3.2.0}
+        PADDLEPADDLE_INDEX_URL: ${PADDLEPADDLE_INDEX_URL:-https://www.paddlepaddle.org.cn/packages/stable/cpu/}
+    restart: unless-stopped
+    env_file:
+      - prod.env
+    environment:
+      API_BASE_URL: http://api:8020
+    working_dir: /app/backend/worker
+    command: ["python", "worker.py"]
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deploy/ecs-panel/Dockerfile.frontend
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    restart: unless-stopped
+    environment:
+      ORCHESTRATOR_PROXY_TARGET: http://api:8020
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3080:3080"
+
+volumes:
+  redis_data:
+  postgres_data:
+  minio_data:

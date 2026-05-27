@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "reports": [
+    {
+      "id": "example_inventory",
+      "label": "示例：即时库存（请改为真实路径）",
+      "match": {
+        "any_substrings": ["即时库存", "现存量"],
+        "exclude_substrings": ["销售订单"]
+      },
+      "http": {
+        "method": "GET",
+        "path": "/api/inventory/page",
+        "query": {
+          "org": "{{org_id}}",
+          "pageNum": "1",
+          "pageSize": "20",
+          "materialCode": "{{keyword}}"
+        }
+      },
+      "response": {
+        "datynk_envelope": true,
+        "records_path": "data.records"
+      }
+    }
+  ]
+}

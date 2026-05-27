@@ -1,0 +1,4 @@
+# 可选：本机 PaddleOCR（中文场景）。安装后设置 OCR_ENGINE=paddle
+# CPU 示例（版本以官网为准）：https://www.paddlepaddle.org.cn/install/quick
+#   python -m pip install paddlepaddle==3.0.0 -i https://mirror.baidu.com/pypi/simple
+paddleocr>=2.7.0

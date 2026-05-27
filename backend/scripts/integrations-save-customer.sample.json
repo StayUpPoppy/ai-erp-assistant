@@ -1,0 +1,7 @@
+{
+  "org_id": "org-demo",
+  "user_id": "u-demo",
+  "fields": {
+    "customerName": "样例客户（请按对方 Swagger 改键名）"
+  }
+}

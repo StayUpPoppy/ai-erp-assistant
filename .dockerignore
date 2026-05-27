@@ -1,0 +1,13 @@
+.git
+.next
+node_modules
+frontend/.next
+frontend/node_modules
+backend/api/.venv
+backend/worker/.venv
+__pycache__
+*.pyc
+.pytest_cache
+tmp
+*.log
+deploy/ecs-panel/prod.env

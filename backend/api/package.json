@@ -1,0 +1,8 @@
+{
+  "name": "api",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.cjs",
+    "test": "node scripts/test.cjs"
+  }
+}

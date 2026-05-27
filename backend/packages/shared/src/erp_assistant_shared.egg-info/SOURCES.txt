@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+setup.py
+src/erp_assistant_shared/__init__.py
+src/erp_assistant_shared/contract.py
+src/erp_assistant_shared.egg-info/PKG-INFO
+src/erp_assistant_shared.egg-info/SOURCES.txt
+src/erp_assistant_shared.egg-info/dependency_links.txt
+src/erp_assistant_shared.egg-info/top_level.txt

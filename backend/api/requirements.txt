@@ -1,0 +1,30 @@
+# Install from backend/api:
+#   python -m pip install -r requirements.txt
+-e ../packages/shared
+
+# Web / API
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+
+# Queue and persistence
+redis
+sqlalchemy>=2.0,<3
+psycopg[binary]>=3.1
+
+# Object storage
+minio>=7.2
+
+# Orchestration: LangGraph 0.2+ needs Python 3.9+; on 3.8 the API uses linear workflow fallback.
+langgraph>=0.2; python_version >= "3.9"
+
+# Document parsing (document_extract)
+pypdf>=4.0
+pymupdf>=1.24.0
+pillow>=10.0
+pytesseract>=0.3.10
+charset-normalizer>=3.3.0
+
+# Tests
+pytest>=8.0

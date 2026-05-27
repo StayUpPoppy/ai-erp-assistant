@@ -1,0 +1,17 @@
+{
+  "profile_id": "_example-extra-po",
+  "comment": "复制为 {org_id}.json 或任意 id.json，并在创建 ingestion 时传 extraction_profile_id；未配置 EXTRACTION_PROFILES_DIR 时目录为仓库 backend/config/extraction_profiles/",
+  "extra_required_fields_by_doc_type": {
+    "PO": ["project_code"]
+  },
+  "field_aliases": {
+    "supplier_code": "vendor_code"
+  },
+  "extract_rules": [
+    {
+      "doc_types": ["PO"],
+      "field": "project_code",
+      "pattern": "(?m)项目编号\\s*[:：]\\s*(\\S+)"
+    }
+  ]
+}

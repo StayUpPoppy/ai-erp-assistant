@@ -1,0 +1,212 @@
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.structured_extract import extract_po_cn_layout_entities, extract_structured_fields, required_field_keys
+
+
+def test_required_field_keys_by_doc_type():
+    assert required_field_keys("PO") == [
+        "vendor_code",
+        "doc_date",
+        "currency",
+        "material_code",
+        "line_qty",
+    ]
+    assert required_field_keys("GR") == [
+        "vendor_code",
+        "doc_date",
+        "currency",
+        "po_no",
+        "material_code",
+        "qty_received",
+    ]
+    assert required_field_keys("INV") == [
+        "vendor_code",
+        "doc_date",
+        "currency",
+        "invoice_no",
+        "invoice_date",
+    ]
+    assert required_field_keys(None) == required_field_keys("PO")
+
+
+def test_extract_po_material_and_qty():
+    text = "PO header\nMaterial M010\nQty 8\n"
+    got = extract_structured_fields(text, "PO")
+    assert got.get("material_code") == "M010"
+    assert got.get("line_qty") == "8"
+
+
+def test_extract_gr_po_and_received():
+    text = "GR\nPO-2026001\nM020\n收货数量 15\n"
+    got = extract_structured_fields(text, "GR")
+    assert got.get("po_no")
+    assert got.get("material_code") == "M020"
+    assert got.get("qty_received") == "15"
+
+
+def test_extract_inv_invoice():
+    text = "Tax Invoice\nInvoice No INV-7788\nInvoice Date 2026-03-01\n"
+    got = extract_structured_fields(text, "INV")
+    assert got.get("invoice_no") == "INV-7788"
+    assert got.get("invoice_date") == "2026-03-01"
+
+
+def test_extract_po_order_qty():
+    got = extract_structured_fields("Purchase order line\nOrder Qty 24\nM030\n", "PO")
+    assert got.get("material_code") == "M030"
+    assert got.get("line_qty") == "24"
+
+
+def test_extract_po_total_qty_chinese():
+    got = extract_structured_fields("明细\n合计数量：120\n", "PO")
+    assert got.get("line_qty") == "120"
+
+
+def test_extract_material_code_cn_label():
+    got = extract_structured_fields("物料号：ABC-12.3\n", "PO")
+    assert got.get("material_code") == "ABC-12.3"
+
+
+def test_extract_po_cn_layout_header_and_one_line():
+    text = (
+        "采购订单\n"
+        "供方：浙江英科弹簧科技有限公司\n"
+        "需方：无锡智能自控工程股份有限公司\n"
+        "订单编号：SC01P002603020026\n"
+        "1 P3B0A305000335 压缩弹簧 4 件 100 88.495 400.00 2026/5/10\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    assert got["supplier_name"] == "浙江英科弹簧科技有限公司"
+    assert got["buyer_name"] == "无锡智能自控工程股份有限公司"
+    assert got["order_no"] == "SC01P002603020026"
+    assert "line_items_json" in got
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert len(rows) == 1
+    assert rows[0]["inventory_code"] == "P3B0A305000335"
+    assert rows[0]["quantity"] == "4"
+    assert rows[0]["unit_price_incl_tax"] == "100"
+    assert rows[0]["unit_price_excl_tax"] == "88.495"
+    assert rows[0]["delivery_date"] == "2026-05-10"
+
+
+def test_extract_po_cn_layout_two_lines():
+    text = (
+        "供方：A公司\n需方：B公司\n订单编号：PO-001\n"
+        "1 CODE111111111111 弹簧A 1 件 10 8 10 2026/1/1\n"
+        "2 CODE222222222222 弹簧B 2 件 20 16 40 2026/1/2\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert len(rows) == 2
+    assert rows[1]["inventory_code"] == "CODE222222222222"
+    assert rows[1]["quantity"] == "2"
+
+
+def test_extract_po_cn_layout_mixed_case_inventory_code():
+    text = (
+        "供方：测试供方\n订单编号：PO-MIX-01\n"
+        "1 ab12CD34ef56 螺母 10 件 1.5 1.2 15 2026/3/1\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert len(rows) == 1
+    assert rows[0]["inventory_code"] == "ab12CD34ef56"
+    assert rows[0]["quantity"] == "10"
+
+
+def test_extract_gr_po_number_and_received_quantity():
+    text = (
+        "Goods Receipt\n"
+        "PO Number: 4500123987\n"
+        "Material M040\n"
+        "Received quantity 7\n"
+    )
+    got = extract_structured_fields(text, "GR")
+    assert got.get("po_no") == "4500123987"
+    assert got.get("material_code") == "M040"
+    assert got.get("qty_received") == "7"
+
+
+def test_extract_gr_reference_po():
+    text = "GR\nRef PO 88AB-12\nM041\nqty received: 2\n"
+    got = extract_structured_fields(text, "GR")
+    assert got.get("po_no") == "88AB-12"
+    assert got.get("qty_received") == "2"
+
+
+def test_extract_inv_invoice_number_and_date_of_invoice():
+    text = "Commercial invoice\nInvoice Number: CI-2026-0007\nDate of invoice 2026-04-15\n"
+    got = extract_structured_fields(text, "INV")
+    assert got.get("invoice_no") == "CI-2026-0007"
+    assert got.get("invoice_date") == "2026-04-15"
+
+
+def test_extract_inv_bill_no():
+    got = extract_structured_fields("Commercial\nBill No. BN-9090\n2026-02-01\n", "INV")
+    assert got.get("invoice_no") == "BN-9090"
+
+
+def test_extract_inv_token_after_header():
+    got = extract_structured_fields("Header INV-001122\n2026-01-20\n", "INV")
+    assert got.get("invoice_no") == "INV-001122"
+
+
+def test_extract_inv_slash_style_number():
+    got = extract_structured_fields("Tax invoice\nINV/2026/0044\n2026-02-01\n", "INV")
+    assert got.get("invoice_no") == "INV/2026/0044"
+
+
+def test_extract_po_cn_order_qty():
+    got = extract_structured_fields("明细\n订购数量：12\n物料 M099\n", "PO")
+    assert got.get("line_qty") == "12"
+    assert got.get("material_code") == "M099"
+
+
+def test_extract_gr_cn_purchase_order_no():
+    text = "收货\n采购订单：4500123988\n物料 M100\n收货数量 3\n"
+    got = extract_structured_fields(text, "GR")
+    assert got.get("po_no") == "4500123988"
+    assert got.get("qty_received") == "3"
+
+
+def test_extract_inv_cn_invoice_no_label():
+    got = extract_structured_fields("销项\n发票号：FP-2026-8899\n开票日期 2026-05-01\n", "INV")
+    assert got.get("invoice_no") == "FP-2026-8899"
+    assert got.get("invoice_date") == "2026-05-01"
+
+
+def test_extract_gr_order_number_cn_label():
+    text = "入库\n订单编号：5500123001\n物料 M210\n实收：9\n"
+    got = extract_structured_fields(text, "GR")
+    assert got.get("po_no") == "5500123001"
+    assert got.get("material_code") == "M210"
+    assert got.get("qty_received") == "9"
+
+
+def test_extract_po_from_csv_like_pipe_row():
+    """模拟 document_extract CSV 展开后的「列 | 列」正文。"""
+    text = "vendor | doc_date | material | qty\nV003 | 2026-04-01 | M077 | 22\n"
+    got = extract_structured_fields(text, "PO")
+    assert got.get("material_code") == "M077"
+    assert got.get("line_qty") == "22"
+
+
+def test_extract_inv_mixed_noise_invoice_token():
+    text = (
+        "Export packing list noise\n"
+        "Commercial section INV-2026-X9-0002 endline\n"
+        "Invoice Date 2026-06-11\n"
+    )
+    got = extract_structured_fields(text, "INV")
+    assert got.get("invoice_no")
+    assert "INV-2026" in got["invoice_no"]
+    assert got.get("invoice_date") == "2026-06-11"
