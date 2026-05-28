@@ -98,6 +98,18 @@ def test_llm_router_parses_erp_query(monkeypatch):
     assert decision.message == "查物料 M001"
 
 
+def test_llm_router_timeout_falls_back_to_rules(monkeypatch):
+    monkeypatch.setenv("ASSISTANT_LLM_ROUTER_ENABLED", "true")
+    monkeypatch.setattr(
+        "app.assistant_llm_router.chat_completion_json",
+        lambda _messages, **_kwargs: (_ for _ in ()).throw(TimeoutError("read timed out")),
+    )
+
+    decision = decide_with_llm(ChatMessageRequest(message="查物料 M001", org_id="org-test"))
+
+    assert decision is None
+
+
 def test_llm_router_parses_tool_call_format(monkeypatch):
     monkeypatch.setenv("ASSISTANT_LLM_ROUTER_ENABLED", "true")
     monkeypatch.setattr(
@@ -260,6 +272,34 @@ async def test_assistant_streams_llm_plain_chat(monkeypatch):
     session = assistant_session_route("s-stream", _build_request("/assistant/sessions/s-stream"))
     assert [m.role for m in session.messages] == ["user", "assistant"]
     assert session.messages[1].content == "hello stream"
+
+
+@pytest.mark.anyio
+async def test_assistant_stream_router_timeout_returns_final(monkeypatch):
+    reset_sessions_for_tests()
+    monkeypatch.setenv("ASSISTANT_LLM_ROUTER_ENABLED", "true")
+    monkeypatch.setenv("ASSISTANT_PLAIN_CHAT_FAST_PATH_ENABLED", "false")
+    monkeypatch.setattr(
+        "app.assistant_llm_router.chat_completion_json",
+        lambda _messages, **_kwargs: (_ for _ in ()).throw(TimeoutError("read timed out")),
+    )
+
+    def _fake_answer(org_id, message, erp):
+        return ("物料查询 fallback 结果", ["search_materials"], {})
+
+    monkeypatch.setattr("app.tools.erp_qa.answer_with_erp_tools", _fake_answer)
+    response = assistant_messages_stream_route(
+        ChatMessageRequest(session_id="s-timeout", message="查物料 M001", org_id="org-test"),
+        _build_request("/assistant/messages/stream"),
+    )
+
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk)
+    body = "".join(chunks)
+
+    assert "event: final" in body
+    assert "物料查询 fallback 结果" in body
 
 
 def test_assistant_uses_llm_decision_for_pdf_fields(monkeypatch):

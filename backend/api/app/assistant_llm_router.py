@@ -274,7 +274,7 @@ def decide_with_llm(payload: ChatMessageRequest) -> Optional[AssistantRouteDecis
             decision.reason[:160],
         )
         return decision
-    except (LlmClientError, ValueError, json.JSONDecodeError) as exc:
+    except (LlmClientError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
         logger.warning("assistant_llm_route_failed fallback_to_rules err=%s", exc)
         return None
 
@@ -372,7 +372,7 @@ def probe_llm_router(payload: ChatMessageRequest) -> AssistantLlmProbeResponse:
             arguments=decision.arguments,
             reason=decision.reason,
         )
-    except (LlmClientError, ValueError, json.JSONDecodeError) as exc:
+    except (LlmClientError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
         return AssistantLlmProbeResponse(
             enabled=enabled,
             api_key_configured=key_configured,

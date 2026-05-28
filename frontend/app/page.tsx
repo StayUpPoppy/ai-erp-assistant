@@ -1686,7 +1686,38 @@ export default function HomePage() {
             ? (ui.data.preview_data as OrderPreviewData)
             : null;
         const previewForCard = isCurrentTaskCard ? previewDraft ?? ingestion?.preview_data ?? cardPreview : cardPreview;
-        if (previewForCard) return null;
+        if (previewForCard) {
+          const currentStatus = displayIngestionStatus(ingestion, clientDraftStateRef.current);
+          const canCreateDraft =
+            isCurrentTaskCard && Boolean(ingestionId) && currentStatus === "VALIDATED" && !isPreviewDirty;
+          const editableFields = isCurrentTaskCard ? ingestion?.editable_fields ?? [] : [];
+          const issues = isCurrentTaskCard ? ingestion?.issues ?? [] : [];
+          return (
+            <div className="mt-3 rounded-xl border border-red-200 bg-red-50/80 p-3 text-sm text-red-950">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-semibold">订单预览需要确认</div>
+                <span className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-red-800 ring-1 ring-red-100">
+                  {isCurrentTaskCard ? "当前任务，可继续操作" : "历史任务，仅供查看"}
+                </span>
+              </div>
+              <div className="mt-1 text-xs text-red-800">红色字段补齐后，点击「确认预览并校验」。</div>
+              <div className="mt-3 max-h-[40rem] overflow-auto">
+                <OrderPreviewEditor
+                  preview={previewForCard}
+                  editableFields={editableFields}
+                  issues={issues}
+                  onChange={onPreviewDraftChange}
+                  onConfirm={onConfirmPreview}
+                  onCreateDraft={onCreateDraft}
+                  confirming={isConfirmingPreview}
+                  creatingDraft={isCreatingDraft}
+                  createDraftDisabled={!canCreateDraft}
+                  readOnly={!isCurrentTaskCard}
+                />
+              </div>
+            </div>
+          );
+        }
         const rows = Array.isArray(ui.data.fields) ? (ui.data.fields as Array<Record<string, unknown>>) : [];
         const disabled = !isCurrentTaskCard;
         const cardFields = rows.reduce<Record<string, string>>((acc, field) => {

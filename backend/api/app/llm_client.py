@@ -135,6 +135,8 @@ def _chat_completion_openai(
         raise LlmClientError(f"LLM HTTP {exc.code}", status_code=exc.code, body=raw) from exc
     except error.URLError as exc:
         raise LlmClientError(f"LLM network error: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise LlmClientError("LLM request timed out") from exc
 
     try:
         parsed = json.loads(raw)
@@ -198,6 +200,8 @@ def _chat_completion_openai_stream(
         raise LlmClientError(f"LLM HTTP {exc.code}", status_code=exc.code, body=raw) from exc
     except error.URLError as exc:
         raise LlmClientError(f"LLM network error: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise LlmClientError("LLM stream timed out") from exc
 
 
 def _chat_completion_anthropic(
@@ -238,6 +242,8 @@ def _chat_completion_anthropic(
         raise LlmClientError(f"LLM HTTP {exc.code}", status_code=exc.code, body=raw) from exc
     except error.URLError as exc:
         raise LlmClientError(f"LLM network error: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise LlmClientError("LLM request timed out") from exc
 
     try:
         parsed = json.loads(raw)
@@ -312,6 +318,8 @@ def _chat_completion_anthropic_stream(
         raise LlmClientError(f"LLM HTTP {exc.code}", status_code=exc.code, body=raw) from exc
     except error.URLError as exc:
         raise LlmClientError(f"LLM network error: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise LlmClientError("LLM stream timed out") from exc
 
 
 def chat_completion_json(

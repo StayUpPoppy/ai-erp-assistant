@@ -124,5 +124,11 @@ cd /ai-erp-assistant
 git pull
 docker compose --env-file deploy/ecs-panel/prod.env -f deploy/ecs-panel/docker-compose.prod.yml up -d --build
 
+关掉容器：
+docker compose --env-file deploy/ecs-panel/prod.env -f deploy/ecs-panel/docker-compose.prod.yml down
+
+检查容器状态：
+docker compose --env-file deploy/ecs-panel/prod.env -f deploy/ecs-panel/docker-compose.prod.yml ps
+
 映射网站
 http://111.170.173.2:8081/
