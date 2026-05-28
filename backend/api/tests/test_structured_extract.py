@@ -200,6 +200,27 @@ def test_extract_po_from_csv_like_pipe_row():
     assert got.get("line_qty") == "22"
 
 
+def test_extract_datynk_po_header_fields_without_llm():
+    text = (
+        "销售订单\n"
+        "客户名称：北京优向国际能源装备有限公司\n"
+        "客户采购单号：PO-2026-0008\n"
+        "订单日期：2026年5月28日\n"
+        "币别：CNY\n"
+        "交货日期：2026/6/15\n"
+        "物料号：S01P019430\n"
+        "数量：12 件\n"
+        "含税单价：2.50\n"
+    )
+    got = extract_structured_fields(text, "PO")
+    assert got.get("customerName") == "北京优向国际能源装备有限公司"
+    assert got.get("customerPoNo") == "PO-2026-0008"
+    assert got.get("delivery_date") == "2026-06-15"
+    assert got.get("material_code") == "S01P019430"
+    assert got.get("line_qty") == "12"
+    assert got.get("taxPrice") == "2.50"
+
+
 def test_extract_inv_mixed_noise_invoice_token():
     text = (
         "Export packing list noise\n"

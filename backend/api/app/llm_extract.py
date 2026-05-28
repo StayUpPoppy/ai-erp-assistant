@@ -116,6 +116,14 @@ def _llm_context_max_chars() -> int:
     return max(1200, min(value, 20000))
 
 
+def _llm_extract_timeout_seconds() -> float:
+    raw = (os.getenv("LLM_EXTRACT_TIMEOUT_SECONDS") or os.getenv("LLM_TIMEOUT_SECONDS") or "90").strip()
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return 90.0
+
+
 def _clip_llm_document_context(document_text: str, resolved_fields: Optional[Dict[str, str]] = None) -> str:
     text = (document_text or "").strip()
     if not text:
@@ -443,7 +451,8 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
-            ]
+            ],
+            timeout_seconds=_llm_extract_timeout_seconds(),
         )
         elapsed_ms = int((perf_counter() - llm_started) * 1000)
         parsed, repaired_json = _extract_json_with_repair(content)

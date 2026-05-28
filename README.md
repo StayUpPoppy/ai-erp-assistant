@@ -119,6 +119,9 @@ docker compose --env-file deploy/ecs-panel/prod.env -f deploy/ecs-panel/docker-c
 只重启 后端API：
 docker compose --env-file deploy/ecs-panel/prod.env -f deploy/ecs-panel/docker-compose.prod.yml restart api
 
+重启api 和 worker:
+docker compose --env-file deploy/ecs-panel/prod.env -f deploy/ecs-panel/docker-compose.prod.yml up -d --build api worker
+
 更新代码后重新构建ta：
 cd /ai-erp-assistant
 git pull
@@ -132,3 +135,5 @@ docker compose --env-file deploy/ecs-panel/prod.env -f deploy/ecs-panel/docker-c
 
 映射网站
 http://111.170.173.2:8081/
+
+

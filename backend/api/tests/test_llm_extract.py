@@ -8,6 +8,7 @@ from app.llm_extract import (
     _clip_llm_document_context,
     _extract_json,
     _extract_json_with_repair,
+    _llm_extract_timeout_seconds,
     _purchase_order_to_preview,
 )
 from app.schemas import IngestionResponse, IngestionStatus, PurchaseOrder
@@ -185,6 +186,13 @@ def test_llm_context_clip_keeps_order_lines_and_drops_noise(monkeypatch) -> None
     assert "PO-8899" in clipped
     assert "Material Code M-100" in clipped
     assert "legal clause filler 79" not in clipped
+
+
+def test_llm_extract_timeout_uses_specific_env(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("LLM_EXTRACT_TIMEOUT_SECONDS", "240")
+
+    assert _llm_extract_timeout_seconds() == 240
 
 
 def test_purchase_order_schema_accepts_evidence_and_uncertain_fields() -> None:

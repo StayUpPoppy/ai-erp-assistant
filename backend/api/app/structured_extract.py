@@ -25,6 +25,16 @@ def _first_match(text: str, pattern: str, flags: int = 0) -> Optional[str]:
     return m.group(1).strip() if m else None
 
 
+def _norm_any_date(s: str) -> str:
+    s = (s or "").strip()
+    cn = re.match(r"^(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?$", s)
+    if cn:
+        return f"{cn.group(1)}-{int(cn.group(2)):02d}-{int(cn.group(3)):02d}"
+    if re.match(r"^20\d{2}[/\-]\d{1,2}[/\-]\d{1,2}$", s):
+        return _norm_slash_date(s)
+    return s
+
+
 def _norm_slash_date(s: str) -> str:
     s = (s or "").strip().replace("－", "-")
     parts = re.split(r"[/\-]", s)
@@ -130,6 +140,43 @@ def extract_structured_fields(
         out["tax_code"] = taxc.upper()
 
     if dt == "PO":
+        customer = _first_match(
+            text,
+            r"(?:客户名称|客户名|客户|需方|采购方|买方|甲方|customer|buyer)\s*[:：]\s*([^\n\r]{2,120})",
+            re.IGNORECASE,
+        )
+        if customer:
+            out["customerName"] = customer
+
+        order_no = _first_match(
+            text,
+            r"(?:客户采购单号|客户PO|客户订单号|采购订单号|订单编号|订单号|合同编号|PO\s*(?:No\.?|Number)?)\s*[:：#]?\s*([A-Za-z0-9\-_/]{4,50})",
+            re.IGNORECASE,
+        )
+        if order_no:
+            out["customerPoNo"] = order_no
+            out.setdefault("order_no", order_no)
+
+        delivery = _first_match(
+            text,
+            r"(?:交货日期|交期|约定交货日期|到货日期|delivery\s*date)\s*[:：]?\s*((?:20\d{2}[-/]\d{1,2}[-/]\d{1,2})|(?:20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日?))",
+            re.IGNORECASE,
+        )
+        if delivery:
+            out["delivery_date"] = _norm_any_date(delivery)
+
+        tax = _first_match(text, r"(?:税率|tax\s*rate)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*%?", re.IGNORECASE)
+        if tax:
+            out["tax_rate"] = tax
+
+        delivery_addr = _first_match(
+            text,
+            r"(?:收货地址|送货地址|交货地点|delivery\s*address)\s*[:：]\s*([^\n\r]{4,180})",
+            re.IGNORECASE,
+        )
+        if delivery_addr:
+            out["deliveryAddr"] = delivery_addr
+
         qty = _first_match(
             text,
             r"(?:数量|qty|quantity)\s*[:：]?\s*(\d+(?:\.\d+)?)",
@@ -168,6 +215,23 @@ def extract_structured_fields(
             )
         if qty:
             out["line_qty"] = qty
+
+        unit_price_excl = _first_match(
+            text,
+            r"(?:不含税单价|未税单价|除税单价|price\s*without\s*tax)\s*[:：]?\s*(\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        )
+        if unit_price_excl:
+            out["unit_price_excl_tax"] = unit_price_excl
+            out["price"] = unit_price_excl
+        unit_price_incl = _first_match(
+            text,
+            r"(?:含税单价|价税合计单价|tax\s*price|price\s*with\s*tax)\s*[:：]?\s*(\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        )
+        if unit_price_incl:
+            out["unit_price_incl_tax"] = unit_price_incl
+            out["taxPrice"] = unit_price_incl
 
     elif dt == "GR":
         # 先匹配带标签的整句，避免 loose 的「PO」吃到「PO Number」里的 NUMBER 或 Ref 行尾部的 PO。
