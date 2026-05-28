@@ -27,6 +27,7 @@ from app.assistant_session_store import append_response, append_user_message, en
 from app.chat_orchestrator import handle_chat_message
 from app.ingestion_export import build_document_parse_export
 from app.llm_client import LlmClientError, llm_api_key_configured, llm_base_url, llm_extract_enabled, llm_model_name, llm_prompt_version
+from app.mineru_client import mineru_health_payload
 from app.schemas import (
     ChatMessageRequest,
     ChatMessageResponse,
@@ -215,6 +216,7 @@ def health() -> HealthResponse:
         extraction_profiles_dir=prof_dir,
         extraction_profile_json_count=prof_n,
         **tess,
+        **mineru_health_payload(),
         **queue_health_payload(),
         **erp_adapter_health_payload(),
         **erp_qa_reports_health_payload(),

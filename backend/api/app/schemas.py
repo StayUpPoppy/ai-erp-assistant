@@ -56,6 +56,9 @@ class HealthResponse(BaseModel):
     ocr_engine_auto_fallback: bool = True
     paddleocr_importable: bool = False
     aliyun_ocr_configured: bool = False
+    mineru_enabled: bool = False
+    mineru_api_base: str = ""
+    mineru_model: str = ""
     erp_client_mode: str = "mock"
     erp_sale_order_page_enabled: bool = False
     erp_customer_page_enabled: bool = False

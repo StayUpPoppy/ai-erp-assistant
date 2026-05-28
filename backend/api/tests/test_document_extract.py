@@ -195,6 +195,58 @@ def test_pdf_sparse_merges_first_page_ocr(monkeypatch):
     assert fmt == "pdf_text+ocr_pages_2"
 
 
+def test_pdf_sparse_uses_mineru_before_page_ocr(monkeypatch):
+    pytest.importorskip("pypdf")
+    from io import BytesIO
+
+    from pypdf import PdfWriter
+
+    buf = BytesIO()
+    w = PdfWriter()
+    w.add_blank_page(width=200, height=200)
+    w.write(buf)
+    raw = buf.getvalue()
+    called = {"page_ocr": False}
+
+    monkeypatch.setenv("MINERU_ENABLED", "true")
+    monkeypatch.setattr(
+        "app.document_extract._mineru_pdf_supplement",
+        lambda raw_bytes, fn="": ("mineru markdown M999", "mineru_markdown"),
+    )
+
+    def _page_ocr(raw_bytes, fn=""):
+        called["page_ocr"] = True
+        return "should not run", 1
+
+    monkeypatch.setattr("app.document_extract._ocr_pdf_pages_supplement", _page_ocr)
+
+    text, fmt = extract_text_from_bytes(raw, "scan.pdf")
+    assert "M999" in text
+    assert fmt == "pdf_text+mineru_markdown"
+    assert called["page_ocr"] is False
+
+
+def test_pdf_sparse_falls_back_to_page_ocr_when_mineru_empty(monkeypatch):
+    pytest.importorskip("pypdf")
+    from io import BytesIO
+
+    from pypdf import PdfWriter
+
+    buf = BytesIO()
+    w = PdfWriter()
+    w.add_blank_page(width=200, height=200)
+    w.write(buf)
+    raw = buf.getvalue()
+
+    monkeypatch.setenv("MINERU_ENABLED", "true")
+    monkeypatch.setattr("app.document_extract._mineru_pdf_supplement", lambda raw_bytes, fn="": ("", "mineru_error"))
+    monkeypatch.setattr("app.document_extract._ocr_pdf_pages_supplement", lambda raw_bytes, fn="": ("paddle text", 1))
+
+    text, fmt = extract_text_from_bytes(raw, "scan.pdf")
+    assert "paddle text" in text
+    assert fmt == "pdf_text+ocr_first_page"
+
+
 def test_pdf_sparse_single_page_ocr_label(monkeypatch):
     pytest.importorskip("pypdf")
     from io import BytesIO

@@ -161,6 +161,22 @@ def _ocr_pdf_pages_supplement(raw: bytes, file_name: str = "") -> Tuple[str, int
                 pass
 
 
+def _mineru_pdf_supplement(raw: bytes, file_name: str = "") -> Tuple[str, str]:
+    try:
+        from app.mineru_client import MineruClientError, parse_pdf_bytes_with_mineru
+
+        text, fmt = parse_pdf_bytes_with_mineru(raw, file_name or "document.pdf")
+        if text:
+            return _normalize_text(text), fmt
+        return "", fmt
+    except MineruClientError as exc:
+        logger.warning("document_extract_mineru_failed file_name=%s err=%s", file_name, exc)
+        return "", "mineru_error"
+    except Exception as exc:
+        logger.exception("document_extract_mineru_unexpected file_name=%s err=%s", file_name, exc)
+        return "", "mineru_error"
+
+
 def _extract_pdf_text_layer(raw: bytes, file_name: str = "") -> Tuple[str, str]:
     """
     PDF 文字层：优先 pypdf；未安装或整段失败时回退 PyMuPDF get_text（与 OCR 补全共用 fitz 依赖）。
@@ -461,6 +477,27 @@ def extract_text_from_bytes(raw: bytes, file_name: str = "") -> Tuple[str, str]:
                 file_name,
                 engine,
             )
+            mineru_enabled = os.getenv("MINERU_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+            if mineru_enabled:
+                mineru_text, mineru_fmt = _mineru_pdf_supplement(raw, file_name)
+                if mineru_text:
+                    merged = _normalize_text(text + "\n" + mineru_text)
+                    base = _pdf_format_base()
+                    logger.info(
+                        "document_extract_pdf_done file_name=%s format=%s+%s chars=%s threshold=%s ocr_used=mineru elapsed_ms=%s",
+                        file_name,
+                        base,
+                        mineru_fmt,
+                        len(merged),
+                        threshold,
+                        int((perf_counter() - started) * 1000),
+                    )
+                    return merged, f"{base}+{mineru_fmt}"
+                logger.warning(
+                    "document_extract_pdf_mineru_empty_or_failed file_name=%s fmt=%s fallback=page_ocr",
+                    file_name,
+                    mineru_fmt,
+                )
             extra, pages_done = _ocr_pdf_pages_supplement(raw, file_name)
             if extra:
                 merged = _normalize_text(text + "\n" + extra)

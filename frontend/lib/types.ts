@@ -29,6 +29,9 @@ export interface HealthResponse {
   queue_backend?: string;
   queue_name?: string;
   queue_available?: boolean;
+  mineru_enabled?: boolean;
+  mineru_api_base?: string;
+  mineru_model?: string;
   llm_extract_enabled: boolean;
   llm_router_enabled: boolean;
   llm_api_key_configured: boolean;
