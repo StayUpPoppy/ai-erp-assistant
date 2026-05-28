@@ -1,8 +1,8 @@
 {
   "profile_id": "datynk-dev",
   "comment": "Datynk 销售订单联调：创建 ingestion 时传 extraction_profile_id=datynk-dev；API 需配置 ERP_CREATE_BODY_STYLE=datynk_sale_order 等，见 backend/docs/runbook.md §4.3。",
-  "extra_required_fields_by_doc_type": {
-    "PO": ["org", "customerName"]
+  "required_fields_by_doc_type": {
+    "PO": ["org", "customerName", "doc_date", "currency", "delivery_date", "material_code", "line_qty"]
   },
   "field_aliases": {
     "客户名称": "customerName",

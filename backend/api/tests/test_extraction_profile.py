@@ -216,5 +216,5 @@ def test_datynk_dev_profile_shipped_in_repo(monkeypatch) -> None:
     prof = get_profile("datynk-dev")
     assert prof is not None
     keys = effective_required_field_keys("PO", prof)
-    assert "org" in keys
-    assert "customerName" in keys
+    assert keys == ["org", "customerName", "doc_date", "currency", "delivery_date", "material_code", "line_qty"]
+    assert "vendor_code" not in keys

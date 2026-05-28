@@ -466,11 +466,14 @@ const OPTIONAL_RESOLVE_KEYS = ["warehouse_code", "tax_code"] as const;
 
 /** 补全表单字段中文说明（与键名并列展示） */
 const RESOLVE_FIELD_LABELS: Record<string, string> = {
+  org: "销售组织",
+  customerName: "客户名称",
   vendor_code: "供应商编码",
   doc_date: "单据日期",
   currency: "币别",
   material_code: "物料编码",
   line_qty: "数量",
+  delivery_date: "交货日期",
   po_no: "采购订单号",
   qty_received: "收货数量",
   invoice_no: "发票号码",
@@ -496,7 +499,7 @@ export default function HomePage() {
   const [assistantSessionId, setAssistantSessionId] = useState<string | null>(null);
   const [healthInfo, setHealthInfo] = useState<HealthResponse | null>(null);
   /** 可选：对应 API 侧 backend/config/extraction_profiles/{id}.json；留空则按 org_id / default 自动选 */
-  const [extractionProfileId, setExtractionProfileId] = useState("");
+  const [extractionProfileId, setExtractionProfileId] = useState("datynk-dev");
 
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
@@ -1676,9 +1679,15 @@ export default function HomePage() {
     (ui: ToolUi | null | undefined) => {
       if (!ui) return null;
       if (ui.type === "missing_fields_form") {
-        const rows = Array.isArray(ui.data.fields) ? (ui.data.fields as Array<Record<string, unknown>>) : [];
         const cardIngestionId = String(ui.data.ingestion_id ?? "");
         const isCurrentTaskCard = Boolean(cardIngestionId && ingestionId && cardIngestionId === ingestionId);
+        const cardPreview =
+          ui.data.preview_data && typeof ui.data.preview_data === "object"
+            ? (ui.data.preview_data as OrderPreviewData)
+            : null;
+        const previewForCard = isCurrentTaskCard ? previewDraft ?? ingestion?.preview_data ?? cardPreview : cardPreview;
+        if (previewForCard) return null;
+        const rows = Array.isArray(ui.data.fields) ? (ui.data.fields as Array<Record<string, unknown>>) : [];
         const disabled = !isCurrentTaskCard;
         const cardFields = rows.reduce<Record<string, string>>((acc, field) => {
           const key = String(field.key ?? "");
