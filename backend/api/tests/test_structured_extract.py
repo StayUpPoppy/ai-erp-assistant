@@ -221,6 +221,30 @@ def test_extract_datynk_po_header_fields_without_llm():
     assert got.get("taxPrice") == "2.50"
 
 
+def test_extract_sap_srm_po_layout_without_llm():
+    text = (
+        "订单号 4501825923\n"
+        "供应商名称 浙江英科弹簧科技有限公司 采购商名称 苏州纽威阀门股份有限公司\n"
+        "1010012845 波形弹簧,84x72x1x5.8-D,INC X750 UNSN07750\n"
+        "T04037 96 12.10H 0.0000\n"
+        "10010231818碟形弹簧,B25x12.2x0.9,INC X750[GB/T1972,]UNSN07750\n"
+        "T222644 3.37[GB/T1972,] A 0.0000\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert got["supplier_name"] == "浙江英科弹簧科技有限公司"
+    assert got["buyer_name"] == "苏州纽威阀门股份有限公司"
+    assert got["order_no"] == "4501825923"
+    assert rows[0]["line_no"] == "10"
+    assert rows[0]["inventory_code"] == "10012845"
+    assert rows[0]["drawing_number"] == "T04037"
+    assert rows[0]["quantity"] == "96"
+    assert rows[1]["line_no"] == "100"
+    assert rows[1]["inventory_code"] == "10231818"
+
+
 def test_extract_inv_mixed_noise_invoice_token():
     text = (
         "Export packing list noise\n"

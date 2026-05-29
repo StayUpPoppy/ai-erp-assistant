@@ -46,6 +46,39 @@ def _norm_slash_date(s: str) -> str:
     return f"{y}-{mo:02d}-{d:02d}"
 
 
+def _extract_sap_srm_po_line_items(text: str) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for i, line in enumerate(lines[:-1]):
+        m = re.match(r"^(\d{9,16})\s*(\D.+)$", line)
+        if not m:
+            continue
+        compact_no, desc = m.groups()
+        line_no = compact_no[:-8]
+        material = compact_no[-8:]
+        next_line = lines[i + 1]
+        n = re.match(
+            r"^([A-Z]\d{5})\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)(?:\[[^\]]+\]\s*)?([A-Z])?\s+(\d+(?:\.\d+)?)",
+            next_line,
+        )
+        if not n:
+            continue
+        drawing, qty, price, unit, amount = n.groups()
+        rows.append(
+            {
+                "line_no": line_no,
+                "inventory_code": material,
+                "name": desc.strip(),
+                "drawing_number": drawing,
+                "quantity": qty,
+                "unit_price_excl_tax": price,
+                "unit": unit or "",
+                "line_amount_excl_tax": amount,
+            }
+        )
+    return rows
+
+
 def extract_po_cn_layout_entities(text: str) -> Dict[str, str]:
     """
     中文采购订单常见抬头 + 表格明细（支持多行）。
@@ -59,12 +92,18 @@ def extract_po_cn_layout_entities(text: str) -> Dict[str, str]:
         return out
 
     sup = _first_match(t, r"供方\s*[:：]\s*([^\n\r]{2,120})")
+    if not sup:
+        sup = _first_match(t, r"供应商名称\s*([^\n\r]{2,120}?)(?:\s+采购商名称|\s*$)")
     if sup:
         out["supplier_name"] = sup.strip()
     buyer = _first_match(t, r"需方\s*[:：]\s*([^\n\r]{2,120})")
+    if not buyer:
+        buyer = _first_match(t, r"采购商名称\s*([^\n\r]{2,120})")
     if buyer:
         out["buyer_name"] = buyer.strip()
     ono = _first_match(t, r"(?:订单编号|订单号)\s*[:：]\s*([A-Za-z0-9]{6,40})")
+    if not ono:
+        ono = _first_match(t, r"订单号\s*([A-Za-z0-9]{6,40})")
     if ono:
         out["order_no"] = ono.strip()
 
@@ -97,6 +136,10 @@ def extract_po_cn_layout_entities(text: str) -> Dict[str, str]:
         )
     if rows:
         out["line_items_json"] = json.dumps(rows, ensure_ascii=False)
+    else:
+        sap_rows = _extract_sap_srm_po_line_items(t)
+        if sap_rows:
+            out["line_items_json"] = json.dumps(sap_rows, ensure_ascii=False)
     return out
 
 
@@ -145,6 +188,8 @@ def extract_structured_fields(
             r"(?:客户名称|客户名|客户|需方|采购方|买方|甲方|customer|buyer)\s*[:：]\s*([^\n\r]{2,120})",
             re.IGNORECASE,
         )
+        if not customer:
+            customer = _first_match(text, r"采购商名称\s*([^\n\r]{2,120})", re.IGNORECASE)
         if customer:
             out["customerName"] = customer
 
