@@ -7,7 +7,7 @@ from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.schemas import CreateIngestionRequest, ErrorCode, IngestionStatus
+from app.schemas import CreateIngestionRequest, ErrorCode, IngestionStatus, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader
 from app.routes import process_ingestion_route
 from app.store import create_ingestion, store
 
@@ -95,6 +95,35 @@ def test_process_ingestion_parses_text_object_when_bytes_available(monkeypatch):
     assert result.preview_data is not None
     assert result.preview_data.order.org == "org-test"
     assert len(result.preview_data.details) >= 1
+
+
+def test_process_ingestion_rebuilds_stale_preview_data(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    payload = CreateIngestionRequest(
+        file_id="file-stale-preview",
+        file_hash="hash-stale-preview-1",
+        user_id="u-test",
+        org_id="org-test",
+        source_file_object_key="uploads/org/2026-05-01/abc12345-draft-po_note.txt",
+        extract_version="v0",
+        model_version="mock-llm-v1",
+        prompt_version="prompt-v1",
+    )
+    created = create_ingestion(payload)
+    created.preview_data = OrderPreviewData(order=OrderPreviewHeader(), details=[OrderPreviewDetail()])
+
+    monkeypatch.setattr(
+        "app.workflow.get_object_bytes",
+        lambda _k: b"Purchase Order V001\nDate 2026-05-06\nCurrency CNY\nMaterial M001\nQty 10\n",
+    )
+
+    result = process_ingestion_route(created.ingestion_id, _build_request())
+
+    assert result.preview_data is not None
+    assert result.preview_data.order.orderDate == "2026-05-06"
+    assert result.preview_data.details[0].materialCode == "M001"
+    assert result.preview_data.details[0].qty == 10
 
 
 def test_process_ingestion_gr_auto_validated_when_text_complete(monkeypatch):

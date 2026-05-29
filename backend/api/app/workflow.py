@@ -437,12 +437,14 @@ def _node_map(state: WorkflowState) -> WorkflowState:
 def _node_build_preview(state: WorkflowState) -> WorkflowState:
     def _preview_impl() -> Dict[str, int]:
         ing = state["ingestion"]
+        existing_preview = ing.preview_data
+        ing.preview_data = None
         preview = build_order_preview_data(ing)
+        ing.preview_data = existing_preview
         if preview is None:
             apply_preview_to_ingestion(ing, None)
             return {"preview": 0}
-        if ing.preview_data is None or (not ing.editable_fields and not ing.issues):
-            apply_preview_to_ingestion(ing, preview)
+        apply_preview_to_ingestion(ing, preview)
         state["append_event"](
             ing,
             IngestionStatus.MAPPED,
