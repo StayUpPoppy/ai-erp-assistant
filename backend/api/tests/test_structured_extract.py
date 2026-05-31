@@ -245,6 +245,33 @@ def test_extract_sap_srm_po_layout_without_llm():
     assert rows[1]["inventory_code"] == "10231818"
 
 
+def test_extract_sap_srm_po_multiline_metric_rows():
+    text = (
+        "30011691209 Wave spring,65x55x1x7.5,INC718-NC\n"
+        "T02809 12 6.24 solution treated and aged 32-40HRC\n"
+        "F 0.0000\n"
+        "31011691209 Wave spring,65x55x1x7.5,INC718-NC\n"
+        "T02809 4 6.24 solution treated and aged 32-40HRC\n"
+        "F 0.0000\n"
+        "2026/2/3 footer text\n"
+        "37012745394 Disc spring,B50x25.4x2,INC X750\n"
+        "T2226442 17.11[GB/T1972,] A 0.0200\n"
+        "Total net weight: 7.0980\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert [row["line_no"] for row in rows] == ["300", "310", "370"]
+    assert rows[0]["quantity"] == "12"
+    assert rows[0]["unit"] == "F"
+    assert rows[1]["quantity"] == "4"
+    assert rows[2]["drawing_number"] == "T222644"
+    assert rows[2]["quantity"] == "2"
+    assert rows[2]["unit"] == "A"
+    assert rows[2]["line_amount_excl_tax"] == "0.0200"
+
+
 def test_extract_inv_mixed_noise_invoice_token():
     text = (
         "Export packing list noise\n"

@@ -46,34 +46,100 @@ def _norm_slash_date(s: str) -> str:
     return f"{y}-{mo:02d}-{d:02d}"
 
 
+def _split_sap_drawing_qty(token: str) -> tuple[str, str]:
+    """
+    SAP SRM PDFs often concatenate drawing number and quantity, e.g. ``T04037172``
+    means drawing ``T04037`` with quantity ``172``. Some GB/T disk spring drawings
+    use one more digit, e.g. ``T2226444`` means drawing ``T222644`` with quantity
+    ``4``. Keep this local to the SAP fallback parser so generic PO rules stay
+    conservative.
+    """
+    token = (token or "").strip()
+    if not re.match(r"^[A-Z]\d{5,}$", token):
+        return token, ""
+    if len(token) <= 6:
+        return token, ""
+
+    if len(token) >= 8 and token.startswith("T22264"):
+        return token[:7], token[7:]
+
+    if len(token) >= 8:
+        qty_len6 = token[6:]
+        qty_len7 = token[7:]
+        try:
+            if qty_len7 and int(qty_len6) > 999 and int(qty_len7) <= 999:
+                return token[:7], qty_len7
+        except ValueError:
+            pass
+        return token[:6], qty_len6
+
+    return token[:6], token[6:]
+
+
+def _parse_sap_srm_metric_block(block_lines: List[str]) -> Optional[Dict[str, str]]:
+    block = " ".join(line.strip() for line in block_lines if line.strip())
+    m = re.match(r"^([A-Z]\d{5,})(.*)$", block)
+    if not m:
+        return None
+    drawing_token, rest = m.groups()
+    drawing, qty = _split_sap_drawing_qty(drawing_token)
+    rest = rest.strip()
+
+    if not qty:
+        q = re.match(r"^(\d+(?:\.\d+)?)\s+(.*)$", rest)
+        if not q:
+            return None
+        qty, rest = q.groups()
+        rest = rest.strip()
+
+    p = re.match(r"^(\d+(?:\.\d+)?)(.*)$", rest)
+    if not p:
+        return None
+    price, tail = p.groups()
+    unit = ""
+    amount = ""
+    unit_amount_matches = re.findall(r"\b([A-Z])\s*(\d+(?:\.\d+)?)\b", tail.strip())
+    if unit_amount_matches:
+        unit, amount = unit_amount_matches[-1]
+
+    return {
+        "drawing_number": drawing,
+        "quantity": qty,
+        "unit_price_excl_tax": price,
+        "unit": unit,
+        "line_amount_excl_tax": amount,
+    }
+
+
 def _extract_sap_srm_po_line_items(text: str) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    for i, line in enumerate(lines[:-1]):
-        m = re.match(r"^(\d{9,16})\s*(\D.+)$", line)
+    row_starts: List[tuple[int, re.Match[str]]] = []
+    for i, line in enumerate(lines):
+        m = re.match(r"^([1-9]\d{1,2})(\d{8})\s*(\D.+)$", line)
         if not m:
             continue
-        compact_no, desc = m.groups()
-        line_no = compact_no[:-8]
-        material = compact_no[-8:]
-        next_line = lines[i + 1]
-        n = re.match(
-            r"^([A-Z]\d{5})\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)(?:\[[^\]]+\]\s*)?([A-Z])?\s+(\d+(?:\.\d+)?)",
-            next_line,
-        )
-        if not n:
+        try:
+            line_no_int = int(m.group(1))
+        except ValueError:
             continue
-        drawing, qty, price, unit, amount = n.groups()
+        if line_no_int % 10 != 0:
+            continue
+        row_starts.append((i, m))
+
+    for pos, (line_index, m) in enumerate(row_starts):
+        line_no, material, desc = m.groups()
+        next_index = row_starts[pos + 1][0] if pos + 1 < len(row_starts) else len(lines)
+        block_lines = lines[line_index + 1 : next_index]
+        metric = _parse_sap_srm_metric_block(block_lines)
+        if not metric:
+            continue
         rows.append(
             {
                 "line_no": line_no,
                 "inventory_code": material,
                 "name": desc.strip(),
-                "drawing_number": drawing,
-                "quantity": qty,
-                "unit_price_excl_tax": price,
-                "unit": unit or "",
-                "line_amount_excl_tax": amount,
+                **metric,
             }
         )
     return rows

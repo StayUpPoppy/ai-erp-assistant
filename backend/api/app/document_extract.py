@@ -109,7 +109,7 @@ def _ocr_pdf_pages_supplement(raw: bytes, file_name: str = "") -> Tuple[str, int
         return "", 0
 
     try:
-        max_pages = int(os.getenv("PDF_OCR_MAX_PAGES", "3").strip() or "3")
+        max_pages = int(os.getenv("PDF_OCR_MAX_PAGES", "5").strip() or "5")
     except ValueError:
         max_pages = 3
     max_pages = max(1, min(max_pages, 20))

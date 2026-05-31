@@ -51,6 +51,14 @@ Start order:
 docker compose -f backend/infra/docker-compose.yml up -d
 ```
 
+## 关闭环境
+
+停止 API / worker 进程后执行：
+
+```powershell
+docker compose -f backend/infra/docker-compose.yml down
+```
+
 This starts Redis/Postgres/MinIO for local development.
 
 ### 2. Start API
