@@ -116,6 +116,32 @@ def test_upload_route_reuses_completed_ingestion_without_enqueue(monkeypatch):
     assert enqueue_calls == [first.ingestion_id]
 
 
+def test_upload_route_resets_canceled_ingestion_and_enqueues(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    enqueue_calls: list[str] = []
+    monkeypatch.setattr("app.routes.enqueue_ingestion_job", lambda ingestion_id: enqueue_calls.append(ingestion_id) or True)
+
+    first = upload(_payload("hash-upload-reuse-canceled"), _build_request())
+    ingestion = get_ingestion(first.ingestion_id)
+    assert ingestion is not None
+    ingestion.status = IngestionStatus.CANCELED
+    ingestion.error_code = "INGESTION_CANCELED"
+    ingestion.error_details = {"reason": "cleared by user"}
+    store.ingestions[ingestion.ingestion_id] = ingestion
+
+    second = upload(_payload("hash-upload-reuse-canceled"), _build_request())
+    reset = get_ingestion(second.ingestion_id)
+
+    assert second.ingestion_id == first.ingestion_id
+    assert second.status == IngestionStatus.UPLOADED
+    assert reset is not None
+    assert reset.status == IngestionStatus.UPLOADED
+    assert reset.error_code is None
+    assert reset.error_details == {}
+    assert enqueue_calls == [first.ingestion_id, first.ingestion_id]
+
+
 def test_upload_route_force_reprocess_resets_and_enqueues(monkeypatch):
     os.environ.pop("DATABASE_URL", None)
     _reset_in_memory_store()
