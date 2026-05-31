@@ -32,6 +32,7 @@ import { precheckUploadFile, SUPPORTED_UPLOAD_EXTENSIONS } from "@/lib/upload-po
 import type { AuditEvent, HealthResponse, IngestionResponse, IngestionStatus, OrderPreviewData, ToolUi } from "@/lib/types";
 
 type ChatRole = "user" | "assistant" | "system";
+type WorkspaceMode = "pdf_to_erp" | "assistant";
 
 interface ChatMessage {
   id: string;
@@ -521,6 +522,7 @@ export default function HomePage() {
   const [chatInput, setChatInput] = useState("");
   const [isChatSending, setIsChatSending] = useState(false);
   const [isLlmProbeRunning, setIsLlmProbeRunning] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("pdf_to_erp");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatSessions, setChatSessions] = useState<ChatSessionMeta[]>([]);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
@@ -918,6 +920,34 @@ export default function HomePage() {
     activateAssistantSession(sid);
   }, [activateAssistantSession]);
 
+  const onClearCurrentPage = useCallback(async () => {
+    const currentIngestionId = ingestionIdRef.current;
+    const currentStatus =
+      displayIngestionStatus(ingestion, clientDraftStateRef.current) ?? ingestion?.status ?? lastStatusRef.current;
+    if (currentIngestionId && shouldCancelTaskOnSessionDelete(currentStatus)) {
+      try {
+        await postCancelIngestion(currentIngestionId);
+      } catch (e) {
+        clientLogger.warn("清除页面时取消当前 PDF 任务失败", e);
+      }
+    }
+    pendingReprocessUploadsRef.current = {};
+    setChatInput("");
+    setChatMessages([]);
+    resetCurrentTaskState();
+    const sid = createAssistantSessionId();
+    const meta = createSessionMeta(sid);
+    assistantSessionIdRef.current = sid;
+    setAssistantSessionId(sid);
+    setChatSessions([meta]);
+    try {
+      localStorage.setItem(ASSISTANT_SESSION_LS_KEY, sid);
+      localStorage.setItem(ASSISTANT_SESSIONS_LS_KEY, JSON.stringify([meta]));
+    } catch {
+      /* quota / private mode */
+    }
+  }, [ingestion, resetCurrentTaskState]);
+
   const onSelectChatSession = useCallback(
     (sid: string) => {
       if (!sid || sid === assistantSessionIdRef.current) return;
@@ -1216,13 +1246,17 @@ export default function HomePage() {
     };
   }, [ingestionId, ingestionPollNonce, appendChat]);
   const chatInputPlaceholder = useMemo(() => {
-    if (ingestionId) return "继续对话：查进度、补字段、确认上传，或问 ERP 数据。Enter 发送，Shift+Enter 换行";
-    return "直接说需求：查供应商华为、查物料 M001、上传 PDF 转 ERP，或普通聊天。";
-  }, [ingestionId]);
+    if (workspaceMode === "pdf_to_erp") return "PDF 转 ERP 模式只支持上传 PDF，不支持文字对话。";
+    return "可普通对话，也可查询 ERP 库存、供应商、物料等信息。Enter 发送，Shift+Enter 换行";
+  }, [workspaceMode]);
 
   const onSendChat = useCallback(async () => {
     const text = chatInput.trim();
     if (!text || isChatSending) return;
+    if (workspaceMode === "pdf_to_erp") {
+      appendChat("system", "PDF 转 ERP 模式只支持上传 PDF。请切换到「普通对话 / ERP 查询」后再发送文字。");
+      return;
+    }
     appendChat("user", text);
     setChatInput("");
     setIsChatSending(true);
@@ -1244,7 +1278,7 @@ export default function HomePage() {
         message: text,
         org_id: orgId,
         user_id: userId,
-        active_task_id: ingestionId,
+        active_task_id: workspaceMode === "assistant" ? null : ingestionId,
       }, (event) => {
         if (event.event === "session") {
           const sid = event.data.session_id;
@@ -1317,7 +1351,7 @@ export default function HomePage() {
     } finally {
       setIsChatSending(false);
     }
-  }, [appendChat, appendToolResponse, chatInput, getAssistantSessionId, ingestionId, isChatSending, orgId, userId]);
+  }, [appendChat, appendToolResponse, chatInput, getAssistantSessionId, ingestionId, isChatSending, orgId, userId, workspaceMode]);
 
   const onProbeLlmRouter = useCallback(async () => {
     if (isLlmProbeRunning) return;
@@ -1409,6 +1443,10 @@ export default function HomePage() {
   const handleFiles = useCallback(
     async (files: FileList | null) => {
       if (!files || files.length === 0) return;
+      if (workspaceMode !== "pdf_to_erp") {
+        appendChat("system", "当前是普通对话 / ERP 查询模式。请先切换到「PDF 转 ERP」再上传 PDF。");
+        return;
+      }
       const list = Array.from(files).slice(0, 8);
 
       shouldAutoScrollRef.current = true;
@@ -1505,7 +1543,7 @@ export default function HomePage() {
         setIsUploading(false);
       }
     },
-    [appendChat, appendToolResponse, extractionProfileId, getAssistantSessionId, ingestionHistory, orgId, userId],
+    [appendChat, appendToolResponse, extractionProfileId, getAssistantSessionId, ingestionHistory, orgId, userId, workspaceMode],
   );
 
   const onDrop = useCallback(
@@ -2162,12 +2200,38 @@ export default function HomePage() {
               </label>
             </div>
           </details>
+          <div className="flex items-center gap-1 xl:hidden">
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode("pdf_to_erp")}
+              className={[
+                "rounded-lg px-2.5 py-2 text-xs font-medium",
+                workspaceMode === "pdf_to_erp"
+                  ? "bg-slate-900 text-white"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+              ].join(" ")}
+            >
+              PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode("assistant")}
+              className={[
+                "rounded-lg px-2.5 py-2 text-xs font-medium",
+                workspaceMode === "assistant"
+                  ? "bg-slate-900 text-white"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+              ].join(" ")}
+            >
+              对话
+            </button>
+          </div>
           <button
             type="button"
-            onClick={onNewChatSession}
+            onClick={() => void onClearCurrentPage()}
             className="rounded-lg bg-slate-900 px-2.5 py-2 text-xs font-medium text-white hover:bg-slate-800 xl:hidden"
           >
-            新建聊天
+            清除
           </button>
           <button
             type="button"
@@ -2181,132 +2245,46 @@ export default function HomePage() {
 
       <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row overflow-hidden">
         <aside className="hidden h-full w-[18rem] shrink-0 flex-col border-r border-slate-200/90 bg-slate-50 xl:flex">
-          <div className="shrink-0 border-b border-slate-200/80 p-3">
+          <div className="shrink-0 space-y-2 border-b border-slate-200/80 p-3">
             <button
               type="button"
-              onClick={onNewChatSession}
-              className="flex h-10 w-full items-center justify-center rounded-lg bg-slate-900 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+              onClick={() => setWorkspaceMode("pdf_to_erp")}
+              className={[
+                "flex h-11 w-full items-center justify-start rounded-lg px-3 text-sm font-semibold transition",
+                workspaceMode === "pdf_to_erp"
+                  ? "bg-slate-900 text-white shadow-sm"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+              ].join(" ")}
             >
-              新建聊天
+              PDF 转 ERP
+            </button>
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode("assistant")}
+              className={[
+                "flex h-11 w-full items-center justify-start rounded-lg px-3 text-sm font-semibold transition",
+                workspaceMode === "assistant"
+                  ? "bg-slate-900 text-white shadow-sm"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
+              ].join(" ")}
+            >
+              普通对话 / ERP 查询
+            </button>
+            <button
+              type="button"
+              onClick={() => void onClearCurrentPage()}
+              className="flex h-11 w-full items-center justify-start rounded-lg border border-rose-200 bg-white px-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-50"
+            >
+              清除当前页面
             </button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-2">
-            <div className="px-2 pb-2 text-xs font-semibold text-slate-500">历史对话</div>
-            <div className="space-y-1">
-              {chatSessions.map((session) => {
-                const active = session.id === assistantSessionId;
-                const taskLabel = sessionTaskLabel(session.taskType);
-                return (
-                  <div
-                    key={session.id}
-                    role="button"
-                    tabIndex={renamingSessionId === session.id ? -1 : 0}
-                    onClick={() => {
-                      if (renamingSessionId !== session.id) onSelectChatSession(session.id);
-                    }}
-                    onKeyDown={(e) => {
-                      if (renamingSessionId === session.id) return;
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        onSelectChatSession(session.id);
-                      }
-                    }}
-                    className={[
-                      "group flex items-start gap-2 rounded-lg border px-2.5 py-2 transition",
-                      renamingSessionId === session.id ? "" : "cursor-pointer",
-                      active
-                        ? "border-sky-200 bg-white shadow-sm ring-1 ring-sky-100"
-                        : "border-transparent hover:border-slate-200 hover:bg-white/80",
-                    ].join(" ")}
-                  >
-                    <div className="min-w-0 flex-1 text-left">
-                      {renamingSessionId === session.id ? (
-                        <input
-                          value={renameDraft}
-                          autoFocus
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => setRenameDraft(e.target.value)}
-                          onBlur={onCommitRenameSession}
-                          onKeyDown={(e) => {
-                            e.stopPropagation();
-                            if (e.key === "Enter") onCommitRenameSession();
-                            if (e.key === "Escape") onCancelRenameSession();
-                          }}
-                          className="h-7 w-full rounded-md border border-sky-200 bg-white px-2 text-sm font-semibold text-slate-900 outline-none ring-2 ring-sky-100"
-                        />
-                      ) : (
-                        <div
-                          className="block w-full truncate text-left text-sm font-semibold text-slate-900"
-                          title={session.title}
-                        >
-                          {session.title}
-                        </div>
-                      )}
-                      <div className="mt-0.5 line-clamp-2 text-xs leading-snug text-slate-500">
-                        {session.lastMessage}
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400">
-                        <span>
-                          {new Date(session.updatedAt).toLocaleDateString("zh-CN", {
-                            month: "2-digit",
-                            day: "2-digit",
-                          })}
-                        </span>
-                        {taskLabel ? (
-                          <span className="rounded bg-slate-100 px-1.5 py-0.5 font-medium text-slate-600">
-                            {taskLabel}
-                          </span>
-                        ) : null}
-                        {session.taskStatus ? (
-                          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-medium text-sky-700">
-                            {session.taskStatus}
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      title="置顶"
-                      onKeyDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onPinChatSession(session.id);
-                      }}
-                      className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 opacity-0 transition hover:bg-sky-50 hover:text-sky-700 group-hover:opacity-100 focus:opacity-100"
-                    >
-                      顶
-                    </button>
-                    <button
-                      type="button"
-                      title="重命名"
-                      onKeyDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onStartRenameSession(session);
-                      }}
-                      className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 opacity-0 transition hover:bg-slate-100 hover:text-slate-700 group-hover:opacity-100 focus:opacity-100"
-                    >
-                      改
-                    </button>
-                    <button
-                      type="button"
-                      title="删除历史对话"
-                      onKeyDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void onDeleteChatSession(session.id);
-                      }}
-                      className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 opacity-0 transition hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100 focus:opacity-100"
-                    >
-                      ×
-                    </button>
-                  </div>
-                );
-              })}
+          <div className="min-h-0 flex-1 p-3 text-xs leading-5 text-slate-500">
+            <div className="rounded-lg border border-slate-200 bg-white p-3">
+              左侧固定为功能入口，不再展示历史对话列表。
             </div>
           </div>
           <div className="shrink-0 border-t border-slate-200/80 p-3 text-xs text-slate-500">
-            直接在聊天框输入需求，系统会自动选择 PDF 转 ERP、ERP 查询或普通对话。
+            PDF 转 ERP 仅上传文件；普通对话 / ERP 查询可直接输入问题。清除页面会同时取消未完成的 PDF 任务。
           </div>
         </aside>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l border-slate-200/90 bg-white shadow-sm">
@@ -2368,16 +2346,19 @@ export default function HomePage() {
           <div
             className="relative flex min-h-0 flex-1 flex-col"
             onDragEnter={(e) => {
+              if (workspaceMode !== "pdf_to_erp") return;
               e.preventDefault();
               e.stopPropagation();
               dragDepthRef.current += 1;
               if (dragDepthRef.current === 1) setIsDragging(true);
             }}
             onDragOver={(e) => {
+              if (workspaceMode !== "pdf_to_erp") return;
               e.preventDefault();
               e.dataTransfer.dropEffect = "copy";
             }}
             onDragLeave={(e) => {
+              if (workspaceMode !== "pdf_to_erp") return;
               e.preventDefault();
               e.stopPropagation();
               dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
@@ -2399,9 +2380,13 @@ export default function HomePage() {
                 <div className="flex w-full flex-col gap-3">
                   {chatMessages.length === 0 ? (
                     <div className="mx-auto flex min-h-[38vh] w-full max-w-2xl flex-col items-center justify-center text-center">
-                      <div className="text-2xl font-semibold tracking-tight text-slate-900">新聊天</div>
+                      <div className="text-2xl font-semibold tracking-tight text-slate-900">
+                        {workspaceMode === "pdf_to_erp" ? "PDF 转 ERP" : "普通对话 / ERP 查询"}
+                      </div>
                       <p className="mt-3 max-w-xl text-sm leading-6 text-slate-500">
-                        直接输入需求，或点击输入框左侧附件上传 PDF。系统会自动判断普通对话、ERP 查询或 PDF 转 ERP。
+                        {workspaceMode === "pdf_to_erp"
+                          ? "请上传 PDF 文件开始识别和生成 ERP 草稿；此模式不接收文字对话。"
+                          : "可直接输入普通问题，也可以查询 ERP 库存、供应商、物料等业务数据。"}
                       </p>
                     </div>
                   ) : null}
@@ -2961,57 +2946,47 @@ export default function HomePage() {
                   e.target.value = "";
                 }}
               />
-              <div className="flex w-full max-w-none items-end gap-3 py-3">
-                <div className="flex shrink-0 flex-col items-center gap-0.5 self-stretch pt-0.5">
+              {workspaceMode === "pdf_to_erp" ? (
+                <div className="flex w-full max-w-none flex-col items-center gap-2 py-4">
                   <button
                     type="button"
-                    title="上传文件；文件也可拖拽至上方聊天框进行解析"
-                    aria-describedby="composer-attach-drag-hint"
+                    title="上传 PDF 文件；文件也可拖拽至上方区域"
                     disabled={isUploading}
                     onClick={() => fileInputRef.current?.click()}
-                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200/90 bg-white text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700 disabled:opacity-50"
+                    className="inline-flex h-12 items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
-                      <path
-                        d="M21.44 11.05 12.25 20.24a5.98 5.98 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2.5 2.5 0 0 1-3.54-3.54l8.49-8.49"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
+                    {isUploading ? "正在上传..." : "上传 PDF"}
                   </button>
-                  <p
-                    id="composer-attach-drag-hint"
-                    className="max-w-[4.5rem] whitespace-pre-line text-center text-[10px] leading-snug text-slate-400/90 sm:max-w-[5.25rem] sm:text-xs"
-                  >
-                    {"文件可拖拽至\n聊天框解析"}
+                  <p className="w-full px-1 text-center text-sm text-slate-400/90">
+                    {isUploading ? "正在上传，请稍候…" : "也可以将 PDF 拖拽到上方页面区域，单份文件建议不超过约 29MB"}
                   </p>
                 </div>
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      void onSendChat();
-                    }
-                  }}
-                  rows={2}
-                  className="min-h-[3rem] max-h-48 w-full flex-1 resize-y rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-base outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:bg-white focus:ring-2 focus:ring-sky-200/80 disabled:bg-slate-100 disabled:text-slate-500"
-                  placeholder={chatInputPlaceholder}
-                  disabled={isChatSending}
-                />
-                <button
-                  type="button"
-                  disabled={isChatSending}
-                  onClick={() => void onSendChat()}
-                  className="mb-px shrink-0 rounded-2xl bg-slate-900 px-5 py-3 text-base font-semibold text-white shadow-sm transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isChatSending ? "发送中…" : "发送"}
-                </button>
-              </div>
-              <p className="w-full px-1 pb-2 text-center text-sm text-slate-400/90">
-                {isUploading ? "正在上传，请稍候…" : "单份文件建议不超过约 29MB"}
-              </p>
+              ) : (
+                <div className="flex w-full max-w-none items-end gap-3 py-3">
+                  <textarea
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        void onSendChat();
+                      }
+                    }}
+                    rows={2}
+                    className="min-h-[3rem] max-h-48 w-full flex-1 resize-y rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-base outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:bg-white focus:ring-2 focus:ring-sky-200/80 disabled:bg-slate-100 disabled:text-slate-500"
+                    placeholder={chatInputPlaceholder}
+                    disabled={isChatSending}
+                  />
+                  <button
+                    type="button"
+                    disabled={isChatSending}
+                    onClick={() => void onSendChat()}
+                    className="mb-px shrink-0 rounded-2xl bg-slate-900 px-5 py-3 text-base font-semibold text-white shadow-sm transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isChatSending ? "发送中…" : "发送"}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
