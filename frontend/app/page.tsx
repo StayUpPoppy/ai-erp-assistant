@@ -62,6 +62,14 @@ interface IngestionHistoryItem {
   status: string;
 }
 
+interface PendingReprocessUpload {
+  file: File;
+  userId: string;
+  orgId: string;
+  extractionProfileId?: string;
+  sessionId: string;
+}
+
 const INGESTION_HISTORY_SS_KEY = "ai_erp_assistant_ingestion_history_v1";
 const ASSISTANT_SESSION_LS_KEY = "ai_erp_assistant_session_id_v1";
 const ASSISTANT_SESSIONS_LS_KEY = "ai_erp_assistant_sessions_v1";
@@ -557,6 +565,7 @@ export default function HomePage() {
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingReprocessUploadsRef = useRef<Record<string, PendingReprocessUpload>>({});
   const [logOpen, setLogOpen] = useState(false);
 
   const uploadAcceptAttr = useMemo(() => {
@@ -1347,6 +1356,53 @@ export default function HomePage() {
     }
   }, [appendChat, ingestionId, isLlmProbeRunning, orgId, userId]);
 
+  const onCancelReprocessUpload = useCallback((token: string) => {
+    delete pendingReprocessUploadsRef.current[token];
+    appendChat("system", "已保留现有 ERP 草稿记录，没有重新处理该文件。");
+  }, [appendChat]);
+
+  const onConfirmReprocessUpload = useCallback(
+    async (token: string) => {
+      const pending = pendingReprocessUploadsRef.current[token];
+      if (!pending) {
+        appendChat("system", "这条重新处理请求已失效，请重新上传文件。");
+        return;
+      }
+      delete pendingReprocessUploadsRef.current[token];
+      setIsUploading(true);
+      try {
+        const uploadRes = await postAssistantFile(
+          pending.file,
+          pending.userId,
+          pending.orgId,
+          pending.extractionProfileId,
+          pending.sessionId,
+          true,
+        );
+        appendToolResponse(uploadRes);
+        const resp = uploadRes.tool_result?.ingestion;
+        if (!resp) {
+          appendChat("system", `${pending.file.name} 重新处理请求没有返回任务信息，请稍后重试。`);
+          return;
+        }
+        previewDirtyRef.current = false;
+        setIngestionId(resp.ingestion_id);
+        setPreviewDraft(null);
+        ingestionIdRef.current = resp.ingestion_id;
+        delete clientDraftStateRef.current[resp.ingestion_id];
+        lastStatusRef.current = resp.status;
+        lastIngestionFileNameRef.current = pending.file.name;
+        clientLogger.info("重新处理任务已创建", resp);
+      } catch (e) {
+        clientLogger.error("重新处理上传失败", e);
+        appendChat("system", "重新处理没有成功：请检查后端服务和队列是否正常后再试。");
+      } finally {
+        setIsUploading(false);
+      }
+    },
+    [appendChat, appendToolResponse],
+  );
+
   const handleFiles = useCallback(
     async (files: FileList | null) => {
       if (!files || files.length === 0) return;
@@ -1393,27 +1449,29 @@ export default function HomePage() {
             continue;
           }
           if (resp.status === "DRAFT_CREATED") {
-            const ok = window.confirm(
-              `该文件已经上传过 ERP${resp.draft_no ? `（草稿号：${resp.draft_no}）` : ""}。是否确认重新处理？`,
-            );
-            if (!ok) {
-              appendToolResponse(uploadRes);
-              appendChat("system", "已保留现有 ERP 草稿记录，没有重新处理该文件。");
-              continue;
-            }
-            uploadRes = await postAssistantFile(
+            appendToolResponse(uploadRes);
+            const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            pendingReprocessUploadsRef.current[token] = {
               file,
               userId,
               orgId,
-              prof || undefined,
-              getAssistantSessionId(),
-              true,
-            );
-            resp = uploadRes.tool_result?.ingestion;
-            if (!resp) {
-              appendChat("system", `${file.name} 重新处理请求没有返回任务信息，请稍后重试。`);
-              continue;
-            }
+              extractionProfileId: prof || undefined,
+              sessionId: getAssistantSessionId(),
+            };
+            appendChat("assistant", "该文件已经上传过 ERP。请确认是否重新处理。", {
+              toolUi: {
+                type: "reprocess_confirm",
+                data: {
+                  token,
+                  file_name: file.name,
+                  ingestion_id: resp.ingestion_id,
+                  draft_no: resp.draft_no ?? "",
+                  draft_url: resp.draft_url ?? "",
+                },
+              },
+            });
+            uploadSuccessCount += 1;
+            continue;
           }
           appendToolResponse(uploadRes);
           previewDirtyRef.current = false;
@@ -1713,6 +1771,48 @@ export default function HomePage() {
   const renderToolUi = useCallback(
     (ui: ToolUi | null | undefined) => {
       if (!ui) return null;
+      if (ui.type === "reprocess_confirm") {
+        const token = String(ui.data.token ?? "");
+        const fileName = String(ui.data.file_name ?? "");
+        const ingestionIdText = String(ui.data.ingestion_id ?? "");
+        const draftNo = String(ui.data.draft_no ?? "");
+        const draftUrl = String(ui.data.draft_url ?? "");
+        return (
+          <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-sm text-amber-950">
+            <div className="font-semibold">该文件已经上传过 ERP</div>
+            <div className="mt-1 text-amber-900">重新处理会复用该任务编号，清空当前识别状态，并重新进入 PDF 转 ERP 流程。</div>
+            {fileName ? (
+              <div className="mt-2 truncate text-xs text-amber-800" title={fileName}>
+                {fileName}
+              </div>
+            ) : null}
+            {ingestionIdText ? <div className="mt-2 font-mono text-xs text-amber-800">任务编号：{ingestionIdText}</div> : null}
+            {draftNo ? <div className="mt-1 font-mono text-xs text-amber-800">草稿号：{draftNo}</div> : null}
+            {draftUrl ? (
+              <a className="mt-2 inline-block font-medium text-amber-800 underline" href={draftUrl} target="_blank">
+                打开已有草稿
+              </a>
+            ) : null}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void onConfirmReprocessUpload(token)}
+                className="rounded-lg bg-amber-700 px-3 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!token || isUploading}
+              >
+                {isUploading ? "正在提交..." : "重新处理"}
+              </button>
+              <button
+                type="button"
+                onClick={() => onCancelReprocessUpload(token)}
+                className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-50"
+              >
+                保留已有结果
+              </button>
+            </div>
+          </div>
+        );
+      }
       if (ui.type === "missing_fields_form") {
         const cardIngestionId = String(ui.data.ingestion_id ?? "");
         const isCurrentTaskCard = Boolean(cardIngestionId && ingestionId && cardIngestionId === ingestionId);
@@ -2004,9 +2104,12 @@ export default function HomePage() {
       ingestionId,
       isConfirmingPreview,
       isCreatingDraft,
+      isUploading,
       isPreviewDirty,
       isResolving,
+      onCancelReprocessUpload,
       onConfirmPreview,
+      onConfirmReprocessUpload,
       onCreateDraft,
       onPreviewDraftChange,
       onResolve,
