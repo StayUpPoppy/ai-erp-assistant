@@ -66,7 +66,9 @@ const INGESTION_HISTORY_SS_KEY = "ai_erp_assistant_ingestion_history_v1";
 const ASSISTANT_SESSION_LS_KEY = "ai_erp_assistant_session_id_v1";
 const ASSISTANT_SESSIONS_LS_KEY = "ai_erp_assistant_sessions_v1";
 
-const POLL_MS = 2500;
+const POLL_FAST_MS = 1000;
+const POLL_STEADY_MS = 2000;
+const POLL_ERROR_MAX_MS = 5000;
 
 function createAssistantSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -161,6 +163,13 @@ const BACKGROUND_RUNNING_STATUSES = new Set<IngestionStatus>([
 
 function isBackgroundRunningStatus(status: IngestionStatus | null | undefined): boolean {
   return Boolean(status && BACKGROUND_RUNNING_STATUSES.has(status));
+}
+
+function nextIngestionPollDelay(status: IngestionStatus | null | undefined, failureCount = 0): number | null {
+  if (status && TERMINAL_STATUSES.has(status)) return null;
+  if (!isBackgroundRunningStatus(status)) return null;
+  if (failureCount > 0) return Math.min(POLL_ERROR_MAX_MS, POLL_STEADY_MS + failureCount * 1000);
+  return status === "UPLOADED" || status === "CLASSIFIED" ? POLL_FAST_MS : POLL_STEADY_MS;
 }
 
 function shouldCancelTaskOnSessionDelete(status: string | null | undefined): boolean {
@@ -1101,17 +1110,35 @@ export default function HomePage() {
   /** 轮询 ingestion：在终态前持续拉取，便于展示 worker 异步推进效果 */
   useEffect(() => {
     if (!ingestionId) return;
+    let cancelled = false;
+    let failureCount = 0;
+
+    const clearPollTimer = () => {
+      if (pollTimerRef.current) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+
+    const scheduleNextPoll = (status: IngestionStatus | null | undefined, delayFailureCount = 0) => {
+      clearPollTimer();
+      if (cancelled) return;
+      const delay = nextIngestionPollDelay(status, delayFailureCount);
+      if (delay == null) return;
+      pollTimerRef.current = window.setTimeout(() => void tick(), delay);
+    };
 
     const tick = async () => {
       try {
         const data = await getIngestion(ingestionId);
         if (data.ingestion_id !== ingestionIdRef.current) {
-          clientLogger.warn("忽略旧任务轮询回包", {
+          clientLogger.warn("ignore stale ingestion poll response", {
             responseIngestionId: data.ingestion_id,
             currentIngestionId: ingestionIdRef.current,
           });
           return;
         }
+        failureCount = 0;
         const displayData = applyClientDraftState(data, clientDraftStateRef.current);
         setIngestion(displayData);
         const polledName = data.file?.source_file_name;
@@ -1120,7 +1147,7 @@ export default function HomePage() {
         const displayStatus = displayIngestionStatus(displayData, clientDraftStateRef.current) ?? data.status;
         setChatMessages((prev) => updatePdfToErpProgressCards(prev, displayData, displayStatus));
         if (lastStatusRef.current !== displayStatus) {
-          clientLogger.info("ingestion 状态变化", {
+          clientLogger.info("ingestion status changed", {
             from: lastStatusRef.current,
             to: displayStatus,
             ingestionId,
@@ -1147,15 +1174,15 @@ export default function HomePage() {
           }
         }
 
-        if (TERMINAL_STATUSES.has(displayStatus)) {
-          if (pollTimerRef.current) {
-            window.clearInterval(pollTimerRef.current);
-            pollTimerRef.current = null;
-          }
-          clientLogger.info("停止轮询（已达终态）", { status: displayStatus, ingestionId });
+        if (nextIngestionPollDelay(displayStatus) == null) {
+          clearPollTimer();
+          clientLogger.info("stop ingestion polling", { status: displayStatus, ingestionId });
+          return;
         }
+        scheduleNextPoll(displayStatus);
       } catch (e) {
-        clientLogger.error("轮询 ingestion 失败", e);
+        failureCount += 1;
+        clientLogger.error("poll ingestion failed", e);
         const st =
           typeof e === "object" && e !== null && "status" in e
             ? (e as { status?: number }).status
@@ -1164,23 +1191,20 @@ export default function HomePage() {
           poll404WarnedRef.current = true;
           appendChat(
             "system",
-            "找不到这条解析任务（服务可能刚重启过）。请**重新上传**文件；若经常发生，请联系管理员配置任务持久化。",
+            "找不到这条解析任务（服务可能刚重启过）。请重新上传文件；若经常发生，请联系管理员配置任务持久化。",
           );
         }
+        scheduleNextPoll(lastStatusRef.current, failureCount);
       }
     };
 
     void tick();
-    pollTimerRef.current = window.setInterval(() => void tick(), POLL_MS);
 
     return () => {
-      if (pollTimerRef.current) {
-        window.clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
+      cancelled = true;
+      clearPollTimer();
     };
   }, [ingestionId, appendChat]);
-
   const chatInputPlaceholder = useMemo(() => {
     if (ingestionId) return "继续对话：查进度、补字段、确认上传，或问 ERP 数据。Enter 发送，Shift+Enter 换行";
     return "直接说需求：查供应商华为、查物料 M001、上传 PDF 转 ERP，或普通聊天。";
@@ -1515,9 +1539,7 @@ export default function HomePage() {
   const onCreateDraft = useCallback(async () => {
     if (!ingestionId) return;
     if (isCreatingDraft) return;
-    const hasDirtyPreview = previewDraft
-      ? JSON.stringify(previewDraft) !== JSON.stringify(ingestion?.preview_data ?? null)
-      : false;
+    const hasDirtyPreview = Boolean(previewDraft && previewDirtyRef.current);
     if (previewDraft && hasDirtyPreview) {
       appendChat("system", "订单预览有未确认的修改，请先确认预览后再上传 ERP。");
       return;
@@ -1557,18 +1579,9 @@ export default function HomePage() {
       setIngestion((prev) => (prev ? mergeDraftCreatedState(prev, data) : prev));
       lastStatusRef.current = "DRAFT_CREATED";
       if (pollTimerRef.current) {
-        window.clearInterval(pollTimerRef.current);
+        window.clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
       }
-      const refreshed = await getIngestion(ingestionId);
-      if (refreshed.ingestion_id !== ingestionIdRef.current) {
-        clientLogger.warn("忽略旧任务创建草稿刷新回包", {
-          responseIngestionId: refreshed.ingestion_id,
-          currentIngestionId: ingestionIdRef.current,
-        });
-        return;
-      }
-      setIngestion(mergeDraftCreatedState(refreshed, data));
     } catch (e) {
       clientLogger.error("create-draft 失败", e);
       appendChat("system", "草稿没生成出来：请先按下方提示补全必填项，等进度显示可以生成草稿后再点按钮。");
@@ -1671,9 +1684,8 @@ export default function HomePage() {
 
   const hasOrderPreview = Boolean(previewDraft);
   const isPreviewDirty = useMemo(() => {
-    if (!previewDraft) return false;
-    return JSON.stringify(previewDraft) !== JSON.stringify(ingestion?.preview_data ?? null);
-  }, [ingestion?.preview_data, previewDraft]);
+    return Boolean(previewDraft && previewDirtyRef.current);
+  }, [previewDraft]);
 
   const renderToolUi = useCallback(
     (ui: ToolUi | null | undefined) => {
@@ -2904,3 +2916,4 @@ export default function HomePage() {
     </div>
   );
 }
+
