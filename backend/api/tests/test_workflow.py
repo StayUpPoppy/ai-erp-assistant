@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -125,3 +126,52 @@ def test_node_map_continues_when_erp_search_raises():
     _node_map(state)
     assert ing.vendor_candidates == []
     assert len(ing.material_candidates) >= 1
+
+
+def test_node_map_runs_erp_searches_concurrently():
+    from app.erp_client import MockErpClient
+    from app.workflow import WorkflowState, _node_map
+
+    class Slow(MockErpClient):
+        def _wait(self, value):
+            time.sleep(0.2)
+            return [value]
+
+        def search_vendors(self, org_id: str, keyword: str):
+            return self._wait({"vendor_code": "V001"})
+
+        def search_materials(self, org_id: str, keyword: str):
+            return self._wait({"material_code": "M001"})
+
+        def search_warehouses(self, org_id: str, keyword: str):
+            return self._wait({"warehouse_code": "WH01"})
+
+        def search_tax_codes(self, org_id: str, keyword: str):
+            return self._wait({"tax_code": "T13"})
+
+    ing = _new_ingestion()
+    ing.status = IngestionStatus.EXTRACTED
+
+    def append(ingestion: IngestionResponse, status: IngestionStatus, message: str) -> None:
+        ingestion.status = status
+        ingestion.audit_events.append(
+            AuditEvent(at=datetime.utcnow().isoformat() + "Z", status=status, message=message),
+        )
+
+    state: WorkflowState = {
+        "ingestion": ing,
+        "erp": Slow(),
+        "append_event": append,
+        "mapping_metrics": {},
+        "document_text": "some vendor text",
+    }
+
+    started = time.perf_counter()
+    _node_map(state)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.55
+    assert ing.vendor_candidates == [{"vendor_code": "V001"}]
+    assert ing.material_candidates == [{"material_code": "M001"}]
+    assert ing.warehouse_candidates == [{"warehouse_code": "WH01"}]
+    assert ing.tax_code_candidates == [{"tax_code": "T13"}]

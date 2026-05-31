@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from time import perf_counter, sleep
-from typing import Callable, Dict, List, Literal, TypedDict
+from typing import Callable, Dict, List, Literal, Tuple, TypedDict
 
 try:
     from langgraph.graph import END, StateGraph
@@ -385,10 +386,10 @@ def _node_map(state: WorkflowState) -> WorkflowState:
         t_kw = snippet if snippet else "tax"
         erp = state["erp"]
 
-        def _safe_list(fn, *args: object) -> List[Dict[str, str]]:
+        def _safe_list(name: str, fn, *args: object) -> Tuple[str, List[Dict[str, str]]]:
             try:
                 out = fn(*args)
-                return list(out) if out else []
+                return name, list(out) if out else []
             except Exception as exc:
                 # 与 ErpClientError 鸭子类型兼容（避免测试 importlib.reload 后出现类身份不一致）
                 if getattr(exc, "code", None) is None:
@@ -400,12 +401,29 @@ def _node_map(state: WorkflowState) -> WorkflowState:
                     getattr(exc, "code", ""),
                     getattr(exc, "status_code", 0),
                 )
-                return []
+                return name, []
 
-        vendor_candidates = _safe_list(erp.search_vendors, ing.org_id, v_kw)[:50]
-        material_candidates = _safe_list(erp.search_materials, ing.org_id, m_kw)[:50]
-        warehouse_candidates = _safe_list(erp.search_warehouses, ing.org_id, w_kw)[:50]
-        tax_code_candidates = _safe_list(erp.search_tax_codes, ing.org_id, t_kw)[:50]
+        calls = {
+            "vendor": (erp.search_vendors, (ing.org_id, v_kw)),
+            "material": (erp.search_materials, (ing.org_id, m_kw)),
+            "warehouse": (erp.search_warehouses, (ing.org_id, w_kw)),
+            "tax_code": (erp.search_tax_codes, (ing.org_id, t_kw)),
+        }
+        results: Dict[str, List[Dict[str, str]]] = {name: [] for name in calls}
+        with ThreadPoolExecutor(max_workers=len(calls), thread_name_prefix="erp-map") as executor:
+            future_to_name = {
+                executor.submit(_safe_list, name, fn, *args): name
+                for name, (fn, args) in calls.items()
+            }
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                result_name, rows = future.result()
+                results[result_name or name] = rows[:50]
+
+        vendor_candidates = results["vendor"]
+        material_candidates = results["material"]
+        warehouse_candidates = results["warehouse"]
+        tax_code_candidates = results["tax_code"]
         ing.vendor_candidates = [dict(x) for x in vendor_candidates]
         ing.material_candidates = [dict(x) for x in material_candidates]
         ing.warehouse_candidates = [dict(x) for x in warehouse_candidates]
