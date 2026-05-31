@@ -71,6 +71,23 @@ interface PendingReprocessUpload {
   sessionId: string;
 }
 
+interface WorkspaceWindowState {
+  chatInput: string;
+  chatMessages: ChatMessage[];
+  assistantSessionId: string | null;
+  ingestion: IngestionResponse | null;
+  ingestionId: string | null;
+  ingestionHistory: IngestionHistoryItem[];
+  resolveFields: Record<string, string>;
+  previewDraft: OrderPreviewData | null;
+  lastStatus: IngestionStatus | null;
+  workflowToolCardKey: string | null;
+  lastIngestionFileName: string | null;
+  previewDirty: boolean;
+  previewIngestionId: string | null;
+  poll404Warned: boolean;
+}
+
 const INGESTION_HISTORY_SS_KEY = "ai_erp_assistant_ingestion_history_v1";
 const ASSISTANT_SESSION_LS_KEY = "ai_erp_assistant_session_id_v1";
 const ASSISTANT_SESSIONS_LS_KEY = "ai_erp_assistant_sessions_v1";
@@ -569,6 +586,10 @@ export default function HomePage() {
   const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pendingReprocessUploadsRef = useRef<Record<string, PendingReprocessUpload>>({});
+  const workspaceWindowsRef = useRef<Record<WorkspaceMode, WorkspaceWindowState | null>>({
+    pdf_to_erp: null,
+    assistant: null,
+  });
   const [logOpen, setLogOpen] = useState(false);
 
   const uploadAcceptAttr = useMemo(() => {
@@ -920,11 +941,84 @@ export default function HomePage() {
     activateAssistantSession(sid);
   }, [activateAssistantSession]);
 
+  const captureWorkspaceWindow = useCallback((): WorkspaceWindowState => {
+    return {
+      chatInput,
+      chatMessages,
+      assistantSessionId: assistantSessionIdRef.current ?? assistantSessionId,
+      ingestion,
+      ingestionId,
+      ingestionHistory,
+      resolveFields,
+      previewDraft,
+      lastStatus: lastStatusRef.current,
+      workflowToolCardKey: workflowToolCardKeyRef.current,
+      lastIngestionFileName: lastIngestionFileNameRef.current,
+      previewDirty: previewDirtyRef.current,
+      previewIngestionId: previewIngestionIdRef.current,
+      poll404Warned: poll404WarnedRef.current,
+    };
+  }, [assistantSessionId, chatInput, chatMessages, ingestion, ingestionHistory, ingestionId, previewDraft, resolveFields]);
+
+  const applyWorkspaceWindow = useCallback((state: WorkspaceWindowState | null, mode: WorkspaceMode) => {
+    const nextState =
+      state ??
+      ({
+        chatInput: "",
+        chatMessages: [],
+        assistantSessionId: createAssistantSessionId(),
+        ingestion: null,
+        ingestionId: null,
+        ingestionHistory: [],
+        resolveFields: {},
+        previewDraft: null,
+        lastStatus: null,
+        workflowToolCardKey: null,
+        lastIngestionFileName: null,
+        previewDirty: false,
+        previewIngestionId: null,
+        poll404Warned: false,
+      } satisfies WorkspaceWindowState);
+
+    setWorkspaceMode(mode);
+    setChatInput(nextState.chatInput);
+    setChatMessages(nextState.chatMessages);
+    assistantSessionIdRef.current = nextState.assistantSessionId;
+    setAssistantSessionId(nextState.assistantSessionId);
+    setIngestion(nextState.ingestion);
+    setIngestionId(nextState.ingestionId);
+    ingestionIdRef.current = nextState.ingestionId;
+    setIngestionHistory(nextState.ingestionHistory);
+    setResolveFields(nextState.resolveFields);
+    setPreviewDraft(nextState.previewDraft);
+    lastStatusRef.current = nextState.lastStatus;
+    workflowToolCardKeyRef.current = nextState.workflowToolCardKey;
+    lastIngestionFileNameRef.current = nextState.lastIngestionFileName;
+    previewDirtyRef.current = nextState.previewDirty;
+    previewIngestionIdRef.current = nextState.previewIngestionId;
+    poll404WarnedRef.current = nextState.poll404Warned;
+    shouldAutoScrollRef.current = true;
+    if (pollTimerRef.current) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    if (nextState.ingestionId) setIngestionPollNonce((n) => n + 1);
+  }, []);
+
+  const onSwitchWorkspaceMode = useCallback(
+    (nextMode: WorkspaceMode) => {
+      if (nextMode === workspaceMode) return;
+      workspaceWindowsRef.current[workspaceMode] = captureWorkspaceWindow();
+      applyWorkspaceWindow(workspaceWindowsRef.current[nextMode], nextMode);
+    },
+    [applyWorkspaceWindow, captureWorkspaceWindow, workspaceMode],
+  );
+
   const onClearCurrentPage = useCallback(async () => {
     const currentIngestionId = ingestionIdRef.current;
     const currentStatus =
       displayIngestionStatus(ingestion, clientDraftStateRef.current) ?? ingestion?.status ?? lastStatusRef.current;
-    if (currentIngestionId && shouldCancelTaskOnSessionDelete(currentStatus)) {
+    if (workspaceMode === "pdf_to_erp" && currentIngestionId && shouldCancelTaskOnSessionDelete(currentStatus)) {
       try {
         await postCancelIngestion(currentIngestionId);
       } catch (e) {
@@ -946,7 +1040,23 @@ export default function HomePage() {
     } catch {
       /* quota / private mode */
     }
-  }, [ingestion, resetCurrentTaskState]);
+    workspaceWindowsRef.current[workspaceMode] = {
+      chatInput: "",
+      chatMessages: [],
+      assistantSessionId: sid,
+      ingestion: null,
+      ingestionId: null,
+      ingestionHistory: [],
+      resolveFields: {},
+      previewDraft: null,
+      lastStatus: null,
+      workflowToolCardKey: null,
+      lastIngestionFileName: null,
+      previewDirty: false,
+      previewIngestionId: null,
+      poll404Warned: false,
+    };
+  }, [ingestion, resetCurrentTaskState, workspaceMode]);
 
   const onSelectChatSession = useCallback(
     (sid: string) => {
@@ -2203,7 +2313,7 @@ export default function HomePage() {
           <div className="flex items-center gap-1 xl:hidden">
             <button
               type="button"
-              onClick={() => setWorkspaceMode("pdf_to_erp")}
+              onClick={() => onSwitchWorkspaceMode("pdf_to_erp")}
               className={[
                 "rounded-lg px-2.5 py-2 text-xs font-medium",
                 workspaceMode === "pdf_to_erp"
@@ -2211,11 +2321,11 @@ export default function HomePage() {
                   : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
               ].join(" ")}
             >
-              PDF
+              PDF窗口
             </button>
             <button
               type="button"
-              onClick={() => setWorkspaceMode("assistant")}
+              onClick={() => onSwitchWorkspaceMode("assistant")}
               className={[
                 "rounded-lg px-2.5 py-2 text-xs font-medium",
                 workspaceMode === "assistant"
@@ -2223,7 +2333,7 @@ export default function HomePage() {
                   : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
               ].join(" ")}
             >
-              对话
+              对话窗口
             </button>
           </div>
           <button
@@ -2248,7 +2358,7 @@ export default function HomePage() {
           <div className="shrink-0 space-y-2 border-b border-slate-200/80 p-3">
             <button
               type="button"
-              onClick={() => setWorkspaceMode("pdf_to_erp")}
+              onClick={() => onSwitchWorkspaceMode("pdf_to_erp")}
               className={[
                 "flex h-11 w-full items-center justify-start rounded-lg px-3 text-sm font-semibold transition",
                 workspaceMode === "pdf_to_erp"
@@ -2256,11 +2366,11 @@ export default function HomePage() {
                   : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
               ].join(" ")}
             >
-              PDF 转 ERP
+              PDF 转 ERP 窗口
             </button>
             <button
               type="button"
-              onClick={() => setWorkspaceMode("assistant")}
+              onClick={() => onSwitchWorkspaceMode("assistant")}
               className={[
                 "flex h-11 w-full items-center justify-start rounded-lg px-3 text-sm font-semibold transition",
                 workspaceMode === "assistant"
@@ -2268,7 +2378,7 @@ export default function HomePage() {
                   : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
               ].join(" ")}
             >
-              普通对话 / ERP 查询
+              普通对话 / ERP 查询窗口
             </button>
             <button
               type="button"
@@ -2280,11 +2390,11 @@ export default function HomePage() {
           </div>
           <div className="min-h-0 flex-1 p-3 text-xs leading-5 text-slate-500">
             <div className="rounded-lg border border-slate-200 bg-white p-3">
-              左侧固定为功能入口，不再展示历史对话列表。
+              每个功能入口都有独立窗口，切换后会恢复该功能自己的内容。
             </div>
           </div>
           <div className="shrink-0 border-t border-slate-200/80 p-3 text-xs text-slate-500">
-            PDF 转 ERP 仅上传文件；普通对话 / ERP 查询可直接输入问题。清除页面会同时取消未完成的 PDF 任务。
+            PDF 转 ERP 窗口仅上传文件；普通对话 / ERP 查询窗口可直接输入问题。清除页面会同时取消当前窗口未完成的 PDF 任务。
           </div>
         </aside>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l border-slate-200/90 bg-white shadow-sm">
@@ -2381,7 +2491,7 @@ export default function HomePage() {
                   {chatMessages.length === 0 ? (
                     <div className="mx-auto flex min-h-[38vh] w-full max-w-2xl flex-col items-center justify-center text-center">
                       <div className="text-2xl font-semibold tracking-tight text-slate-900">
-                        {workspaceMode === "pdf_to_erp" ? "PDF 转 ERP" : "普通对话 / ERP 查询"}
+                        {workspaceMode === "pdf_to_erp" ? "PDF 转 ERP 窗口" : "普通对话 / ERP 查询窗口"}
                       </div>
                       <p className="mt-3 max-w-xl text-sm leading-6 text-slate-500">
                         {workspaceMode === "pdf_to_erp"
