@@ -529,6 +529,7 @@ export default function HomePage() {
   /** 当前 ingestion 详情：由轮询刷新 */
   const [ingestion, setIngestion] = useState<IngestionResponse | null>(null);
   const [ingestionId, setIngestionId] = useState<string | null>(null);
+  const [ingestionPollNonce, setIngestionPollNonce] = useState(0);
   const [ingestionHistory, setIngestionHistory] = useState<IngestionHistoryItem[]>([]);
 
   /** 拖拽上传中的 UX 状态 */
@@ -1213,7 +1214,7 @@ export default function HomePage() {
       cancelled = true;
       clearPollTimer();
     };
-  }, [ingestionId, appendChat]);
+  }, [ingestionId, ingestionPollNonce, appendChat]);
   const chatInputPlaceholder = useMemo(() => {
     if (ingestionId) return "继续对话：查进度、补字段、确认上传，或问 ERP 数据。Enter 发送，Shift+Enter 换行";
     return "直接说需求：查供应商华为、查物料 M001、上传 PDF 转 ERP，或普通聊天。";
@@ -1392,6 +1393,8 @@ export default function HomePage() {
         delete clientDraftStateRef.current[resp.ingestion_id];
         lastStatusRef.current = resp.status;
         lastIngestionFileNameRef.current = pending.file.name;
+        workflowToolCardKeyRef.current = null;
+        setIngestionPollNonce((n) => n + 1);
         clientLogger.info("重新处理任务已创建", resp);
       } catch (e) {
         clientLogger.error("重新处理上传失败", e);
