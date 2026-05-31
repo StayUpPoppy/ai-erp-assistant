@@ -1386,13 +1386,36 @@ export default function HomePage() {
             });
           }
 
-          const uploadRes = await postAssistantFile(file, userId, orgId, prof || undefined, getAssistantSessionId());
-          appendToolResponse(uploadRes);
-          const resp = uploadRes.tool_result?.ingestion;
+          let uploadRes = await postAssistantFile(file, userId, orgId, prof || undefined, getAssistantSessionId());
+          let resp = uploadRes.tool_result?.ingestion;
           if (!resp) {
             appendChat("system", `${file.name} 上传后没有返回任务信息，请稍后重试。`);
             continue;
           }
+          if (resp.status === "DRAFT_CREATED") {
+            const ok = window.confirm(
+              `该文件已经上传过 ERP${resp.draft_no ? `（草稿号：${resp.draft_no}）` : ""}。是否确认重新处理？`,
+            );
+            if (!ok) {
+              appendToolResponse(uploadRes);
+              appendChat("system", "已保留现有 ERP 草稿记录，没有重新处理该文件。");
+              continue;
+            }
+            uploadRes = await postAssistantFile(
+              file,
+              userId,
+              orgId,
+              prof || undefined,
+              getAssistantSessionId(),
+              true,
+            );
+            resp = uploadRes.tool_result?.ingestion;
+            if (!resp) {
+              appendChat("system", `${file.name} 重新处理请求没有返回任务信息，请稍后重试。`);
+              continue;
+            }
+          }
+          appendToolResponse(uploadRes);
           previewDirtyRef.current = false;
           setIngestionId(resp.ingestion_id);
           setPreviewDraft(null);

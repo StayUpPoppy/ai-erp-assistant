@@ -107,6 +107,7 @@ class UploadRequest(BaseModel):
     source_file_object_key: Optional[str] = None
     # 解析档案 id（backend/config/extraction_profiles/{id}.json）；为空则按 org_id / default.json 自动解析。
     extraction_profile_id: Optional[str] = None
+    force_reprocess: bool = False
     extract_version: str = "v0"
     model_version: str = "mock-llm-v1"
     prompt_version: str = "prompt-v1"
@@ -128,6 +129,7 @@ class CreateIngestionRequest(BaseModel):
     source_file_name: Optional[str] = None
     doc_type_hint: Optional[DocType] = None
     extraction_profile_id: Optional[str] = None
+    force_reprocess: bool = False
     extract_version: str = "v0"
     model_version: str = "mock-llm-v1"
     prompt_version: str = "prompt-v1"

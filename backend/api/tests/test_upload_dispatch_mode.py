@@ -90,3 +90,55 @@ def test_upload_route_can_inline_fallback_when_explicitly_enabled(monkeypatch):
     assert ingestion is not None
     assert called["count"] == 1
     assert any("falling back to inline processing" in event.message for event in ingestion.audit_events)
+
+
+def test_upload_route_reuses_completed_ingestion_without_enqueue(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    enqueue_calls: list[str] = []
+    monkeypatch.setattr("app.routes.enqueue_ingestion_job", lambda ingestion_id: enqueue_calls.append(ingestion_id) or True)
+
+    first = upload(_payload("hash-upload-reuse-complete"), _build_request())
+    ingestion = get_ingestion(first.ingestion_id)
+    assert ingestion is not None
+    ingestion.status = IngestionStatus.DRAFT_CREATED
+    ingestion.draft_no = "DRAFT-1"
+    store.ingestions[ingestion.ingestion_id] = ingestion
+
+    second = upload(_payload("hash-upload-reuse-complete"), _build_request())
+    reused = get_ingestion(second.ingestion_id)
+
+    assert second.ingestion_id == first.ingestion_id
+    assert second.status == IngestionStatus.DRAFT_CREATED
+    assert reused is not None
+    assert reused.status == IngestionStatus.DRAFT_CREATED
+    assert reused.draft_no == "DRAFT-1"
+    assert enqueue_calls == [first.ingestion_id]
+
+
+def test_upload_route_force_reprocess_resets_and_enqueues(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    enqueued: list[str] = []
+    monkeypatch.setattr("app.routes.enqueue_ingestion_job", lambda ingestion_id: enqueued.append(ingestion_id) or True)
+
+    first = upload(_payload("hash-upload-force-reprocess"), _build_request())
+    ingestion = get_ingestion(first.ingestion_id)
+    assert ingestion is not None
+    ingestion.status = IngestionStatus.DRAFT_CREATED
+    ingestion.draft_no = "DRAFT-OLD"
+    ingestion.resolved_fields = {"line_items_json": "[{}]"}
+    store.ingestions[ingestion.ingestion_id] = ingestion
+
+    payload = _payload("hash-upload-force-reprocess")
+    payload.force_reprocess = True
+    second = upload(payload, _build_request())
+    reset = get_ingestion(second.ingestion_id)
+
+    assert second.ingestion_id == first.ingestion_id
+    assert second.status == IngestionStatus.UPLOADED
+    assert reset is not None
+    assert reset.status == IngestionStatus.UPLOADED
+    assert reset.draft_no is None
+    assert reset.resolved_fields == {}
+    assert enqueued[-1] == first.ingestion_id

@@ -233,6 +233,14 @@ def health() -> HealthResponse:
 _MAX_UPLOAD_BYTES = 30 * 1024 * 1024
 
 
+def _form_bool(value: Any) -> bool:
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def _create_ingestion_from_upload_file(
     *,
     request: Request,
@@ -240,6 +248,7 @@ async def _create_ingestion_from_upload_file(
     user_id: str,
     org_id: str,
     extraction_profile_id: Optional[str],
+    force_reprocess: bool = False,
     log_event: str,
 ) -> IngestionResponse:
     raw = await file.read()
@@ -263,9 +272,11 @@ async def _create_ingestion_from_upload_file(
         org_id=org_id,
         source_file_object_key=object_key,
         extraction_profile_id=prof,
+        force_reprocess=_form_bool(force_reprocess),
     )
     ingestion = create_upload(payload)
-    enqueued = enqueue_ingestion_job(ingestion.ingestion_id)
+    should_dispatch = ingestion.status == IngestionStatus.UPLOADED
+    enqueued = enqueue_ingestion_job(ingestion.ingestion_id) if should_dispatch else False
     request_id = getattr(request.state, "request_id", "n/a")
     logger.info(
         "%s request_id=%s org_id=%s user_id=%s ingestion_id=%s file_id=%s bytes=%s hash_prefix=%s object_key=%s",
@@ -279,6 +290,14 @@ async def _create_ingestion_from_upload_file(
         file_hash[:12],
         object_key or "none",
     )
+    if not should_dispatch:
+        logger.info(
+            "upload_reused_existing_ingestion request_id=%s ingestion_id=%s status=%s",
+            request_id,
+            ingestion.ingestion_id,
+            ingestion.status,
+        )
+        return ingestion
     if not enqueued:
         logger.warning("enqueue_failed request_id=%s ingestion_id=%s", request_id, ingestion.ingestion_id)
     _handle_queue_dispatch_outcome(ingestion.ingestion_id, enqueued, request_id)
@@ -291,7 +310,8 @@ def upload(payload: UploadRequest, request: Request) -> UploadResponse:
     # 这里不做耗时解析，只做快速入库与入队，保证前端得到即时响应，
     # 后续解析/抽取/映射由 worker 异步处理，符合解耦和可扩展原则。
     ingestion = create_upload(payload)
-    enqueued = enqueue_ingestion_job(ingestion.ingestion_id)
+    should_dispatch = ingestion.status == IngestionStatus.UPLOADED
+    enqueued = enqueue_ingestion_job(ingestion.ingestion_id) if should_dispatch else False
     request_id = getattr(request.state, "request_id", "n/a")
     logger.info(
         "upload_created request_id=%s org_id=%s user_id=%s ingestion_id=%s file_id=%s",
@@ -301,9 +321,17 @@ def upload(payload: UploadRequest, request: Request) -> UploadResponse:
         ingestion.ingestion_id,
         ingestion.file_id,
     )
-    if not enqueued:
+    if not should_dispatch:
+        logger.info(
+            "upload_reused_existing_ingestion request_id=%s ingestion_id=%s status=%s",
+            request_id,
+            ingestion.ingestion_id,
+            ingestion.status,
+        )
+    elif not enqueued:
         logger.warning("enqueue_failed request_id=%s ingestion_id=%s", request_id, ingestion.ingestion_id)
-    _handle_queue_dispatch_outcome(ingestion.ingestion_id, enqueued, request_id)
+    if should_dispatch:
+        _handle_queue_dispatch_outcome(ingestion.ingestion_id, enqueued, request_id)
     return UploadResponse(
         file_id=ingestion.file_id,
         ingestion_id=ingestion.ingestion_id,
@@ -321,6 +349,7 @@ async def upload_binary(
         default=None,
         description="可选：解析档案 id（backend/config/extraction_profiles/{id}.json）；空则按 org_id/default 自动选择",
     ),
+    force_reprocess: bool = Form(default=False),
 ) -> UploadResponse:
     """
     二进制 multipart 上传入口。
@@ -339,6 +368,7 @@ async def upload_binary(
         user_id=user_id,
         org_id=org_id,
         extraction_profile_id=extraction_profile_id,
+        force_reprocess=force_reprocess,
         log_event="upload_binary_created",
     )
     return UploadResponse(
@@ -354,7 +384,8 @@ def create_ingestion_route(payload: CreateIngestionRequest, request: Request) ->
     # 例如后续可能接入 ERP 主动推送、批量导入、外部系统 webhook 等。
     # 它与 /uploads 的核心差异是：调用方自己提供 file_id/file_hash 等上下文。
     ingestion = create_ingestion(payload)
-    enqueued = enqueue_ingestion_job(ingestion.ingestion_id)
+    should_dispatch = ingestion.status == IngestionStatus.UPLOADED
+    enqueued = enqueue_ingestion_job(ingestion.ingestion_id) if should_dispatch else False
     request_id = getattr(request.state, "request_id", "n/a")
     logger.info(
         "ingestion_created request_id=%s org_id=%s user_id=%s ingestion_id=%s status=%s",
@@ -364,9 +395,17 @@ def create_ingestion_route(payload: CreateIngestionRequest, request: Request) ->
         ingestion.ingestion_id,
         ingestion.status,
     )
-    if not enqueued:
+    if not should_dispatch:
+        logger.info(
+            "ingestion_reused_existing request_id=%s ingestion_id=%s status=%s",
+            request_id,
+            ingestion.ingestion_id,
+            ingestion.status,
+        )
+    elif not enqueued:
         logger.warning("enqueue_failed request_id=%s ingestion_id=%s", request_id, ingestion.ingestion_id)
-    _handle_queue_dispatch_outcome(ingestion.ingestion_id, enqueued, request_id)
+    if should_dispatch:
+        _handle_queue_dispatch_outcome(ingestion.ingestion_id, enqueued, request_id)
     return ingestion
 
 
@@ -463,6 +502,7 @@ async def chat_files_route(
     org_id: str = Form(...),
     session_id: Optional[str] = Form(default=None),
     extraction_profile_id: Optional[str] = Form(default=None),
+    force_reprocess: bool = Form(default=False),
 ) -> ChatMessageResponse:
     """对话式文件入口：上传文件后直接返回 pdf_to_erp 工具消息与处理卡片。"""
     ingestion = await _create_ingestion_from_upload_file(
@@ -471,6 +511,7 @@ async def chat_files_route(
         user_id=user_id,
         org_id=org_id,
         extraction_profile_id=extraction_profile_id,
+        force_reprocess=force_reprocess,
         log_event="chat_file_created",
     )
     result = pdf_to_erp_tool.get_status(ingestion.ingestion_id)
@@ -485,14 +526,7 @@ async def chat_files_route(
         messages=[ChatToolMessage(role="assistant", content=result.message)],
         active_task=ChatTaskState(type=result.tool, ingestion_id=result.ingestion_id, status=result.status),
         tool_result=result,
-        ui=ToolUi(
-            type="processing",
-            data={
-                "ingestion_id": ingestion.ingestion_id,
-                "status": result.status,
-                "file_name": ingestion.source_file_name or file.filename or "",
-            },
-        ),
+        ui=result.ui,
     )
     return append_response(sid, response)
 
@@ -621,6 +655,7 @@ async def assistant_files_route(
     org_id: str = Form(...),
     session_id: Optional[str] = Form(default=None),
     extraction_profile_id: Optional[str] = Form(default=None),
+    force_reprocess: bool = Form(default=False),
 ) -> ChatMessageResponse:
     """Unified assistant file entrypoint. Files currently route to pdf_to_erp."""
     ingestion = await _create_ingestion_from_upload_file(
@@ -629,6 +664,7 @@ async def assistant_files_route(
         user_id=user_id,
         org_id=org_id,
         extraction_profile_id=extraction_profile_id,
+        force_reprocess=force_reprocess,
         log_event="assistant_file_created",
     )
     result = pdf_to_erp_tool.get_status(ingestion.ingestion_id)
@@ -642,14 +678,7 @@ async def assistant_files_route(
         messages=[ChatToolMessage(role="assistant", content=result.message)],
         active_task=ChatTaskState(type=result.tool, ingestion_id=result.ingestion_id, status=result.status),
         tool_result=result,
-        ui=ToolUi(
-            type="processing",
-            data={
-                "ingestion_id": ingestion.ingestion_id,
-                "status": result.status,
-                "file_name": ingestion.source_file_name or file.filename or "",
-            },
-        ),
+        ui=result.ui,
     )
     return append_response(sid, response)
 

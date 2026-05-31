@@ -439,6 +439,7 @@ export async function postAssistantFile(
   orgId: string,
   extractionProfileId?: string | null,
   sessionId?: string | null,
+  forceReprocess = false,
 ): Promise<ChatMessageResponse> {
   const base = getApiBaseUrl();
   const url = `${base}/assistant/files`;
@@ -451,6 +452,7 @@ export async function postAssistantFile(
   const prof = (extractionProfileId ?? "").trim();
   if (prof) form.append("extraction_profile_id", prof);
   if (sessionId) form.append("session_id", sessionId);
+  if (forceReprocess) form.append("force_reprocess", "true");
 
   clientLogger.info("发起助手文件上传", { requestId, url, fileName: file.name, fileSize: file.size });
   let response: Response;

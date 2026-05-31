@@ -185,6 +185,12 @@ def _new_ingestion_model(payload: CreateIngestionRequest, ingestion_id: str) -> 
     )
 
 
+def _reset_ingestion_for_reprocess(ingestion: IngestionResponse, payload: CreateIngestionRequest) -> IngestionResponse:
+    fresh = _new_ingestion_model(payload, ingestion.ingestion_id)
+    _append_event(fresh, IngestionStatus.UPLOADED, "file reprocess requested by user")
+    return fresh
+
+
 def _db_session():
     """获取一个新的同步 Session；仅在 DATABASE_URL 已配置时可用。"""
     assert SessionLocal is not None
@@ -238,7 +244,16 @@ def create_ingestion(payload: CreateIngestionRequest) -> IngestionResponse:
                 # 使用 file_hash 做去重：数据库层同样以唯一约束保证幂等。
                 existing = ingestion_db.get_by_file_hash(session, payload.file_hash)
                 if existing:
-                    if _merge_upload_payload_into_ingestion(existing, payload):
+                    if payload.force_reprocess:
+                        existing = _reset_ingestion_for_reprocess(existing, payload)
+                        ingestion_db.upsert_ingestion(session, existing)
+                        session.commit()
+                        logger.info(
+                            "create_ingestion_force_reprocess ingestion_id=%s file_hash_prefix=%s",
+                            existing.ingestion_id,
+                            payload.file_hash[:12],
+                        )
+                    elif _merge_upload_payload_into_ingestion(existing, payload):
                         ingestion_db.upsert_ingestion(session, existing)
                         session.commit()
                         logger.info(
@@ -271,7 +286,15 @@ def create_ingestion(payload: CreateIngestionRequest) -> IngestionResponse:
         existing_id = store.file_hash_to_ingestion.get(payload.file_hash)
         if existing_id:
             existing = store.ingestions[existing_id]
-            if _merge_upload_payload_into_ingestion(existing, payload):
+            if payload.force_reprocess:
+                existing = _reset_ingestion_for_reprocess(existing, payload)
+                store.ingestions[existing_id] = existing
+                logger.info(
+                    "create_ingestion_force_reprocess ingestion_id=%s file_hash_prefix=%s",
+                    existing.ingestion_id,
+                    payload.file_hash[:12],
+                )
+            elif _merge_upload_payload_into_ingestion(existing, payload):
                 logger.info(
                     "create_ingestion_idempotent_storage_merged ingestion_id=%s file_hash_prefix=%s",
                     existing.ingestion_id,
@@ -304,6 +327,7 @@ def create_upload(payload: UploadRequest) -> IngestionResponse:
         source_file_object_key=payload.source_file_object_key,
         source_file_name=payload.file_name,
         extraction_profile_id=payload.extraction_profile_id,
+        force_reprocess=payload.force_reprocess,
         extract_version=payload.extract_version,
         model_version=payload.model_version,
         prompt_version=payload.prompt_version,
