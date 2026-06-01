@@ -2270,9 +2270,9 @@ export default function HomePage() {
   );
 
   return (
-    <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-[#f4f5f7] text-slate-900">
-      <header className="z-30 flex h-14 shrink-0 items-center gap-2 border-b border-slate-200/90 bg-white/95 px-3 backdrop-blur-md md:h-[3.75rem] md:gap-3 md:px-5">
-        <h1 className="shrink-0 text-base font-semibold tracking-tight text-slate-900 md:text-lg">ERP 助手</h1>
+    <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-[#f5f6f8] text-slate-900">
+      <header className="z-30 flex h-14 shrink-0 items-center gap-2 border-b border-slate-200 bg-[#f5f6f8] px-4 md:h-[3.75rem] md:gap-3 md:px-6">
+        <h1 className="shrink-0 text-xl font-semibold tracking-tight text-slate-950">ERP 工作台</h1>
         <div className="hidden min-w-0 flex-1 truncate font-mono text-xs text-slate-400 md:block" title={getApiBaseUrl()}>
           {getApiBaseUrl()}
         </div>
@@ -2294,7 +2294,7 @@ export default function HomePage() {
             />
           </label>
           <details className="relative">
-            <summary className="cursor-pointer list-none rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
+            <summary className="cursor-pointer list-none rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
               高级
             </summary>
             <div className="absolute right-0 z-40 mt-1 w-64 rounded-xl border border-slate-200 bg-white p-3 shadow-lg ring-1 ring-slate-900/5">
@@ -2338,67 +2338,58 @@ export default function HomePage() {
           </div>
           <button
             type="button"
-            onClick={() => void onClearCurrentPage()}
-            className="rounded-lg bg-slate-900 px-2.5 py-2 text-xs font-medium text-white hover:bg-slate-800 xl:hidden"
-          >
-            清除
-          </button>
-          <button
-            type="button"
             onClick={() => setLogOpen((v) => !v)}
-            className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
           >
             {logOpen ? "收起日志" : "运行日志"}
           </button>
         </div>
       </header>
 
-      <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row overflow-hidden">
-        <aside className="hidden h-full w-[18rem] shrink-0 flex-col border-r border-slate-200/90 bg-slate-50 xl:flex">
-          <div className="shrink-0 space-y-2 border-b border-slate-200/80 p-3">
+      <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row gap-4 overflow-hidden px-4 pb-4 md:px-6">
+        <aside className="hidden h-full w-[18rem] shrink-0 flex-col rounded-lg border border-slate-200 bg-white shadow-sm xl:flex">
+          <div className="shrink-0 border-b border-slate-100 px-4 py-4">
+            <div className="mb-4 flex items-center justify-between">
+              <div className="text-base font-semibold text-slate-950">功能窗口</div>
+            </div>
+            <div className="space-y-2">
             <button
               type="button"
               onClick={() => onSwitchWorkspaceMode("pdf_to_erp")}
               className={[
-                "flex h-11 w-full items-center justify-start rounded-lg px-3 text-sm font-semibold transition",
+                "flex h-10 w-full items-center justify-start rounded-md px-3 text-sm font-medium transition",
                 workspaceMode === "pdf_to_erp"
-                  ? "bg-slate-900 text-white shadow-sm"
+                  ? "bg-blue-50 text-blue-700"
                   : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
               ].join(" ")}
             >
-              PDF 转 ERP 窗口
+              ERP 单据生成
             </button>
             <button
               type="button"
               onClick={() => onSwitchWorkspaceMode("assistant")}
               className={[
-                "flex h-11 w-full items-center justify-start rounded-lg px-3 text-sm font-semibold transition",
+                "flex h-10 w-full items-center justify-start rounded-md px-3 text-sm font-medium transition",
                 workspaceMode === "assistant"
-                  ? "bg-slate-900 text-white shadow-sm"
+                  ? "bg-blue-50 text-blue-700"
                   : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
               ].join(" ")}
             >
-              普通对话 / ERP 查询窗口
+              普通对话 / ERP库存查询窗口
             </button>
-            <button
-              type="button"
-              onClick={() => void onClearCurrentPage()}
-              className="flex h-11 w-full items-center justify-start rounded-lg border border-rose-200 bg-white px-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-50"
-            >
-              清除当前页面
-            </button>
+            </div>
           </div>
           <div className="min-h-0 flex-1 p-3 text-xs leading-5 text-slate-500">
-            <div className="rounded-lg border border-slate-200 bg-white p-3">
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
               每个功能入口都有独立窗口，切换后会恢复该功能自己的内容。
             </div>
           </div>
           <div className="shrink-0 border-t border-slate-200/80 p-3 text-xs text-slate-500">
-            PDF 转 ERP 窗口仅上传文件；普通对话 / ERP 查询窗口可直接输入问题。清除页面会同时取消当前窗口未完成的 PDF 任务。
+            ERP 单据生成仅上传文件；普通对话 / ERP库存查询窗口可直接输入问题。新建页面会同时取消当前窗口未完成的 PDF 任务。
           </div>
         </aside>
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l border-slate-200/90 bg-white shadow-sm">
-          <div className="shrink-0 border-b border-slate-100 bg-slate-50/60 px-5 py-3 lg:px-8">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="shrink-0 border-b border-slate-100 bg-white px-5 py-3 lg:px-7">
             <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
               <span
                 className={[
@@ -2450,6 +2441,17 @@ export default function HomePage() {
               >
                 {isLlmProbeRunning ? "探测中..." : "测试 LLM 路由"}
               </button>
+              <button
+                type="button"
+                onClick={() => void onClearCurrentPage()}
+                className="ml-auto inline-flex h-9 items-center gap-2 rounded-lg bg-[#2248b8] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1b3fa8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                  <rect x="4" y="4" width="16" height="16" rx="1.5" />
+                  <path d="M9 4v16M4 9h5M4 15h5M13 12h4M15 10v4" strokeLinecap="round" />
+                </svg>
+                新建页面
+              </button>
             </div>
           </div>
 
@@ -2484,14 +2486,44 @@ export default function HomePage() {
 
             <div
               ref={chatScrollRef}
-              className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[#f4f5f7]"
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[#f5f6f8]"
             >
-              <div className="flex w-full flex-col gap-4 px-5 py-4 lg:px-8">
-                <div className="flex w-full flex-col gap-3">
+              <div className="flex w-full flex-col gap-4 px-5 py-4 lg:px-7">
+                {workspaceMode === "pdf_to_erp" ? (
+                  <>
+                    <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+                      <div className="border-b border-slate-100 px-5 py-4 text-base font-semibold text-slate-950">
+                        上传到：PDF 转 ERP
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isUploading}
+                        onClick={() => fileInputRef.current?.click()}
+                        className="m-5 flex min-h-[10.5rem] w-[calc(100%-2.5rem)] flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-center transition hover:border-blue-400 hover:bg-blue-50/40 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <svg className="h-10 w-10 text-blue-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                          <path d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5" strokeLinecap="round" />
+                          <path d="M12 4v12m0-12 4 4m-4-4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        <div className="mt-4 text-sm font-semibold text-slate-950">
+                          {isUploading ? "正在上传并创建任务..." : "点击或拖拽 PDF 文件到此处上传"}
+                        </div>
+                        <div className="mt-2 text-sm text-slate-400">支持 PDF，单个文件建议不超过 29MB</div>
+                      </button>
+                    </section>
+                  </>
+                ) : null}
+                <div className="flex w-full flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <div className="text-base font-semibold text-slate-950">
+                      {workspaceMode === "pdf_to_erp" ? "处理记录" : "对话记录"}
+                    </div>
+                    <div className="text-xs text-slate-400">{chatMessages.length ? `${chatMessages.length} 条消息` : "No data"}</div>
+                  </div>
                   {chatMessages.length === 0 ? (
-                    <div className="mx-auto flex min-h-[38vh] w-full max-w-2xl flex-col items-center justify-center text-center">
-                      <div className="text-2xl font-semibold tracking-tight text-slate-900">
-                        {workspaceMode === "pdf_to_erp" ? "PDF 转 ERP 窗口" : "普通对话 / ERP 查询窗口"}
+                    <div className="mx-auto flex min-h-[18rem] w-full max-w-2xl flex-col items-center justify-center text-center">
+                      <div className="text-lg font-semibold tracking-tight text-slate-900">
+                        {workspaceMode === "pdf_to_erp" ? "ERP 单据生成" : "普通对话 / ERP库存查询窗口"}
                       </div>
                       <p className="mt-3 max-w-xl text-sm leading-6 text-slate-500">
                         {workspaceMode === "pdf_to_erp"
@@ -2525,12 +2557,12 @@ export default function HomePage() {
                         <div
                           className={[
                             isWideToolCard
-                              ? "max-w-[min(96%,58rem)] rounded-2xl px-4 py-3 text-left text-base leading-relaxed shadow-sm ring-1"
-                              : "max-w-[min(92%,26rem)] rounded-2xl px-4 py-3 text-left text-base leading-relaxed shadow-sm ring-1",
+                              ? "max-w-[min(96%,58rem)] rounded-lg px-4 py-3 text-left text-sm leading-relaxed ring-1"
+                              : "max-w-[min(92%,32rem)] rounded-lg px-4 py-3 text-left text-sm leading-relaxed ring-1",
                             isUser
-                              ? "bg-sky-600 text-white ring-sky-700/25"
+                              ? "bg-blue-600 text-white ring-blue-700/25"
                               : m.role === "system"
-                                ? "bg-amber-50 text-amber-950 ring-amber-200/90"
+                                ? "bg-amber-50 text-amber-950 ring-amber-200"
                                 : "bg-white text-slate-900 ring-slate-200/90",
                           ].join(" ")}
                         >
@@ -3057,44 +3089,44 @@ export default function HomePage() {
                 }}
               />
               {workspaceMode === "pdf_to_erp" ? (
-                <div className="flex w-full max-w-none flex-col items-center gap-2 py-4">
+                <div className="flex w-full max-w-none items-center justify-between gap-3 py-3 text-sm text-slate-500">
+                  <span>{isUploading ? "正在上传，请稍候..." : "请使用上方上传区域添加 PDF 文件"}</span>
                   <button
                     type="button"
-                    title="上传 PDF 文件；文件也可拖拽至上方区域"
                     disabled={isUploading}
                     onClick={() => fileInputRef.current?.click()}
-                    className="inline-flex h-12 items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {isUploading ? "正在上传..." : "上传 PDF"}
+                    选择文件
                   </button>
-                  <p className="w-full px-1 text-center text-sm text-slate-400/90">
-                    {isUploading ? "正在上传，请稍候…" : "也可以将 PDF 拖拽到上方页面区域，单份文件建议不超过约 29MB"}
-                  </p>
                 </div>
               ) : (
-                <div className="flex w-full max-w-none items-end gap-3 py-3">
-                  <textarea
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        void onSendChat();
-                      }
-                    }}
-                    rows={2}
-                    className="min-h-[3rem] max-h-48 w-full flex-1 resize-y rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-base outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:bg-white focus:ring-2 focus:ring-sky-200/80 disabled:bg-slate-100 disabled:text-slate-500"
-                    placeholder={chatInputPlaceholder}
-                    disabled={isChatSending}
-                  />
-                  <button
-                    type="button"
-                    disabled={isChatSending}
-                    onClick={() => void onSendChat()}
-                    className="mb-px shrink-0 rounded-2xl bg-slate-900 px-5 py-3 text-base font-semibold text-white shadow-sm transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {isChatSending ? "发送中…" : "发送"}
-                  </button>
+                <div className="flex w-full max-w-none flex-col gap-2 py-3">
+                  <div className="flex items-end gap-3">
+                    <textarea
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void onSendChat();
+                        }
+                      }}
+                      rows={2}
+                      className="min-h-[3.25rem] max-h-40 w-full flex-1 resize-y rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm leading-6 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100 disabled:text-slate-500"
+                      placeholder={chatInputPlaceholder}
+                      disabled={isChatSending}
+                    />
+                    <button
+                      type="button"
+                      disabled={isChatSending || !chatInput.trim()}
+                      onClick={() => void onSendChat()}
+                      className="h-[3.25rem] shrink-0 rounded-md bg-blue-700 px-5 text-sm font-medium text-white transition hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isChatSending ? "发送中..." : "发送"}
+                    </button>
+                  </div>
+                  <div className="px-1 text-xs text-slate-400">Enter 发送，Shift + Enter 换行</div>
                 </div>
               )}
             </div>
