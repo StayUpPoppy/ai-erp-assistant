@@ -113,6 +113,7 @@ export interface OrderPreviewEditorProps {
   createDraftDisabled: boolean;
   hideActions?: boolean;
   readOnly?: boolean;
+  lockedSalesUser?: string;
 }
 
 export function OrderPreviewEditor({
@@ -127,10 +128,12 @@ export function OrderPreviewEditor({
   createDraftDisabled,
   hideActions = false,
   readOnly = false,
+  lockedSalesUser,
 }: OrderPreviewEditorProps) {
   const editableByPath = new Map(editableFields.map((field) => [field.path, field]));
 
   const updateOrderField = (key: keyof OrderPreviewData["order"], raw: string) => {
+    if (key === "salesUser" && lockedSalesUser !== undefined) return;
     onChange({
       ...preview,
       order: {
@@ -239,6 +242,8 @@ export function OrderPreviewEditor({
           <tbody>
             {HEADER_FIELDS.map((field) => {
               const path = fieldPathForOrder(field.key);
+              const locked = field.key === "salesUser" && lockedSalesUser !== undefined;
+              const value = locked ? lockedSalesUser : stringify(preview.order[field.key]);
               return (
                 <tr key={field.key} className={missingPaths.has(path) ? "bg-red-50/40" : "odd:bg-white even:bg-slate-50/40"}>
                   <td className={["border-b border-slate-100 px-3 py-2", missingPaths.has(path) ? "font-semibold text-red-800" : "text-slate-700"].join(" ")}>
@@ -248,12 +253,13 @@ export function OrderPreviewEditor({
                   </td>
                   <td className="border-b border-slate-100 px-3 py-2">
                     <input
-                      value={stringify(preview.order[field.key])}
-                      disabled={readOnly}
+                      value={value}
+                      disabled={readOnly || locked}
                       onChange={(event) => updateOrderField(field.key, event.target.value)}
-                      className={inputClass(path)}
+                      className={locked ? `${inputClass(path)} cursor-not-allowed bg-slate-100 text-slate-600` : inputClass(path)}
                       placeholder={field.type === "number" ? "请输入数字" : ""}
                     />
+                    {locked ? <div className="mt-1 text-xs text-slate-400">已绑定当前登录用户</div> : null}
                   </td>
                 </tr>
               );

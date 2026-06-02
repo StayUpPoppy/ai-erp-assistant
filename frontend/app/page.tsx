@@ -527,6 +527,17 @@ function resolveFieldKeys(
   return RESOLVE_KEYS_BY_DOC[k] ?? RESOLVE_KEYS_BY_DOC.PO;
 }
 
+function bindPreviewSalesUser(preview: OrderPreviewData, salesUser: string): OrderPreviewData {
+  if (preview.order.salesUser === salesUser) return preview;
+  return {
+    ...preview,
+    order: {
+      ...preview.order,
+      salesUser,
+    },
+  };
+}
+
 export default function HomePage() {
   /** 简化认证：组织与用户标识由前端输入，后续替换为 SSO / JWT */
   const [orgId, setOrgId] = useState("英科1厂");
@@ -898,13 +909,13 @@ export default function HomePage() {
     if (previewIngestionIdRef.current !== nextIngestionId) {
       previewIngestionIdRef.current = nextIngestionId;
       previewDirtyRef.current = false;
-      setPreviewDraft(ingestion?.preview_data ?? null);
+      setPreviewDraft(ingestion?.preview_data ? bindPreviewSalesUser(ingestion.preview_data, userId) : null);
       return;
     }
     if (!previewDirtyRef.current) {
-      setPreviewDraft(ingestion?.preview_data ?? null);
+      setPreviewDraft(ingestion?.preview_data ? bindPreviewSalesUser(ingestion.preview_data, userId) : null);
     }
-  }, [ingestion?.ingestion_id, ingestion?.preview_data]);
+  }, [ingestion?.ingestion_id, ingestion?.preview_data, userId]);
 
   const appendChat = useCallback((role: ChatRole, content: string, extra?: Partial<ChatMessage>) => {
     setChatMessages((prev) => [
@@ -1724,9 +1735,10 @@ export default function HomePage() {
 
   const onConfirmPreview = useCallback(async () => {
     if (!ingestionId || !previewDraft) return;
+    const previewToConfirm = bindPreviewSalesUser(previewDraft, userId);
     setIsConfirmingPreview(true);
     try {
-      clientLogger.info("提交订单预览确认", { ingestionId, details: previewDraft.details.length });
+      clientLogger.info("提交订单预览确认", { ingestionId, details: previewToConfirm.details.length });
       const chatRes = await postAssistantMessage({
         session_id: getAssistantSessionId(),
         action: "confirm_preview",
@@ -1734,7 +1746,7 @@ export default function HomePage() {
         org_id: orgId,
         user_id: userId,
         active_task_id: ingestionId,
-        preview_data: previewDraft,
+        preview_data: previewToConfirm,
       });
       appendToolResponse(chatRes);
       const data = chatRes.tool_result?.ingestion;
@@ -1749,6 +1761,7 @@ export default function HomePage() {
         return;
       }
       previewDirtyRef.current = false;
+      setPreviewDraft(bindPreviewSalesUser(data.preview_data ?? previewToConfirm, userId));
       setIngestion(data);
       const workflowToolUi = buildPdfToErpToolUi(data);
       if (workflowToolUi) {
@@ -1765,8 +1778,8 @@ export default function HomePage() {
 
   const onPreviewDraftChange = useCallback((next: OrderPreviewData) => {
     previewDirtyRef.current = true;
-    setPreviewDraft(next);
-  }, []);
+    setPreviewDraft(bindPreviewSalesUser(next, userId));
+  }, [userId]);
 
   const onCreateDraft = useCallback(async () => {
     if (!ingestionId) return;
@@ -1782,6 +1795,25 @@ export default function HomePage() {
     }
     setIsCreatingDraft(true);
     try {
+      if (previewDraft && ingestion?.preview_data?.order.salesUser !== userId) {
+        const previewToConfirm = bindPreviewSalesUser(previewDraft, userId);
+        clientLogger.info("创建草稿前同步销售员", { ingestionId, salesUser: userId });
+        const confirmRes = await postAssistantMessage({
+          session_id: getAssistantSessionId(),
+          action: "confirm_preview",
+          message: "同步销售员并确认订单预览",
+          org_id: orgId,
+          user_id: userId,
+          active_task_id: ingestionId,
+          preview_data: previewToConfirm,
+        });
+        const confirmed = confirmRes.tool_result?.ingestion;
+        if (confirmed?.ingestion_id === ingestionIdRef.current) {
+          previewDirtyRef.current = false;
+          setPreviewDraft(bindPreviewSalesUser(confirmed.preview_data ?? previewToConfirm, userId));
+          setIngestion(confirmed);
+        }
+      }
       clientLogger.info("请求创建草稿 create-draft", { ingestionId });
       const chatRes = await postAssistantMessage({
         session_id: getAssistantSessionId(),
@@ -1998,6 +2030,7 @@ export default function HomePage() {
                   confirming={isConfirmingPreview}
                   creatingDraft={isCreatingDraft}
                   createDraftDisabled={!canCreateDraft}
+                  lockedSalesUser={userId}
                   readOnly={!isCurrentTaskCard}
                 />
               </div>
@@ -2160,6 +2193,7 @@ export default function HomePage() {
                     confirming={isConfirmingPreview}
                     creatingDraft={isCreatingDraft}
                     createDraftDisabled={!canCreateDraft}
+                    lockedSalesUser={userId}
                     hideActions
                     readOnly={!isCurrentTaskCard}
                   />
@@ -2281,16 +2315,18 @@ export default function HomePage() {
             <span className="shrink-0">组织</span>
             <input
               value={orgId}
-              onChange={(e) => setOrgId(e.target.value)}
-              className="h-9 w-[5rem] rounded-lg border border-slate-200 bg-white px-2 text-sm outline-none focus:ring-2 focus:ring-sky-200/80 md:w-28"
+              readOnly
+              aria-readonly="true"
+              className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
             />
           </label>
           <label className="flex items-center gap-1.5 text-xs text-slate-500">
             <span className="shrink-0">用户</span>
             <input
               value={userId}
-              onChange={(e) => setUserId(e.target.value)}
-              className="h-9 w-[5rem] rounded-lg border border-slate-200 bg-white px-2 text-sm outline-none focus:ring-2 focus:ring-sky-200/80 md:w-28"
+              readOnly
+              aria-readonly="true"
+              className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
             />
           </label>
           <details className="relative">
@@ -2310,32 +2346,6 @@ export default function HomePage() {
               </label>
             </div>
           </details>
-          <div className="flex items-center gap-1 xl:hidden">
-            <button
-              type="button"
-              onClick={() => onSwitchWorkspaceMode("pdf_to_erp")}
-              className={[
-                "rounded-lg px-2.5 py-2 text-xs font-medium",
-                workspaceMode === "pdf_to_erp"
-                  ? "bg-slate-900 text-white"
-                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
-              ].join(" ")}
-            >
-              PDF窗口
-            </button>
-            <button
-              type="button"
-              onClick={() => onSwitchWorkspaceMode("assistant")}
-              className={[
-                "rounded-lg px-2.5 py-2 text-xs font-medium",
-                workspaceMode === "assistant"
-                  ? "bg-slate-900 text-white"
-                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
-              ].join(" ")}
-            >
-              对话窗口
-            </button>
-          </div>
           <button
             type="button"
             onClick={() => setLogOpen((v) => !v)}
@@ -2346,48 +2356,7 @@ export default function HomePage() {
         </div>
       </header>
 
-      <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row gap-4 overflow-hidden px-4 pb-4 md:px-6">
-        <aside className="hidden h-full w-[18rem] shrink-0 flex-col rounded-lg border border-slate-200 bg-white shadow-sm xl:flex">
-          <div className="shrink-0 border-b border-slate-100 px-4 py-4">
-            <div className="mb-4 flex items-center justify-between">
-              <div className="text-base font-semibold text-slate-950">功能窗口</div>
-            </div>
-            <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => onSwitchWorkspaceMode("pdf_to_erp")}
-              className={[
-                "flex h-10 w-full items-center justify-start rounded-md px-3 text-sm font-medium transition",
-                workspaceMode === "pdf_to_erp"
-                  ? "bg-blue-50 text-blue-700"
-                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
-              ].join(" ")}
-            >
-              ERP 单据生成
-            </button>
-            <button
-              type="button"
-              onClick={() => onSwitchWorkspaceMode("assistant")}
-              className={[
-                "flex h-10 w-full items-center justify-start rounded-md px-3 text-sm font-medium transition",
-                workspaceMode === "assistant"
-                  ? "bg-blue-50 text-blue-700"
-                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
-              ].join(" ")}
-            >
-              普通对话 / ERP库存查询窗口
-            </button>
-            </div>
-          </div>
-          <div className="min-h-0 flex-1 p-3 text-xs leading-5 text-slate-500">
-            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-              每个功能入口都有独立窗口，切换后会恢复该功能自己的内容。
-            </div>
-          </div>
-          <div className="shrink-0 border-t border-slate-200/80 p-3 text-xs text-slate-500">
-            ERP 单据生成仅上传文件；普通对话 / ERP库存查询窗口可直接输入问题。新建页面会同时取消当前窗口未完成的 PDF 任务。
-          </div>
-        </aside>
+      <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row overflow-hidden px-4 pb-4 md:px-6">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
           <div className="shrink-0 border-b border-slate-100 bg-white px-5 py-3 lg:px-7">
             <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -2450,7 +2419,7 @@ export default function HomePage() {
                   <rect x="4" y="4" width="16" height="16" rx="1.5" />
                   <path d="M9 4v16M4 9h5M4 15h5M13 12h4M15 10v4" strokeLinecap="round" />
                 </svg>
-                新建页面
+                刷新页面
               </button>
             </div>
           </div>
@@ -2939,6 +2908,7 @@ export default function HomePage() {
               createDraftDisabled={
                 !ingestionId || displayIngestionStatus(ingestion, clientDraftStateRef.current) !== "VALIDATED" || isPreviewDirty
               }
+              lockedSalesUser={userId}
             />
           ) : (
           <div className="w-full rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm shadow-slate-200/30 ring-1 ring-slate-900/[0.03] sm:p-5">
