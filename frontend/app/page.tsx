@@ -2348,12 +2348,8 @@ export default function HomePage() {
   return (
     <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-[#f5f6f8] text-slate-900">
       <header className="z-30 flex h-14 shrink-0 items-center gap-2 border-b border-slate-200 bg-[#f5f6f8] px-4 md:h-[3.75rem] md:gap-3 md:px-6">
-        <h1 className="shrink-0 text-xl font-semibold tracking-tight text-slate-950">ERP 工作台</h1>
-        <div className="hidden min-w-0 flex-1 truncate font-mono text-xs text-slate-400 md:block" title={getApiBaseUrl()}>
-          {getApiBaseUrl()}
-        </div>
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2 md:gap-2.5">
-          <label className="flex items-center gap-1.5 text-xs text-slate-500">
+          <label className="hidden items-center gap-1.5 text-xs text-slate-500">
             <span className="shrink-0">组织</span>
             <input
               value={orgId}
@@ -2362,7 +2358,7 @@ export default function HomePage() {
               className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
             />
           </label>
-          <label className="flex items-center gap-1.5 text-xs text-slate-500">
+          <label className="hidden items-center gap-1.5 text-xs text-slate-500">
             <span className="shrink-0">用户</span>
             <input
               value={userId}
@@ -2371,30 +2367,6 @@ export default function HomePage() {
               className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
             />
           </label>
-          <details className="relative">
-            <summary className="cursor-pointer list-none rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
-              高级
-            </summary>
-            <div className="absolute right-0 z-40 mt-1 w-64 rounded-xl border border-slate-200 bg-white p-3 shadow-lg ring-1 ring-slate-900/5">
-              <label className="text-xs text-slate-600">
-                解析规则编号（可空）
-                <input
-                  value={extractionProfileId}
-                  onChange={(e) => setExtractionProfileId(e.target.value)}
-                  autoComplete="off"
-                  className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-2 text-sm font-mono"
-                  placeholder="留空自动选择，或填 datynk-dev"
-                />
-              </label>
-            </div>
-          </details>
-          <button
-            type="button"
-            onClick={() => setLogOpen((v) => !v)}
-            className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
-          >
-            {logOpen ? "收起日志" : "运行日志"}
-          </button>
         </div>
       </header>
 
@@ -3055,19 +3027,7 @@ export default function HomePage() {
                   e.target.value = "";
                 }}
               />
-              {workspaceMode === "pdf_to_erp" ? (
-                <div className="flex w-full max-w-none items-center justify-between gap-3 py-3 text-sm text-slate-500">
-                  <span>{isUploading ? "正在上传，请稍候..." : "请使用上方上传区域添加 PDF 文件"}</span>
-                  <button
-                    type="button"
-                    disabled={isUploading}
-                    onClick={() => fileInputRef.current?.click()}
-                    className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    选择文件
-                  </button>
-                </div>
-              ) : (
+              {workspaceMode === "pdf_to_erp" ? null : (
                 <div className="flex w-full max-w-none flex-col gap-2 py-3">
                   <div className="flex items-end gap-3">
                     <textarea
