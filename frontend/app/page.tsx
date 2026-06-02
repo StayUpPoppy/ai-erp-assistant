@@ -80,6 +80,7 @@ interface WorkspaceWindowState {
   ingestionHistory: IngestionHistoryItem[];
   resolveFields: Record<string, string>;
   previewDraft: OrderPreviewData | null;
+  confirmedPreviewIds: Record<string, true>;
   lastStatus: IngestionStatus | null;
   workflowToolCardKey: string | null;
   lastIngestionFileName: string | null;
@@ -570,6 +571,7 @@ export default function HomePage() {
   /** 补全表单：键与后端 `required_field_keys` 对齐 */
   const [resolveFields, setResolveFields] = useState<Record<string, string>>({});
   const [previewDraft, setPreviewDraft] = useState<OrderPreviewData | null>(null);
+  const [confirmedPreviewIds, setConfirmedPreviewIds] = useState<Record<string, true>>({});
 
   const [isResolving, setIsResolving] = useState(false);
   const [isConfirmingPreview, setIsConfirmingPreview] = useState(false);
@@ -623,6 +625,7 @@ export default function HomePage() {
     lastIngestionFileNameRef.current = null;
     setResolveFields({});
     setPreviewDraft(null);
+    setConfirmedPreviewIds({});
     previewDirtyRef.current = false;
     previewIngestionIdRef.current = null;
     poll404WarnedRef.current = false;
@@ -962,6 +965,7 @@ export default function HomePage() {
       ingestionHistory,
       resolveFields,
       previewDraft,
+      confirmedPreviewIds,
       lastStatus: lastStatusRef.current,
       workflowToolCardKey: workflowToolCardKeyRef.current,
       lastIngestionFileName: lastIngestionFileNameRef.current,
@@ -969,7 +973,7 @@ export default function HomePage() {
       previewIngestionId: previewIngestionIdRef.current,
       poll404Warned: poll404WarnedRef.current,
     };
-  }, [assistantSessionId, chatInput, chatMessages, ingestion, ingestionHistory, ingestionId, previewDraft, resolveFields]);
+  }, [assistantSessionId, chatInput, chatMessages, confirmedPreviewIds, ingestion, ingestionHistory, ingestionId, previewDraft, resolveFields]);
 
   const applyWorkspaceWindow = useCallback((state: WorkspaceWindowState | null, mode: WorkspaceMode) => {
     const nextState =
@@ -983,6 +987,7 @@ export default function HomePage() {
         ingestionHistory: [],
         resolveFields: {},
         previewDraft: null,
+        confirmedPreviewIds: {},
         lastStatus: null,
         workflowToolCardKey: null,
         lastIngestionFileName: null,
@@ -1002,6 +1007,7 @@ export default function HomePage() {
     setIngestionHistory(nextState.ingestionHistory);
     setResolveFields(nextState.resolveFields);
     setPreviewDraft(nextState.previewDraft);
+    setConfirmedPreviewIds(nextState.confirmedPreviewIds);
     lastStatusRef.current = nextState.lastStatus;
     workflowToolCardKeyRef.current = nextState.workflowToolCardKey;
     lastIngestionFileNameRef.current = nextState.lastIngestionFileName;
@@ -1060,6 +1066,7 @@ export default function HomePage() {
       ingestionHistory: [],
       resolveFields: {},
       previewDraft: null,
+      confirmedPreviewIds: {},
       lastStatus: null,
       workflowToolCardKey: null,
       lastIngestionFileName: null,
@@ -1544,6 +1551,12 @@ export default function HomePage() {
         previewDirtyRef.current = false;
         setIngestionId(resp.ingestion_id);
         setPreviewDraft(null);
+        setConfirmedPreviewIds((prev) => {
+          if (!prev[resp.ingestion_id]) return prev;
+          const next = { ...prev };
+          delete next[resp.ingestion_id];
+          return next;
+        });
         ingestionIdRef.current = resp.ingestion_id;
         delete clientDraftStateRef.current[resp.ingestion_id];
         lastStatusRef.current = resp.status;
@@ -1639,6 +1652,12 @@ export default function HomePage() {
           previewDirtyRef.current = false;
           setIngestionId(resp.ingestion_id);
           setPreviewDraft(null);
+          setConfirmedPreviewIds((prev) => {
+            if (!prev[resp.ingestion_id]) return prev;
+            const next = { ...prev };
+            delete next[resp.ingestion_id];
+            return next;
+          });
           ingestionIdRef.current = resp.ingestion_id;
           delete clientDraftStateRef.current[resp.ingestion_id];
           lastStatusRef.current = resp.status;
@@ -1761,6 +1780,7 @@ export default function HomePage() {
         return;
       }
       previewDirtyRef.current = false;
+      setConfirmedPreviewIds((prev) => ({ ...prev, [data.ingestion_id]: true }));
       setPreviewDraft(bindPreviewSalesUser(data.preview_data ?? previewToConfirm, userId));
       setIngestion(data);
       const workflowToolUi = buildPdfToErpToolUi(data);
@@ -1778,6 +1798,15 @@ export default function HomePage() {
 
   const onPreviewDraftChange = useCallback((next: OrderPreviewData) => {
     previewDirtyRef.current = true;
+    if (ingestionIdRef.current) {
+      const id = ingestionIdRef.current;
+      setConfirmedPreviewIds((prev) => {
+        if (!prev[id]) return prev;
+        const nextState = { ...prev };
+        delete nextState[id];
+        return nextState;
+      });
+    }
     setPreviewDraft(bindPreviewSalesUser(next, userId));
   }, [userId]);
 
@@ -1787,6 +1816,11 @@ export default function HomePage() {
     const hasDirtyPreview = Boolean(previewDraft && previewDirtyRef.current);
     if (previewDraft && hasDirtyPreview) {
       appendChat("system", "订单预览有未确认的修改，请先确认预览后再上传 ERP。");
+      return;
+    }
+    const hasConfirmedPreview = Boolean(ingestionId && confirmedPreviewIds[ingestionId] && !previewDirtyRef.current);
+    if (previewDraft && !hasConfirmedPreview) {
+      appendChat("system", "请先点击「确认预览」，确认订单信息无误后再上传 ERP。");
       return;
     }
     if (displayIngestionStatus(ingestion, clientDraftStateRef.current) !== "VALIDATED") {
@@ -1855,6 +1889,7 @@ export default function HomePage() {
   }, [
     appendChat,
     appendToolResponse,
+    confirmedPreviewIds,
     getAssistantSessionId,
     ingestion,
     ingestionId,
@@ -1950,6 +1985,9 @@ export default function HomePage() {
   const isPreviewDirty = useMemo(() => {
     return Boolean(previewDraft && previewDirtyRef.current);
   }, [previewDraft]);
+  const isPreviewConfirmed = useMemo(() => {
+    return Boolean(ingestionId && confirmedPreviewIds[ingestionId] && !isPreviewDirty);
+  }, [confirmedPreviewIds, ingestionId, isPreviewDirty]);
 
   const renderToolUi = useCallback(
     (ui: ToolUi | null | undefined) => {
@@ -2007,7 +2045,7 @@ export default function HomePage() {
         if (previewForCard) {
           const currentStatus = displayIngestionStatus(ingestion, clientDraftStateRef.current);
           const canCreateDraft =
-            isCurrentTaskCard && Boolean(ingestionId) && currentStatus === "VALIDATED" && !isPreviewDirty;
+            isCurrentTaskCard && Boolean(ingestionId) && currentStatus === "VALIDATED" && isPreviewConfirmed && !isPreviewDirty;
           const editableFields = isCurrentTaskCard ? ingestion?.editable_fields ?? [] : [];
           const issues = isCurrentTaskCard ? ingestion?.issues ?? [] : [];
           return (
@@ -2113,7 +2151,7 @@ export default function HomePage() {
             : null;
         const previewForCard = isCurrentTaskCard ? previewDraft ?? cardPreview : cardPreview;
         const currentStatus = displayIngestionStatus(ingestion, clientDraftStateRef.current);
-        const canCreateDraft = isCurrentTaskCard && Boolean(ingestionId) && currentStatus === "VALIDATED" && !isPreviewDirty;
+        const canCreateDraft = isCurrentTaskCard && Boolean(ingestionId) && currentStatus === "VALIDATED" && isPreviewConfirmed && !isPreviewDirty;
         const editableFields = isCurrentTaskCard
           ? ingestion?.editable_fields ?? []
           : Array.isArray(ui.data.editable_fields)
@@ -2146,6 +2184,9 @@ export default function HomePage() {
             {disabled ? <div className="mt-2 text-xs text-emerald-800">这是历史任务的确认卡，不能在这里上传 ERP。</div> : null}
             {!disabled && isPreviewDirty ? (
               <div className="mt-2 text-xs font-medium text-amber-800">预览有未确认修改，请先确认预览。</div>
+            ) : null}
+            {!disabled && !isPreviewDirty && !isPreviewConfirmed ? (
+              <div className="mt-2 text-xs font-medium text-amber-800">请先点击「确认预览」，确认后才能上传 ERP。</div>
             ) : null}
             {summaryRows.length > 0 ? (
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -2290,6 +2331,7 @@ export default function HomePage() {
       isConfirmingPreview,
       isCreatingDraft,
       isUploading,
+      isPreviewConfirmed,
       isPreviewDirty,
       isResolving,
       onCancelReprocessUpload,
@@ -2906,7 +2948,10 @@ export default function HomePage() {
               confirming={isConfirmingPreview}
               creatingDraft={isCreatingDraft}
               createDraftDisabled={
-                !ingestionId || displayIngestionStatus(ingestion, clientDraftStateRef.current) !== "VALIDATED" || isPreviewDirty
+                !ingestionId ||
+                displayIngestionStatus(ingestion, clientDraftStateRef.current) !== "VALIDATED" ||
+                !isPreviewConfirmed ||
+                isPreviewDirty
               }
               lockedSalesUser={userId}
             />
