@@ -2401,67 +2401,17 @@ export default function HomePage() {
       <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row overflow-hidden px-4 pb-4 md:px-6">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
           <div className="shrink-0 border-b border-slate-100 bg-white px-5 py-3 lg:px-7">
-            <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <span
-                className={[
-                  "rounded-md px-2 py-1 font-medium ring-1 ring-inset",
-                  healthInfo?.llm_router_enabled
-                    ? healthInfo.llm_api_key_configured
-                      ? "bg-emerald-50 text-emerald-800 ring-emerald-200"
-                      : "bg-amber-50 text-amber-800 ring-amber-200"
-                    : "bg-slate-100 text-slate-600 ring-slate-200",
-                ].join(" ")}
-                title={healthInfo ? `${healthInfo.llm_base_url} / ${healthInfo.llm_model}` : "正在读取后端健康状态"}
-              >
-                LLM 路由：
-                {healthInfo
-                  ? healthInfo.llm_router_enabled
-                    ? healthInfo.llm_api_key_configured
-                      ? "已启用"
-                      : "缺少 API Key"
-                    : "未启用"
-                  : "检查中"}
-              </span>
-              {healthInfo?.llm_model ? <span className="font-mono">{healthInfo.llm_model}</span> : null}
-              {!healthInfo?.llm_router_enabled ? <span>当前由规则路由兜底选择工具</span> : null}
-              {healthInfo ? (
-                <span
-                  className={[
-                    "rounded-md px-2 py-1 font-medium ring-1 ring-inset",
-                    healthInfo.erp_client_mode === "real"
-                      ? "bg-sky-50 text-sky-800 ring-sky-200"
-                      : "bg-amber-50 text-amber-800 ring-amber-200",
-                  ].join(" ")}
-                  title={`ERP mode: ${healthInfo.erp_client_mode}${
-                    healthInfo.erp_create_body_style ? ` / ${healthInfo.erp_create_body_style}` : ""
-                  }`}
-                >
-                  ERP：{healthInfo.erp_client_mode === "real" ? "真实接口" : "模拟 ERP"}
-                </span>
-              ) : null}
-              {healthInfo && healthInfo.queue_available === false ? (
-                <span className="rounded-md bg-red-50 px-2 py-1 font-medium text-red-800 ring-1 ring-inset ring-red-200">
-                  队列不可用
-                </span>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => void onProbeLlmRouter()}
-                disabled={isLlmProbeRunning}
-                className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isLlmProbeRunning ? "探测中..." : "测试 LLM 路由"}
-              </button>
+            <div className="flex items-center justify-end">
               <button
                 type="button"
                 onClick={() => void onClearCurrentPage()}
-                className="ml-auto inline-flex h-9 items-center gap-2 rounded-lg bg-[#2248b8] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1b3fa8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2"
+                className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#2248b8] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1b3fa8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2"
               >
                 <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
                   <rect x="4" y="4" width="16" height="16" rx="1.5" />
                   <path d="M9 4v16M4 9h5M4 15h5M13 12h4M15 10v4" strokeLinecap="round" />
                 </svg>
-                刷新页面
+                新建页面
               </button>
             </div>
           </div>
@@ -2633,6 +2583,7 @@ export default function HomePage() {
                   })}
                   <div ref={chatEndRef} className="h-0 shrink-0" aria-hidden />
                 </div>
+                {/*
                 <details
                   className="w-full rounded-xl border border-slate-200/90 bg-white/70 px-3 py-2 shadow-sm [contain:layout_paint_style] [content-visibility:auto] [contain-intrinsic-size:520px]"
                 >
@@ -3088,6 +3039,7 @@ export default function HomePage() {
           )}
                   </div>
                 </details>
+                */}
               </div>
             </div>
 
