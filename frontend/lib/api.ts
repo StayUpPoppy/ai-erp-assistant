@@ -11,6 +11,7 @@ import type {
   ChatErpQaResponse,
   ChatMessageResponse,
   CreateDraftResponse,
+  CurrentUserResponse,
   DocumentParseExport,
   HealthResponse,
   IngestionResponse,
@@ -38,6 +39,10 @@ export function getApiBaseUrl(): string {
 
 export async function getHealth(): Promise<HealthResponse> {
   return apiFetchJson<HealthResponse>("/health", { method: "GET" });
+}
+
+export async function getCurrentUser(): Promise<CurrentUserResponse> {
+  return apiFetchJson<CurrentUserResponse>("/current-user", { method: "GET" });
 }
 
 export async function postAssistantLlmProbe(body: {
@@ -107,6 +112,7 @@ export async function apiFetchJson<T>(
   try {
     response = await fetch(url, {
       ...init,
+      credentials: init.credentials ?? "include",
       headers,
       body: init.jsonBody !== undefined ? JSON.stringify(init.jsonBody) : init.body,
     });

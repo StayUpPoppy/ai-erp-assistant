@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+from urllib.parse import unquote
 from threading import Thread
 
 from typing import Any, Dict, Iterator, Optional
@@ -39,6 +40,7 @@ from app.schemas import (
     ChatErpQaRequest,
     ChatErpQaResponse,
     ConfirmPreviewRequest,
+    CurrentUserResponse,
     CreateDraftResponse,
     CreateIngestionRequest,
     DocumentParseExport,
@@ -71,6 +73,20 @@ from app.store import (
 
 router = APIRouter()
 logger = logging.getLogger("ai_erp_api")
+
+_ERP_USER_INFO_COOKIE_NAME = "userInfo"
+_ERP_ORG_NAME_MAP = {
+    "1": "英科一厂",
+    "2": "英科二厂",
+    "3": "英科三厂",
+    "4": "英科四厂",
+    "5": "英科五厂",
+    "6": "英科六厂",
+    "7": "英科七厂",
+    "8": "英科八厂",
+    "9": "英科九厂",
+    "10": "英科十厂",
+}
 
 
 @router.get("/")
@@ -274,6 +290,7 @@ async def _create_ingestion_from_upload_file(
         extraction_profile_id=prof,
         force_reprocess=_form_bool(force_reprocess),
     )
+
     ingestion = create_upload(payload)
     should_dispatch = ingestion.status == IngestionStatus.UPLOADED
     enqueued = enqueue_ingestion_job(ingestion.ingestion_id) if should_dispatch else False
@@ -302,6 +319,41 @@ async def _create_ingestion_from_upload_file(
         logger.warning("enqueue_failed request_id=%s ingestion_id=%s", request_id, ingestion.ingestion_id)
     _handle_queue_dispatch_outcome(ingestion.ingestion_id, enqueued, request_id)
     return ingestion
+
+
+@router.get("/current-user", response_model=CurrentUserResponse)
+def current_user(request: Request) -> CurrentUserResponse:
+    raw = request.cookies.get(_ERP_USER_INFO_COOKIE_NAME)
+    if not raw:
+        logger.warning(
+            "current_user_cookie_missing request_id=%s cookie_name=%s",
+            getattr(request.state, "request_id", "n/a"),
+            _ERP_USER_INFO_COOKIE_NAME,
+        )
+        return CurrentUserResponse()
+
+    try:
+        payload = json.loads(unquote(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        logger.warning(
+            "current_user_cookie_parse_failed request_id=%s",
+            getattr(request.state, "request_id", "n/a"),
+            exc_info=True,
+        )
+        return CurrentUserResponse(source="invalid_cookie")
+
+    if not isinstance(payload, dict):
+        return CurrentUserResponse(source="invalid_cookie")
+
+    user_name = str(payload.get("realName") or payload.get("username") or "").strip()
+    org_key = "" if payload.get("currentOrgId") is None else str(payload.get("currentOrgId"))
+    org_name = _ERP_ORG_NAME_MAP.get(org_key) or (f"组织 {org_key}" if org_key else "")
+
+    return CurrentUserResponse(
+        userName=user_name or "演示用户",
+        orgId=org_name or "英科一厂",
+        source="userInfo_cookie",
+    )
 
 
 @router.post("/uploads", response_model=UploadResponse)

@@ -40,6 +40,12 @@ export interface HealthResponse {
   llm_prompt_version: string;
 }
 
+export interface CurrentUserResponse {
+  userName: string;
+  orgId: string;
+  source: string;
+}
+
 export interface AssistantLlmProbeResponse {
   enabled: boolean;
   api_key_configured: boolean;

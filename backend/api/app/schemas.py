@@ -92,6 +92,12 @@ class HealthResponse(BaseModel):
     ingestion_queue_fallback_mode: str = "none"
 
 
+class CurrentUserResponse(BaseModel):
+    userName: str = "演示用户"
+    orgId: str = "英科一厂"
+    source: str = "default"
+
+
 class DocType(str, Enum):
     PO = "PO"
     GR = "GR"

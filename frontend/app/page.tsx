@@ -20,6 +20,7 @@ import { clientLogger } from "@/lib/client-logger";
 import {
   getAssistantSession,
   getApiBaseUrl,
+  getCurrentUser,
   getHealth,
   getIngestion,
   postAssistantFile,
@@ -65,7 +66,7 @@ interface IngestionHistoryItem {
 
 interface PendingReprocessUpload {
   file: File;
-  userId: string;
+  userName: string;
   orgId: string;
   extractionProfileId?: string;
   sessionId: string;
@@ -540,9 +541,9 @@ function bindPreviewSalesUser(preview: OrderPreviewData, salesUser: string): Ord
 }
 
 export default function HomePage() {
-  /** 简化认证：组织与用户标识由前端输入，后续替换为 SSO / JWT */
-  const [orgId, setOrgId] = useState("英科1厂");
-  const [userId, setUserId] = useState("u-demo");
+  /** 简化认证：先从 ERP userInfo Cookie 同步用户和组织，后续再升级为服务端可信身份 */
+  const [orgId, setOrgId] = useState("英科一厂");
+  const [userName, setUserName] = useState("演示用户");
   const [assistantSessionId, setAssistantSessionId] = useState<string | null>(null);
   const [healthInfo, setHealthInfo] = useState<HealthResponse | null>(null);
   /** 可选：对应 API 侧 backend/config/extraction_profiles/{id}.json；留空则按 org_id / default 自动选 */
@@ -603,6 +604,24 @@ export default function HomePage() {
     pdf_to_erp: null,
     assistant: null,
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCurrentUser()
+      .then((erpUser) => {
+        if (cancelled) return;
+        if (erpUser.userName) setUserName(erpUser.userName);
+        if (erpUser.orgId) setOrgId(erpUser.orgId);
+        clientLogger.info("已从后端同步 ERP 用户信息", erpUser);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        clientLogger.warn("后端 ERP 用户信息同步失败，使用默认用户信息", { error });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [logOpen, setLogOpen] = useState(false);
 
   const uploadAcceptAttr = useMemo(() => {
@@ -912,13 +931,13 @@ export default function HomePage() {
     if (previewIngestionIdRef.current !== nextIngestionId) {
       previewIngestionIdRef.current = nextIngestionId;
       previewDirtyRef.current = false;
-      setPreviewDraft(ingestion?.preview_data ? bindPreviewSalesUser(ingestion.preview_data, userId) : null);
+      setPreviewDraft(ingestion?.preview_data ? bindPreviewSalesUser(ingestion.preview_data, userName) : null);
       return;
     }
     if (!previewDirtyRef.current) {
-      setPreviewDraft(ingestion?.preview_data ? bindPreviewSalesUser(ingestion.preview_data, userId) : null);
+      setPreviewDraft(ingestion?.preview_data ? bindPreviewSalesUser(ingestion.preview_data, userName) : null);
     }
-  }, [ingestion?.ingestion_id, ingestion?.preview_data, userId]);
+  }, [ingestion?.ingestion_id, ingestion?.preview_data, userName]);
 
   const appendChat = useCallback((role: ChatRole, content: string, extra?: Partial<ChatMessage>) => {
     setChatMessages((prev) => [
@@ -1405,7 +1424,7 @@ export default function HomePage() {
         session_id: getAssistantSessionId(),
         message: text,
         org_id: orgId,
-        user_id: userId,
+        user_id: userName,
         active_task_id: workspaceMode === "assistant" ? null : ingestionId,
       }, (event) => {
         if (event.event === "session") {
@@ -1479,7 +1498,7 @@ export default function HomePage() {
     } finally {
       setIsChatSending(false);
     }
-  }, [appendChat, appendToolResponse, chatInput, getAssistantSessionId, ingestionId, isChatSending, orgId, userId, workspaceMode]);
+  }, [appendChat, appendToolResponse, chatInput, getAssistantSessionId, ingestionId, isChatSending, orgId, userName, workspaceMode]);
 
   const onProbeLlmRouter = useCallback(async () => {
     if (isLlmProbeRunning) return;
@@ -1488,7 +1507,7 @@ export default function HomePage() {
       const res = await postAssistantLlmProbe({
         message: "查物料 M001",
         org_id: orgId,
-        user_id: userId,
+        user_id: userName,
         active_task_id: ingestionId,
       });
       setHealthInfo((prev) =>
@@ -1517,7 +1536,7 @@ export default function HomePage() {
     } finally {
       setIsLlmProbeRunning(false);
     }
-  }, [appendChat, ingestionId, isLlmProbeRunning, orgId, userId]);
+  }, [appendChat, ingestionId, isLlmProbeRunning, orgId, userName]);
 
   const onCancelReprocessUpload = useCallback((token: string) => {
     delete pendingReprocessUploadsRef.current[token];
@@ -1536,7 +1555,7 @@ export default function HomePage() {
       try {
         const uploadRes = await postAssistantFile(
           pending.file,
-          pending.userId,
+          pending.userName,
           pending.orgId,
           pending.extractionProfileId,
           pending.sessionId,
@@ -1617,7 +1636,7 @@ export default function HomePage() {
             });
           }
 
-          let uploadRes = await postAssistantFile(file, userId, orgId, prof || undefined, getAssistantSessionId());
+          let uploadRes = await postAssistantFile(file, userName, orgId, prof || undefined, getAssistantSessionId());
           let resp = uploadRes.tool_result?.ingestion;
           if (!resp) {
             appendChat("system", `${file.name} 上传后没有返回任务信息，请稍后重试。`);
@@ -1628,7 +1647,7 @@ export default function HomePage() {
             const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
             pendingReprocessUploadsRef.current[token] = {
               file,
-              userId,
+              userName,
               orgId,
               extractionProfileId: prof || undefined,
               sessionId: getAssistantSessionId(),
@@ -1683,7 +1702,7 @@ export default function HomePage() {
         setIsUploading(false);
       }
     },
-    [appendChat, appendToolResponse, extractionProfileId, getAssistantSessionId, ingestionHistory, orgId, userId, workspaceMode],
+    [appendChat, appendToolResponse, extractionProfileId, getAssistantSessionId, ingestionHistory, orgId, userName, workspaceMode],
   );
 
   const onDrop = useCallback(
@@ -1725,7 +1744,7 @@ export default function HomePage() {
         action: "submit_missing_fields",
         message: "submit missing fields",
         org_id: orgId,
-        user_id: userId,
+        user_id: userName,
         active_task_id: ingestionId,
         fields,
       });
@@ -1750,11 +1769,11 @@ export default function HomePage() {
     } finally {
       setIsResolving(false);
     }
-  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestion, ingestionId, orgId, resolveFields, userId]);
+  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestion, ingestionId, orgId, resolveFields, userName]);
 
   const onConfirmPreview = useCallback(async () => {
     if (!ingestionId || !previewDraft) return;
-    const previewToConfirm = bindPreviewSalesUser(previewDraft, userId);
+    const previewToConfirm = bindPreviewSalesUser(previewDraft, userName);
     setIsConfirmingPreview(true);
     try {
       clientLogger.info("提交订单预览确认", { ingestionId, details: previewToConfirm.details.length });
@@ -1763,7 +1782,7 @@ export default function HomePage() {
         action: "confirm_preview",
         message: "确认订单预览",
         org_id: orgId,
-        user_id: userId,
+        user_id: userName,
         active_task_id: ingestionId,
         preview_data: previewToConfirm,
       });
@@ -1781,7 +1800,7 @@ export default function HomePage() {
       }
       previewDirtyRef.current = false;
       setConfirmedPreviewIds((prev) => ({ ...prev, [data.ingestion_id]: true }));
-      setPreviewDraft(bindPreviewSalesUser(data.preview_data ?? previewToConfirm, userId));
+      setPreviewDraft(bindPreviewSalesUser(data.preview_data ?? previewToConfirm, userName));
       setIngestion(data);
       const workflowToolUi = buildPdfToErpToolUi(data);
       if (workflowToolUi) {
@@ -1794,7 +1813,7 @@ export default function HomePage() {
     } finally {
       setIsConfirmingPreview(false);
     }
-  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestionId, orgId, previewDraft, userId]);
+  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestionId, orgId, previewDraft, userName]);
 
   const onPreviewDraftChange = useCallback((next: OrderPreviewData) => {
     previewDirtyRef.current = true;
@@ -1807,8 +1826,8 @@ export default function HomePage() {
         return nextState;
       });
     }
-    setPreviewDraft(bindPreviewSalesUser(next, userId));
-  }, [userId]);
+    setPreviewDraft(bindPreviewSalesUser(next, userName));
+  }, [userName]);
 
   const onCreateDraft = useCallback(async () => {
     if (!ingestionId) return;
@@ -1829,22 +1848,22 @@ export default function HomePage() {
     }
     setIsCreatingDraft(true);
     try {
-      if (previewDraft && ingestion?.preview_data?.order.salesUser !== userId) {
-        const previewToConfirm = bindPreviewSalesUser(previewDraft, userId);
-        clientLogger.info("创建草稿前同步销售员", { ingestionId, salesUser: userId });
+      if (previewDraft && ingestion?.preview_data?.order.salesUser !== userName) {
+        const previewToConfirm = bindPreviewSalesUser(previewDraft, userName);
+        clientLogger.info("创建草稿前同步销售员", { ingestionId, salesUser: userName });
         const confirmRes = await postAssistantMessage({
           session_id: getAssistantSessionId(),
           action: "confirm_preview",
           message: "同步销售员并确认订单预览",
           org_id: orgId,
-          user_id: userId,
+          user_id: userName,
           active_task_id: ingestionId,
           preview_data: previewToConfirm,
         });
         const confirmed = confirmRes.tool_result?.ingestion;
         if (confirmed?.ingestion_id === ingestionIdRef.current) {
           previewDirtyRef.current = false;
-          setPreviewDraft(bindPreviewSalesUser(confirmed.preview_data ?? previewToConfirm, userId));
+          setPreviewDraft(bindPreviewSalesUser(confirmed.preview_data ?? previewToConfirm, userName));
           setIngestion(confirmed);
         }
       }
@@ -1854,7 +1873,7 @@ export default function HomePage() {
         action: "create_draft",
         message: "确认上传 ERP，创建草稿",
         org_id: orgId,
-        user_id: userId,
+        user_id: userName,
         active_task_id: ingestionId,
       });
       appendToolResponse(chatRes);
@@ -1896,7 +1915,7 @@ export default function HomePage() {
     isCreatingDraft,
     orgId,
     previewDraft,
-    userId,
+    userName,
   ]);
 
   /** 仅开发：当 worker/Redis 未启动时，可手动触发内部 process 推进状态机 */
@@ -2068,7 +2087,7 @@ export default function HomePage() {
                   confirming={isConfirmingPreview}
                   creatingDraft={isCreatingDraft}
                   createDraftDisabled={!canCreateDraft}
-                  lockedSalesUser={userId}
+                  lockedSalesUser={userName}
                   readOnly={!isCurrentTaskCard}
                 />
               </div>
@@ -2234,7 +2253,7 @@ export default function HomePage() {
                     confirming={isConfirmingPreview}
                     creatingDraft={isCreatingDraft}
                     createDraftDisabled={!canCreateDraft}
-                    lockedSalesUser={userId}
+                    lockedSalesUser={userName}
                     hideActions
                     readOnly={!isCurrentTaskCard}
                   />
@@ -2349,7 +2368,7 @@ export default function HomePage() {
     <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-[#f5f6f8] text-slate-900">
       <header className="z-30 flex h-14 shrink-0 items-center gap-2 border-b border-slate-200 bg-[#f5f6f8] px-4 md:h-[3.75rem] md:gap-3 md:px-6">
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2 md:gap-2.5">
-          <label className="hidden items-center gap-1.5 text-xs text-slate-500">
+          <label className="flex items-center gap-1.5 text-xs text-slate-500">
             <span className="shrink-0">组织</span>
             <input
               value={orgId}
@@ -2358,10 +2377,10 @@ export default function HomePage() {
               className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
             />
           </label>
-          <label className="hidden items-center gap-1.5 text-xs text-slate-500">
+          <label className="flex items-center gap-1.5 text-xs text-slate-500">
             <span className="shrink-0">用户</span>
             <input
-              value={userId}
+              value={userName}
               readOnly
               aria-readonly="true"
               className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
@@ -2876,7 +2895,7 @@ export default function HomePage() {
                 !isPreviewConfirmed ||
                 isPreviewDirty
               }
-              lockedSalesUser={userId}
+              lockedSalesUser={userName}
             />
           ) : (
           <div className="w-full rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm shadow-slate-200/30 ring-1 ring-slate-900/[0.03] sm:p-5">
