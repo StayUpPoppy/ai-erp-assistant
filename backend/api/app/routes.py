@@ -75,18 +75,6 @@ router = APIRouter()
 logger = logging.getLogger("ai_erp_api")
 
 _ERP_USER_INFO_COOKIE_NAMES = ("userInfo", "userinfo")
-_ERP_ORG_NAME_MAP = {
-    "1": "英科一厂",
-    "2": "英科二厂",
-    "3": "英科三厂",
-    "4": "英科四厂",
-    "5": "英科五厂",
-    "6": "英科六厂",
-    "7": "英科七厂",
-    "8": "英科八厂",
-    "9": "英科九厂",
-    "10": "英科十厂",
-}
 
 
 @router.get("/")
@@ -352,8 +340,7 @@ def current_user(request: Request) -> CurrentUserResponse:
         return CurrentUserResponse(source="invalid_cookie")
 
     user_name = str(payload.get("realName") or payload.get("username") or "").strip()
-    org_key = "" if payload.get("currentOrgId") is None else str(payload.get("currentOrgId"))
-    org_name = _ERP_ORG_NAME_MAP.get(org_key) or (f"组织 {org_key}" if org_key else "")
+    org_name = str(payload.get("currentOrgName") or "").strip()
 
     return CurrentUserResponse(
         userName=user_name or "演示用户",

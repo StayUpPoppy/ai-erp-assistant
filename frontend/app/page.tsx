@@ -540,6 +540,21 @@ function bindPreviewSalesUser(preview: OrderPreviewData, salesUser: string): Ord
   };
 }
 
+function syncPreviewOrg(preview: OrderPreviewData, org: string): OrderPreviewData {
+  if (!org || preview.order.org === org) return preview;
+  return {
+    ...preview,
+    order: {
+      ...preview.order,
+      org,
+    },
+  };
+}
+
+function syncPreviewDefaults(preview: OrderPreviewData, salesUser: string, org: string): OrderPreviewData {
+  return syncPreviewOrg(bindPreviewSalesUser(preview, salesUser), org);
+}
+
 export default function HomePage() {
   /** 简化认证：先从 ERP userInfo Cookie 同步用户和组织，后续再升级为服务端可信身份 */
   const [orgId, setOrgId] = useState("英科一厂");
@@ -931,13 +946,13 @@ export default function HomePage() {
     if (previewIngestionIdRef.current !== nextIngestionId) {
       previewIngestionIdRef.current = nextIngestionId;
       previewDirtyRef.current = false;
-      setPreviewDraft(ingestion?.preview_data ? bindPreviewSalesUser(ingestion.preview_data, userName) : null);
+      setPreviewDraft(ingestion?.preview_data ? syncPreviewDefaults(ingestion.preview_data, userName, orgId) : null);
       return;
     }
     if (!previewDirtyRef.current) {
-      setPreviewDraft(ingestion?.preview_data ? bindPreviewSalesUser(ingestion.preview_data, userName) : null);
+      setPreviewDraft(ingestion?.preview_data ? syncPreviewDefaults(ingestion.preview_data, userName, orgId) : null);
     }
-  }, [ingestion?.ingestion_id, ingestion?.preview_data, userName]);
+  }, [ingestion?.ingestion_id, ingestion?.preview_data, orgId, userName]);
 
   const appendChat = useCallback((role: ChatRole, content: string, extra?: Partial<ChatMessage>) => {
     setChatMessages((prev) => [
