@@ -4,5 +4,7 @@
 
 ALTER TABLE ingestions DROP CONSTRAINT IF EXISTS ingestions_file_hash_key;
 
+DROP INDEX IF EXISTS ix_ingestions_file_hash;
+
 CREATE INDEX IF NOT EXISTS ix_ingestions_file_hash ON ingestions (file_hash);
 CREATE INDEX IF NOT EXISTS ix_ingestions_user_id_file_hash ON ingestions (user_id, file_hash);

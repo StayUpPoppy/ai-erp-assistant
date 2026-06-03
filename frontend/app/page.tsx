@@ -2386,7 +2386,7 @@ export default function HomePage() {
     <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-[#f5f6f8] text-slate-900">
       <header className="z-30 flex h-14 shrink-0 items-center gap-2 border-b border-slate-200 bg-[#f5f6f8] px-4 md:h-[3.75rem] md:gap-3 md:px-6">
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2 md:gap-2.5">
-          <label className="flex items-center gap-1.5 text-xs text-slate-500">
+          <label className="hidden items-center gap-1.5 text-xs text-slate-500">
             <span className="shrink-0">组织</span>
             <input
               value={orgId}
@@ -2395,7 +2395,7 @@ export default function HomePage() {
               className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
             />
           </label>
-          <label className="flex items-center gap-1.5 text-xs text-slate-500">
+          <label className="hidden items-center gap-1.5 text-xs text-slate-500">
             <span className="shrink-0">用户</span>
             <input
               value={userName}
@@ -2420,7 +2420,7 @@ export default function HomePage() {
                   <rect x="4" y="4" width="16" height="16" rx="1.5" />
                   <path d="M9 4v16M4 9h5M4 15h5M13 12h4M15 10v4" strokeLinecap="round" />
                 </svg>
-                新建页面
+                刷新页面
               </button>
             </div>
           </div>
