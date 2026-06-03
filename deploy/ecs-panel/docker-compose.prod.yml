@@ -91,6 +91,7 @@ services:
       dockerfile: deploy/ecs-panel/Dockerfile.frontend
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+        ORCHESTRATOR_PROXY_TARGET: http://api:8020
     restart: unless-stopped
     environment:
       ORCHESTRATOR_PROXY_TARGET: http://api:8020

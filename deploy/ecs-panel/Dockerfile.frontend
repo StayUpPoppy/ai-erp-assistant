@@ -10,6 +10,8 @@ FROM node:20-alpine AS builder
 WORKDIR /app/frontend
 COPY --from=deps /app/frontend/node_modules ./node_modules
 COPY frontend ./
+ARG ORCHESTRATOR_PROXY_TARGET=http://api:8020
+ENV ORCHESTRATOR_PROXY_TARGET=$ORCHESTRATOR_PROXY_TARGET
 RUN npm run build
 
 FROM node:20-alpine AS runner
