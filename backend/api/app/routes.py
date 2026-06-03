@@ -74,7 +74,7 @@ from app.store import (
 router = APIRouter()
 logger = logging.getLogger("ai_erp_api")
 
-_ERP_USER_INFO_COOKIE_NAME = "userInfo"
+_ERP_USER_INFO_COOKIE_NAMES = ("userInfo", "userinfo")
 _ERP_ORG_NAME_MAP = {
     "1": "英科一厂",
     "2": "英科二厂",
@@ -323,12 +323,18 @@ async def _create_ingestion_from_upload_file(
 
 @router.get("/current-user", response_model=CurrentUserResponse)
 def current_user(request: Request) -> CurrentUserResponse:
-    raw = request.cookies.get(_ERP_USER_INFO_COOKIE_NAME)
+    raw = None
+    matched_cookie_name = ""
+    for cookie_name in _ERP_USER_INFO_COOKIE_NAMES:
+        raw = request.cookies.get(cookie_name)
+        if raw:
+            matched_cookie_name = cookie_name
+            break
     if not raw:
         logger.warning(
-            "current_user_cookie_missing request_id=%s cookie_name=%s",
+            "current_user_cookie_missing request_id=%s cookie_names=%s",
             getattr(request.state, "request_id", "n/a"),
-            _ERP_USER_INFO_COOKIE_NAME,
+            ",".join(_ERP_USER_INFO_COOKIE_NAMES),
         )
         return CurrentUserResponse()
 
@@ -352,7 +358,7 @@ def current_user(request: Request) -> CurrentUserResponse:
     return CurrentUserResponse(
         userName=user_name or "演示用户",
         orgId=org_name or "英科一厂",
-        source="userInfo_cookie",
+        source=f"{matched_cookie_name}_cookie",
     )
 
 
