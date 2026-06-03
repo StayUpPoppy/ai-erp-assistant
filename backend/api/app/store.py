@@ -85,6 +85,10 @@ class InMemoryStore:
 store = InMemoryStore(ingestions={}, file_hash_to_ingestion={}, lock=Lock())
 
 
+def _file_owner_key(file_hash: str, user_id: str) -> str:
+    return f"{user_id}:{file_hash}"
+
+
 def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
@@ -245,8 +249,8 @@ def create_ingestion(payload: CreateIngestionRequest) -> IngestionResponse:
         if is_database_enabled():
             session = _db_session()
             try:
-                # 使用 file_hash 做去重：数据库层同样以唯一约束保证幂等。
-                existing = ingestion_db.get_by_file_hash(session, payload.file_hash)
+                # 使用 user_id + file_hash 做去重，避免不同用户上传同一文件时复用彼此任务。
+                existing = ingestion_db.get_by_file_hash_and_user_id(session, payload.file_hash, payload.user_id)
                 if existing:
                     if payload.force_reprocess or _should_auto_reset_existing_ingestion(existing):
                         existing = _reset_ingestion_for_reprocess(existing, payload)
@@ -288,7 +292,8 @@ def create_ingestion(payload: CreateIngestionRequest) -> IngestionResponse:
             finally:
                 session.close()
 
-        existing_id = store.file_hash_to_ingestion.get(payload.file_hash)
+        owner_file_key = _file_owner_key(payload.file_hash, payload.user_id)
+        existing_id = store.file_hash_to_ingestion.get(owner_file_key)
         if existing_id:
             existing = store.ingestions[existing_id]
             if payload.force_reprocess or _should_auto_reset_existing_ingestion(existing):
@@ -318,7 +323,7 @@ def create_ingestion(payload: CreateIngestionRequest) -> IngestionResponse:
         ingestion = _new_ingestion_model(payload, ingestion_id)
         _append_event(ingestion, IngestionStatus.UPLOADED, "file metadata accepted")
         store.ingestions[ingestion_id] = ingestion
-        store.file_hash_to_ingestion[payload.file_hash] = ingestion_id
+        store.file_hash_to_ingestion[owner_file_key] = ingestion_id
         logger.info("create_ingestion_succeeded ingestion_id=%s status=%s storage=memory", ingestion.ingestion_id, ingestion.status)
         return ingestion
 

@@ -3,7 +3,7 @@ ingestion 表的 ORM 定义。
 
 字段设计目标：
 - 能完整还原 IngestionResponse（供前端轮询与审计回放）；
-- file_hash 唯一，用于「同一文件不重复建任务」的幂等约束；
+- file_hash 用于「同一用户同一文件不重复建任务」的幂等查询；
 - JSON 字段承载缺失字段、已解析/补全字段、审计事件数组。
 """
 
@@ -21,7 +21,7 @@ class IngestionRow(Base):
 
     ingestion_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     file_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    file_hash: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
+    file_hash: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     org_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     source_file_object_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

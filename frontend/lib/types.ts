@@ -41,6 +41,7 @@ export interface HealthResponse {
 }
 
 export interface CurrentUserResponse {
+  userId: string;
   userName: string;
   orgId: string;
   source: string;

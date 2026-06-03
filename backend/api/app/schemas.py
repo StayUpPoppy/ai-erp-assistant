@@ -93,6 +93,7 @@ class HealthResponse(BaseModel):
 
 
 class CurrentUserResponse(BaseModel):
+    userId: str = ""
     userName: str = "演示用户"
     orgId: str = "英科一厂"
     source: str = "default"

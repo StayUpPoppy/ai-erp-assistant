@@ -66,7 +66,7 @@ interface IngestionHistoryItem {
 
 interface PendingReprocessUpload {
   file: File;
-  userName: string;
+  userId: string;
   orgId: string;
   extractionProfileId?: string;
   sessionId: string;
@@ -558,6 +558,7 @@ function syncPreviewDefaults(preview: OrderPreviewData, salesUser: string, org: 
 export default function HomePage() {
   /** 简化认证：先从 ERP userInfo Cookie 同步用户和组织，后续再升级为服务端可信身份 */
   const [orgId, setOrgId] = useState("英科一厂");
+  const [userId, setUserId] = useState("演示用户");
   const [userName, setUserName] = useState("演示用户");
   const [assistantSessionId, setAssistantSessionId] = useState<string | null>(null);
   const [healthInfo, setHealthInfo] = useState<HealthResponse | null>(null);
@@ -625,6 +626,7 @@ export default function HomePage() {
     void getCurrentUser()
       .then((erpUser) => {
         if (cancelled) return;
+        if (erpUser.userId) setUserId(erpUser.userId);
         if (erpUser.userName) setUserName(erpUser.userName);
         if (erpUser.orgId) setOrgId(erpUser.orgId);
         clientLogger.info("已从后端同步 ERP 用户信息", erpUser);
@@ -1439,7 +1441,7 @@ export default function HomePage() {
         session_id: getAssistantSessionId(),
         message: text,
         org_id: orgId,
-        user_id: userName,
+        user_id: userId,
         active_task_id: workspaceMode === "assistant" ? null : ingestionId,
       }, (event) => {
         if (event.event === "session") {
@@ -1513,7 +1515,7 @@ export default function HomePage() {
     } finally {
       setIsChatSending(false);
     }
-  }, [appendChat, appendToolResponse, chatInput, getAssistantSessionId, ingestionId, isChatSending, orgId, userName, workspaceMode]);
+  }, [appendChat, appendToolResponse, chatInput, getAssistantSessionId, ingestionId, isChatSending, orgId, userId, workspaceMode]);
 
   const onProbeLlmRouter = useCallback(async () => {
     if (isLlmProbeRunning) return;
@@ -1522,7 +1524,7 @@ export default function HomePage() {
       const res = await postAssistantLlmProbe({
         message: "查物料 M001",
         org_id: orgId,
-        user_id: userName,
+        user_id: userId,
         active_task_id: ingestionId,
       });
       setHealthInfo((prev) =>
@@ -1551,7 +1553,7 @@ export default function HomePage() {
     } finally {
       setIsLlmProbeRunning(false);
     }
-  }, [appendChat, ingestionId, isLlmProbeRunning, orgId, userName]);
+  }, [appendChat, ingestionId, isLlmProbeRunning, orgId, userId]);
 
   const onCancelReprocessUpload = useCallback((token: string) => {
     delete pendingReprocessUploadsRef.current[token];
@@ -1570,7 +1572,7 @@ export default function HomePage() {
       try {
         const uploadRes = await postAssistantFile(
           pending.file,
-          pending.userName,
+          pending.userId,
           pending.orgId,
           pending.extractionProfileId,
           pending.sessionId,
@@ -1651,7 +1653,7 @@ export default function HomePage() {
             });
           }
 
-          let uploadRes = await postAssistantFile(file, userName, orgId, prof || undefined, getAssistantSessionId());
+          let uploadRes = await postAssistantFile(file, userId, orgId, prof || undefined, getAssistantSessionId());
           let resp = uploadRes.tool_result?.ingestion;
           if (!resp) {
             appendChat("system", `${file.name} 上传后没有返回任务信息，请稍后重试。`);
@@ -1662,7 +1664,7 @@ export default function HomePage() {
             const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
             pendingReprocessUploadsRef.current[token] = {
               file,
-              userName,
+              userId,
               orgId,
               extractionProfileId: prof || undefined,
               sessionId: getAssistantSessionId(),
@@ -1717,7 +1719,7 @@ export default function HomePage() {
         setIsUploading(false);
       }
     },
-    [appendChat, appendToolResponse, extractionProfileId, getAssistantSessionId, ingestionHistory, orgId, userName, workspaceMode],
+    [appendChat, appendToolResponse, extractionProfileId, getAssistantSessionId, ingestionHistory, orgId, userId, workspaceMode],
   );
 
   const onDrop = useCallback(
@@ -1759,7 +1761,7 @@ export default function HomePage() {
         action: "submit_missing_fields",
         message: "submit missing fields",
         org_id: orgId,
-        user_id: userName,
+        user_id: userId,
         active_task_id: ingestionId,
         fields,
       });
@@ -1784,7 +1786,7 @@ export default function HomePage() {
     } finally {
       setIsResolving(false);
     }
-  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestion, ingestionId, orgId, resolveFields, userName]);
+  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestion, ingestionId, orgId, resolveFields, userId]);
 
   const onConfirmPreview = useCallback(async () => {
     if (!ingestionId || !previewDraft) return;
@@ -1797,7 +1799,7 @@ export default function HomePage() {
         action: "confirm_preview",
         message: "确认订单预览",
         org_id: orgId,
-        user_id: userName,
+        user_id: userId,
         active_task_id: ingestionId,
         preview_data: previewToConfirm,
       });
@@ -1828,7 +1830,7 @@ export default function HomePage() {
     } finally {
       setIsConfirmingPreview(false);
     }
-  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestionId, orgId, previewDraft, userName]);
+  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestionId, orgId, previewDraft, userId, userName]);
 
   const onPreviewDraftChange = useCallback((next: OrderPreviewData) => {
     previewDirtyRef.current = true;
@@ -1871,7 +1873,7 @@ export default function HomePage() {
           action: "confirm_preview",
           message: "同步销售员并确认订单预览",
           org_id: orgId,
-          user_id: userName,
+          user_id: userId,
           active_task_id: ingestionId,
           preview_data: previewToConfirm,
         });
@@ -1888,7 +1890,7 @@ export default function HomePage() {
         action: "create_draft",
         message: "确认上传 ERP，创建草稿",
         org_id: orgId,
-        user_id: userName,
+        user_id: userId,
         active_task_id: ingestionId,
       });
       appendToolResponse(chatRes);
@@ -1930,6 +1932,7 @@ export default function HomePage() {
     isCreatingDraft,
     orgId,
     previewDraft,
+    userId,
     userName,
   ]);
 

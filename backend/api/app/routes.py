@@ -75,6 +75,7 @@ router = APIRouter()
 logger = logging.getLogger("ai_erp_api")
 
 _ERP_USER_INFO_COOKIE_NAMES = ("userInfo", "userinfo")
+_LEGACY_FRONTEND_USER_IDS = {"", "u-demo", "演示用户"}
 
 
 @router.get("/")
@@ -279,6 +280,7 @@ async def _create_ingestion_from_upload_file(
         force_reprocess=_form_bool(force_reprocess),
     )
 
+    payload = _apply_current_user_to_upload(payload, request)
     ingestion = create_upload(payload)
     should_dispatch = ingestion.status == IngestionStatus.UPLOADED
     enqueued = enqueue_ingestion_job(ingestion.ingestion_id) if should_dispatch else False
@@ -309,8 +311,7 @@ async def _create_ingestion_from_upload_file(
     return ingestion
 
 
-@router.get("/current-user", response_model=CurrentUserResponse)
-def current_user(request: Request) -> CurrentUserResponse:
+def _current_user_from_request(request: Request) -> CurrentUserResponse:
     raw = None
     matched_cookie_name = ""
     for cookie_name in _ERP_USER_INFO_COOKIE_NAMES:
@@ -339,14 +340,63 @@ def current_user(request: Request) -> CurrentUserResponse:
     if not isinstance(payload, dict):
         return CurrentUserResponse(source="invalid_cookie")
 
+    user_id = str(payload.get("userId") or "").strip()
     user_name = str(payload.get("realName") or payload.get("username") or "").strip()
     org_name = str(payload.get("currentOrgName") or "").strip()
 
     return CurrentUserResponse(
+        userId=user_id,
         userName=user_name or "演示用户",
         orgId=org_name or "英科一厂",
         source=f"{matched_cookie_name}_cookie",
     )
+
+
+def _apply_current_user_to_upload(payload: UploadRequest, request: Request) -> UploadRequest:
+    current_user = _current_user_from_request(request)
+    if not current_user.userId:
+        return payload
+    return payload.model_copy(
+        update={
+            "user_id": current_user.userId,
+            "org_id": current_user.orgId,
+        }
+    )
+
+
+def _apply_current_user_to_create_ingestion(payload: CreateIngestionRequest, request: Request) -> CreateIngestionRequest:
+    current_user = _current_user_from_request(request)
+    if not current_user.userId:
+        return payload
+    return payload.model_copy(
+        update={
+            "user_id": current_user.userId,
+            "org_id": current_user.orgId,
+        }
+    )
+
+
+def _assert_ingestion_owner(ingestion: IngestionResponse, request: Request) -> None:
+    current_user = _current_user_from_request(request)
+    if not current_user.userId:
+        return
+    allowed_legacy_ids = _LEGACY_FRONTEND_USER_IDS | {current_user.userName}
+    if ingestion.user_id == current_user.userId or ingestion.user_id in allowed_legacy_ids:
+        return
+    logger.warning(
+        "ingestion_owner_forbidden request_id=%s ingestion_id=%s owner_user_id=%s current_user_id=%s current_user_name=%s",
+        getattr(request.state, "request_id", "n/a"),
+        ingestion.ingestion_id,
+        ingestion.user_id,
+        current_user.userId,
+        current_user.userName,
+    )
+    raise HTTPException(status_code=403, detail="FORBIDDEN_INGESTION_OWNER")
+
+
+@router.get("/current-user", response_model=CurrentUserResponse)
+def current_user(request: Request) -> CurrentUserResponse:
+    return _current_user_from_request(request)
 
 
 @router.post("/uploads", response_model=UploadResponse)
@@ -354,6 +404,7 @@ def upload(payload: UploadRequest, request: Request) -> UploadResponse:
     # 上传接口的职责是“接收文件元信息并创建 ingestion 任务”。
     # 这里不做耗时解析，只做快速入库与入队，保证前端得到即时响应，
     # 后续解析/抽取/映射由 worker 异步处理，符合解耦和可扩展原则。
+    payload = _apply_current_user_to_upload(payload, request)
     ingestion = create_upload(payload)
     should_dispatch = ingestion.status == IngestionStatus.UPLOADED
     enqueued = enqueue_ingestion_job(ingestion.ingestion_id) if should_dispatch else False
@@ -428,6 +479,7 @@ def create_ingestion_route(payload: CreateIngestionRequest, request: Request) ->
     # 该接口用于“直接创建 ingestion”，主要给非文件来源场景预留：
     # 例如后续可能接入 ERP 主动推送、批量导入、外部系统 webhook 等。
     # 它与 /uploads 的核心差异是：调用方自己提供 file_id/file_hash 等上下文。
+    payload = _apply_current_user_to_create_ingestion(payload, request)
     ingestion = create_ingestion(payload)
     should_dispatch = ingestion.status == IngestionStatus.UPLOADED
     enqueued = enqueue_ingestion_job(ingestion.ingestion_id) if should_dispatch else False
@@ -528,6 +580,13 @@ def chat_erp_qa_route(payload: ChatErpQaRequest, request: Request) -> ChatErpQaR
 def chat_messages_route(payload: ChatMessageRequest, request: Request) -> ChatMessageResponse:
     """统一对话入口：先接入 pdf_to_erp 工具，后续可继续挂库存、订单查询等工具。"""
     request_id = getattr(request.state, "request_id", "n/a")
+    if payload.active_task_id:
+        ingestion = get_ingestion(payload.active_task_id)
+        if ingestion:
+            _assert_ingestion_owner(ingestion, request)
+    current_user = _current_user_from_request(request)
+    if current_user.userId:
+        payload = payload.model_copy(update={"user_id": current_user.userId, "org_id": current_user.orgId})
     logger.info(
         "chat_messages request_id=%s session_id=%s tool=%s action=%s active_task_id=%s",
         request_id,
@@ -580,6 +639,13 @@ async def chat_files_route(
 def assistant_messages_route(payload: ChatMessageRequest, request: Request) -> ChatMessageResponse:
     """Unified assistant entrypoint. Rule-based today; LLM tool routing can replace this later."""
     request_id = getattr(request.state, "request_id", "n/a")
+    if payload.active_task_id:
+        ingestion = get_ingestion(payload.active_task_id)
+        if ingestion:
+            _assert_ingestion_owner(ingestion, request)
+    current_user = _current_user_from_request(request)
+    if current_user.userId:
+        payload = payload.model_copy(update={"user_id": current_user.userId, "org_id": current_user.orgId})
     session_id = ensure_session_id(payload.session_id)
     payload = payload.model_copy(update={"session_id": session_id})
     append_user_message(session_id, payload.message)
@@ -608,6 +674,13 @@ def _sse(event: str, data: Any) -> str:
 def assistant_messages_stream_route(payload: ChatMessageRequest, request: Request) -> StreamingResponse:
     """SSE assistant entrypoint. Ordinary LLM replies stream; tool results are sent as one final event."""
     request_id = getattr(request.state, "request_id", "n/a")
+    if payload.active_task_id:
+        ingestion = get_ingestion(payload.active_task_id)
+        if ingestion:
+            _assert_ingestion_owner(ingestion, request)
+    current_user = _current_user_from_request(request)
+    if current_user.userId:
+        payload = payload.model_copy(update={"user_id": current_user.userId, "org_id": current_user.orgId})
     session_id = ensure_session_id(payload.session_id)
     payload = payload.model_copy(update={"session_id": session_id})
     append_user_message(session_id, payload.message)
@@ -681,6 +754,13 @@ def assistant_llm_router_probe_route(
     request: Request,
 ) -> AssistantLlmProbeResponse:
     request_id = getattr(request.state, "request_id", "n/a")
+    current_user = _current_user_from_request(request)
+    if current_user.userId:
+        payload = payload.model_copy(update={"user_id": current_user.userId, "org_id": current_user.orgId})
+    if payload.active_task_id:
+        ingestion = get_ingestion(payload.active_task_id)
+        if ingestion:
+            _assert_ingestion_owner(ingestion, request)
     logger.info("assistant_llm_probe request_id=%s message_len=%s", request_id, len(payload.message or ""))
     return probe_llm_router(
         ChatMessageRequest(
@@ -747,6 +827,7 @@ def get_ingestion_route(ingestion_id: str, request: Request) -> IngestionRespons
     if not ingestion:
         logger.warning("ingestion_not_found request_id=%s ingestion_id=%s", getattr(request.state, "request_id", "n/a"), ingestion_id)
         raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner(ingestion, request)
     return ingestion
 
 
@@ -768,6 +849,7 @@ def get_ingestion_document_route(
             ingestion_id,
         )
         raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner(ingestion, request)
     payload = build_document_parse_export(ingestion, include_full_text=include_full_text)
     logger.info(
         "ingestion_document_export request_id=%s ingestion_id=%s include_full_text=%s",
@@ -788,6 +870,7 @@ def get_ingestion_erp_payload_route(ingestion_id: str, request: Request) -> ErpP
             ingestion_id,
         )
         raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner(ingestion, request)
     doc_type = "PO" if ingestion.doc_type_hint is None else ingestion.doc_type_hint.value
     payload = build_datynk_sale_order_payload(ingestion)
     return ErpPayloadPreviewResponse(
@@ -803,6 +886,11 @@ def resolve_ingestion_route(ingestion_id: str, payload: ResolveIngestionRequest,
     # 当任务进入 NEED_USER_INPUT 状态时，前端会把用户补全字段提交到这里。
     # 后端会合并已解析字段与用户补充字段，然后重新执行校验，
     # 并据结果把状态推进到 VALIDATED 或继续维持 NEED_USER_INPUT。
+    existing = get_ingestion(ingestion_id)
+    if not existing:
+        logger.warning("resolve_ingestion_not_found request_id=%s ingestion_id=%s", getattr(request.state, "request_id", "n/a"), ingestion_id)
+        raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner(existing, request)
     ingestion = resolve_ingestion(ingestion_id, payload)
     if not ingestion:
         logger.warning("resolve_ingestion_not_found request_id=%s ingestion_id=%s", getattr(request.state, "request_id", "n/a"), ingestion_id)
@@ -818,6 +906,15 @@ def resolve_ingestion_route(ingestion_id: str, payload: ResolveIngestionRequest,
 
 @router.post("/ingestions/{ingestion_id}/confirm-preview", response_model=IngestionResponse)
 def confirm_preview_route(ingestion_id: str, payload: ConfirmPreviewRequest, request: Request) -> IngestionResponse:
+    existing = get_ingestion(ingestion_id)
+    if not existing:
+        logger.warning(
+            "confirm_preview_not_found request_id=%s ingestion_id=%s",
+            getattr(request.state, "request_id", "n/a"),
+            ingestion_id,
+        )
+        raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner(existing, request)
     ingestion = confirm_preview_for_ingestion(ingestion_id, payload.preview_data)
     if not ingestion:
         logger.warning(
@@ -840,6 +937,15 @@ def create_draft_route(ingestion_id: str, request: Request) -> CreateDraftRespon
     # 创建草稿接口必须幂等：同一个 ingestion 重复触发不能重复建单。
     # 因此 store 层会根据稳定的 idempotency_key 返回同一草稿结果，
     # 从而避免“重复上传/重复点击”造成 ERP 侧重复草稿。
+    ingestion = get_ingestion(ingestion_id)
+    if not ingestion:
+        logger.warning(
+            "create_draft_ingestion_not_found request_id=%s ingestion_id=%s",
+            getattr(request.state, "request_id", "n/a"),
+            ingestion_id,
+        )
+        raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner(ingestion, request)
     draft = create_draft_for_ingestion(ingestion_id)
     if not draft:
         logger.warning(
@@ -860,6 +966,16 @@ def create_draft_route(ingestion_id: str, request: Request) -> CreateDraftRespon
 
 @router.post("/ingestions/{ingestion_id}/cancel", response_model=IngestionResponse)
 def cancel_ingestion_route(ingestion_id: str, request: Request) -> IngestionResponse:
+    existing = get_ingestion(ingestion_id)
+    if existing is None:
+        logger.warning(
+            "cancel_ingestion_not_found request_id=%s ingestion_id=%s queue_removed=%s",
+            getattr(request.state, "request_id", "n/a"),
+            ingestion_id,
+            False,
+        )
+        raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner(existing, request)
     removed = remove_ingestion_job(ingestion_id)
     ingestion = cancel_ingestion(ingestion_id, "canceled after chat session deletion")
     if ingestion is None:

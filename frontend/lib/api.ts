@@ -201,6 +201,7 @@ export async function postUploadBinary(
   try {
     response = await fetch(url, {
       method: "POST",
+      credentials: "include",
       headers: { "x-request-id": requestId },
       body: form,
     });
@@ -261,7 +262,12 @@ export async function postChatFile(
   clientLogger.info("发起对话式文件上传", { requestId, url, fileName: file.name, fileSize: file.size });
   let response: Response;
   try {
-    response = await fetch(url, { method: "POST", headers: { "x-request-id": requestId }, body: form });
+    response = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: { "x-request-id": requestId },
+      body: form,
+    });
   } catch (e) {
     clientLogger.error("对话式文件上传网络异常", { requestId, url, error: e });
     throw e;
@@ -389,6 +395,7 @@ export async function streamAssistantMessage(
 
   const response = await fetch(url, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Accept": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -463,7 +470,12 @@ export async function postAssistantFile(
   clientLogger.info("发起助手文件上传", { requestId, url, fileName: file.name, fileSize: file.size });
   let response: Response;
   try {
-    response = await fetch(url, { method: "POST", headers: { "x-request-id": requestId }, body: form });
+    response = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: { "x-request-id": requestId },
+      body: form,
+    });
   } catch (e) {
     clientLogger.error("助手文件上传网络异常", { requestId, url, error: e });
     throw e;

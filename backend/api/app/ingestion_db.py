@@ -282,6 +282,26 @@ def get_by_file_hash(session: Session, file_hash: str) -> Optional[IngestionResp
     return row_to_ingestion(row)
 
 
+def get_by_file_hash_and_user_id(session: Session, file_hash: str, user_id: str) -> Optional[IngestionResponse]:
+    stmt = (
+        select(IngestionRow)
+        .where(IngestionRow.file_hash == file_hash, IngestionRow.user_id == user_id)
+        .limit(1)
+    )
+    row = session.execute(stmt).scalar_one_or_none()
+    if row is None:
+        logger.info("db_ingestion_not_found_by_hash_user file_hash_prefix=%s user_id=%s", file_hash[:12], user_id)
+        return None
+    logger.info(
+        "db_ingestion_loaded_by_hash_user ingestion_id=%s file_hash_prefix=%s user_id=%s status=%s",
+        row.ingestion_id,
+        file_hash[:12],
+        user_id,
+        row.status,
+    )
+    return row_to_ingestion(row)
+
+
 def upsert_ingestion(session: Session, ing: IngestionResponse) -> None:
     """按 ingestion_id upsert：存在则更新，不存在则插入。"""
     row = session.get(IngestionRow, ing.ingestion_id)
