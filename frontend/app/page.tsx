@@ -2459,30 +2459,6 @@ export default function HomePage() {
               className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[#f5f6f8]"
             >
               <div className="flex w-full flex-col gap-4 px-5 py-4 lg:px-7">
-                {workspaceMode === "pdf_to_erp" ? (
-                  <>
-                    <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
-                      <div className="border-b border-slate-100 px-5 py-4 text-base font-semibold text-slate-950">
-                        上传到：PDF 转 ERP
-                      </div>
-                      <button
-                        type="button"
-                        disabled={isUploading}
-                        onClick={() => fileInputRef.current?.click()}
-                        className="m-5 flex min-h-[10.5rem] w-[calc(100%-2.5rem)] flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-center transition hover:border-blue-400 hover:bg-blue-50/40 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        <svg className="h-10 w-10 text-blue-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-                          <path d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5" strokeLinecap="round" />
-                          <path d="M12 4v12m0-12 4 4m-4-4-4 4" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                        <div className="mt-4 text-sm font-semibold text-slate-950">
-                          {isUploading ? "正在上传并创建任务..." : "点击或拖拽 PDF 文件到此处上传"}
-                        </div>
-                        <div className="mt-2 text-sm text-slate-400">支持 PDF，单个文件建议不超过 29MB</div>
-                      </button>
-                    </section>
-                  </>
-                ) : null}
                 <div className="flex w-full flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                     <div className="text-base font-semibold text-slate-950">
@@ -2592,6 +2568,28 @@ export default function HomePage() {
                   })}
                   <div ref={chatEndRef} className="h-0 shrink-0" aria-hidden />
                 </div>
+                {workspaceMode === "pdf_to_erp" ? (
+                  <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+                    <div className="border-b border-slate-100 px-5 py-4 text-base font-semibold text-slate-950">
+                      上传 PDF
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isUploading}
+                      onClick={() => fileInputRef.current?.click()}
+                      className="m-5 flex min-h-[10.5rem] w-[calc(100%-2.5rem)] flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-center transition hover:border-blue-400 hover:bg-blue-50/40 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <svg className="h-10 w-10 text-blue-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                        <path d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5" strokeLinecap="round" />
+                        <path d="M12 4v12m0-12 4 4m-4-4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      <div className="mt-4 text-sm font-semibold text-slate-950">
+                        {isUploading ? "正在上传并创建任务..." : "点击或拖拽 PDF 文件到此处上传"}
+                      </div>
+                      <div className="mt-2 text-sm text-slate-400">支持 PDF，单个文件建议不超过 29MB</div>
+                    </button>
+                  </section>
+                ) : null}
                 {/*
                 <details
                   className="w-full rounded-xl border border-slate-200/90 bg-white/70 px-3 py-2 shadow-sm [contain:layout_paint_style] [content-visibility:auto] [contain-intrinsic-size:520px]"
