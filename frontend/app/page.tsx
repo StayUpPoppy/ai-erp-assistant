@@ -2456,23 +2456,23 @@ export default function HomePage() {
 
             <div
               ref={chatScrollRef}
-              className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[#f5f6f8]"
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-white"
             >
-              <div className="flex w-full flex-col gap-4 px-5 py-4 lg:px-7">
-                <div className="flex w-full flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                    <div className="text-base font-semibold text-slate-950">
-                      {workspaceMode === "pdf_to_erp" ? "处理记录" : "对话记录"}
+              <div className="flex min-h-full w-full flex-col gap-4 px-5 py-4 lg:px-7">
+                <div className="flex min-h-full w-full flex-col gap-3">
+                  {workspaceMode !== "pdf_to_erp" ? (
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                      <div className="text-base font-semibold text-slate-950">对话记录</div>
+                      <div className="text-xs text-slate-400">{chatMessages.length ? `${chatMessages.length} 条消息` : ""}</div>
                     </div>
-                    <div className="text-xs text-slate-400">{chatMessages.length ? `${chatMessages.length} 条消息` : "No data"}</div>
-                  </div>
-                  {chatMessages.length === 0 ? (
+                  ) : null}
+                  {workspaceMode === "assistant" && chatMessages.length === 0 ? (
                     <div className="mx-auto flex min-h-[18rem] w-full max-w-2xl flex-col items-center justify-center text-center">
                       <div className="text-lg font-semibold tracking-tight text-slate-900">
-                        {workspaceMode === "pdf_to_erp" ? "ERP 单据生成" : "普通对话 / ERP库存查询窗口"}
+                        普通对话 / ERP库存查询窗口
                       </div>
                       <p className="mt-3 max-w-xl text-sm leading-6 text-slate-500">
-                        {workspaceMode === "pdf_to_erp"
+                        {workspaceMode !== "assistant"
                           ? "请上传 PDF 文件开始识别和生成 ERP 草稿；此模式不接收文字对话。"
                           : "可直接输入普通问题，也可以查询 ERP 库存、供应商、物料等业务数据。"}
                       </p>
@@ -2569,7 +2569,7 @@ export default function HomePage() {
                   <div ref={chatEndRef} className="h-0 shrink-0" aria-hidden />
                 </div>
                 {workspaceMode === "pdf_to_erp" ? (
-                  <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+                  <section className="hidden">
                     <div className="border-b border-slate-100 px-5 py-4 text-base font-semibold text-slate-950">
                       上传 PDF
                     </div>
@@ -3062,7 +3062,29 @@ export default function HomePage() {
                   e.target.value = "";
                 }}
               />
-              {workspaceMode === "pdf_to_erp" ? null : (
+              {workspaceMode === "pdf_to_erp" ? (
+                <div className="flex w-full max-w-none flex-col gap-2 py-3">
+                  <button
+                    type="button"
+                    disabled={isUploading}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex min-h-[3.5rem] w-full items-center gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-left text-sm text-slate-700 transition hover:border-blue-300 hover:bg-blue-50/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-white text-blue-700 ring-1 ring-slate-200">
+                      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                        <path d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5" strokeLinecap="round" />
+                        <path d="M12 4v12m0-12 4 4m-4-4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium text-slate-900">
+                        {isUploading ? "正在上传并创建任务..." : "选择 PDF 文件或拖拽到窗口上传"}
+                      </span>
+                      <span className="mt-0.5 block truncate text-xs text-slate-400">支持 PDF，单个文件建议不超过 29MB</span>
+                    </span>
+                  </button>
+                </div>
+              ) : (
                 <div className="flex w-full max-w-none flex-col gap-2 py-3">
                   <div className="flex items-end gap-3">
                     <textarea
