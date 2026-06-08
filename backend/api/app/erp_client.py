@@ -63,6 +63,9 @@ class ErpClientProtocol(Protocol):
     def search_materials(self, org_id: str, keyword: str) -> List[Dict[str, str]]:
         ...
 
+    def get_customer_material_details_by_customer(self, customer_name: str) -> List[Dict[str, str]]:
+        ...
+
     def search_warehouses(self, org_id: str, keyword: str) -> List[Dict[str, str]]:
         ...
 
@@ -135,6 +138,9 @@ class CompositeDualErpClient:
 
     def search_materials(self, org_id: str, keyword: str) -> List[Dict[str, str]]:
         return self._master.search_materials(org_id, keyword)
+
+    def get_customer_material_details_by_customer(self, customer_name: str) -> List[Dict[str, str]]:
+        return self._master.get_customer_material_details_by_customer(customer_name)
 
     def search_warehouses(self, org_id: str, keyword: str) -> List[Dict[str, str]]:
         return self._master.search_warehouses(org_id, keyword)
@@ -217,6 +223,36 @@ class MockErpClient:
         return [
             {"material_code": "M001", "material_name": "Mock Material A"},
             {"material_code": "M002", "material_name": "Mock Material B"},
+        ]
+
+    def get_customer_material_details_by_customer(self, customer_name: str) -> List[Dict[str, str]]:
+        if not customer_name:
+            return []
+        return [
+            {
+                "detailId": "1",
+                "mapId": "1",
+                "custMaterialCode": "N100",
+                "custMaterialName": "碟簧",
+                "custMaterialModel": "D100101",
+                "materialNumber": "S01P019433",
+                "materialName": "压缩弹簧",
+                "materialModel": "左旋8*64.5*196*9.5",
+                "ph": "55CrSiA",
+                "status": "enabled",
+            },
+            {
+                "detailId": "2",
+                "mapId": "1",
+                "custMaterialCode": "N200",
+                "custMaterialName": "碟簧",
+                "custMaterialModel": "D100102",
+                "materialNumber": "S01P019427",
+                "materialName": "压缩弹簧",
+                "materialModel": "左18*252*597*10.5",
+                "ph": "60Si2Mn",
+                "status": "enabled",
+            },
         ]
 
     def search_warehouses(self, org_id: str, keyword: str) -> List[Dict[str, str]]:
@@ -419,6 +455,10 @@ class RealErpClient:
         self.customer_page_path = os.getenv("ERP_CUSTOMER_PAGE_PATH", "/api/customer/page").strip() or "/api/customer/page"
         self.customer_page_keyword_param = (
             os.getenv("ERP_CUSTOMER_PAGE_KEYWORD_PARAM", "customerName").strip() or "customerName"
+        )
+        self.customer_material_details_by_customer_path = (
+            os.getenv("ERP_CUSTOMER_MATERIAL_DETAILS_BY_CUSTOMER_PATH", "/api/customer-material/details-by-customer").strip()
+            or "/api/customer-material/details-by-customer"
         )
         _sf = os.getenv("ERP_SOFT_FAIL_MASTER_SEARCH", "").strip().lower()
         if _sf in ("1", "true", "yes", "on"):
@@ -827,6 +867,29 @@ class RealErpClient:
     def search_materials(self, org_id: str, keyword: str) -> List[Dict[str, str]]:
         raw = self._master_search_get(self.materials_search_path, org_id, keyword, self.materials_search_keyword_param)
         return RealErpClient._apply_master_display_aliases("material", raw)
+
+    def get_customer_material_details_by_customer(self, customer_name: str) -> List[Dict[str, str]]:
+        name = (customer_name or "").strip()
+        if not name:
+            return []
+        path = self.customer_material_details_by_customer_path
+        p = path if path.startswith("/") else f"/{path}"
+        qs = parse.urlencode({"customerName": name})
+        body = self._request_json("GET", f"{p}?{qs}")
+        code = body.get("code")
+        ok = False
+        try:
+            ok = int(code) in (0, 200)
+        except (TypeError, ValueError):
+            ok = str(code).strip() in {"0", "200"}
+        if not ok:
+            logger.warning(
+                "erp_customer_material_details_bad_code code=%s message=%s",
+                code,
+                body.get("message"),
+            )
+            return []
+        return self._normalize_items(body.get("data"))
 
     def search_warehouses(self, org_id: str, keyword: str) -> List[Dict[str, str]]:
         raw = self._master_search_get(self.warehouses_search_path, org_id, keyword, self.warehouses_search_keyword_param)

@@ -253,6 +253,40 @@ def test_real_erp_client_supports_request_payload_mapping(monkeypatch):
     assert draft_url == "https://erp/drafts/PO-DRAFT-1001"
 
 
+def test_real_erp_customer_material_details_by_customer(monkeypatch):
+    monkeypatch.setenv("ERP_CLIENT_MODE", "real")
+    monkeypatch.setenv("ERP_BASE_URL", "https://erp.example.com")
+    import app.erp_client as erp_client_module
+
+    importlib.reload(erp_client_module)
+    client = erp_client_module.erp_client
+    assert isinstance(client, erp_client_module.RealErpClient)
+
+    captured: dict[str, object] = {}
+
+    def _fake_request_json(method, path, payload=None):
+        captured["method"] = method
+        captured["path"] = path
+        return {
+            "code": 0,
+            "data": [
+                {
+                    "custMaterialCode": "N100",
+                    "materialNumber": "S01P019433",
+                    "materialName": "Internal",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(client, "_request_json", _fake_request_json)
+    rows = client.get_customer_material_details_by_customer("浙江欧菲石油设备有限公司")
+
+    assert rows == [{"custMaterialCode": "N100", "materialNumber": "S01P019433", "materialName": "Internal"}]
+    assert captured["method"] == "GET"
+    assert str(captured["path"]).startswith("/api/customer-material/details-by-customer?")
+    assert "customerName=" in str(captured["path"])
+
+
 def test_real_erp_client_refreshes_token_on_401(monkeypatch):
     monkeypatch.setenv("ERP_CLIENT_MODE", "real")
     monkeypatch.setenv("ERP_BASE_URL", "https://erp.example.com")

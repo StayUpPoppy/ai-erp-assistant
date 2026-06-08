@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.erp_payload_preview import build_datynk_sale_order_payload
-from app.order_preview import build_order_preview_data
+from app.order_preview import apply_customer_material_mapping, build_order_preview_data, normalize_customer_material_code
 from app.schemas import IngestionResponse, IngestionStatus, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader
 
 
@@ -98,3 +98,51 @@ def test_order_preview_keeps_tax_and_non_tax_fields_separate() -> None:
     assert detail.taxPrice == 11.3
     assert detail.amount == 20
     assert detail.allAmount == 22.6
+
+
+def test_customer_material_mapping_exact_and_normalized_match() -> None:
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(customerName="Acme"),
+        details=[
+            OrderPreviewDetail(materialCode="N100", productName="Old A", productSpec="Spec A", qty=1),
+            OrderPreviewDetail(materialCode=" n-200 ", productName="Old B", productSpec="Spec B", qty=2),
+            OrderPreviewDetail(materialCode="X999", productName="Old C", productSpec="Spec C", qty=3),
+        ],
+    )
+    mapped, metrics, issues = apply_customer_material_mapping(
+        preview,
+        [
+            {
+                "custMaterialCode": "N100",
+                "materialNumber": "S01P019433",
+                "materialName": "Internal A",
+                "materialModel": "Internal Spec A",
+                "ph": "55CrSiA",
+            },
+            {
+                "custMaterialCode": "N200",
+                "materialNumber": "S01P019427",
+                "materialName": "Internal B",
+                "materialModel": "Internal Spec B",
+                "ph": "60Si2Mn",
+            },
+        ],
+    )
+
+    assert mapped.details[0].customerMaterialNo == "N100"
+    assert mapped.details[0].materialCode == "S01P019433"
+    assert mapped.details[0].productName == "Old A"
+    assert mapped.details[0].productSpec == "Spec A"
+    assert mapped.details[0].ph == ""
+    assert mapped.details[1].customerMaterialNo == "n-200"
+    assert mapped.details[1].materialCode == "S01P019427"
+    assert mapped.details[1].productName == "Old B"
+    assert mapped.details[1].productSpec == "Spec B"
+    assert mapped.details[2].materialCode == "X999"
+    assert metrics == {"mapping_rows": 2, "matched": 2, "exact": 1, "normalized": 1, "unmatched": 1}
+    assert len(issues) == 1
+    assert issues[0].path == "details[2].materialCode"
+
+
+def test_normalize_customer_material_code_handles_full_width_and_separators() -> None:
+    assert normalize_customer_material_code(" Ｎ-１００. ") == "N100"

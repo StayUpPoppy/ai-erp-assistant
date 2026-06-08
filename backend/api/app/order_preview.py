@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from typing import Any, Dict, Iterable, List, Tuple
 
 from app.schemas import (
@@ -161,6 +163,97 @@ def preview_issues(preview: OrderPreviewData) -> List[PreviewIssue]:
                     )
                 )
     return issues
+
+
+def normalize_customer_material_code(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).strip().upper()
+    if not text:
+        return ""
+    return re.sub(r"[\s\-_./\\,，、。]+", "", text)
+
+
+def apply_customer_material_mapping(
+    preview: OrderPreviewData,
+    mapping_details: Iterable[Dict[str, Any]],
+) -> Tuple[OrderPreviewData, Dict[str, int], List[PreviewIssue]]:
+    exact_index: Dict[str, Dict[str, str]] = {}
+    normalized_index: Dict[str, Dict[str, str]] = {}
+    duplicate_normalized: set[str] = set()
+
+    for raw_row in mapping_details:
+        row = {str(k): str(v).strip() for k, v in dict(raw_row).items() if v is not None}
+        cust_code = (row.get("custMaterialCode") or "").strip()
+        internal_code = (row.get("materialNumber") or "").strip()
+        if not cust_code or not internal_code:
+            continue
+        if cust_code not in exact_index:
+            exact_index[cust_code] = row
+        norm = normalize_customer_material_code(cust_code)
+        if not norm:
+            continue
+        if norm in normalized_index:
+            duplicate_normalized.add(norm)
+        else:
+            normalized_index[norm] = row
+
+    matched = 0
+    exact = 0
+    normalized = 0
+    unmatched = 0
+    issues: List[PreviewIssue] = []
+    next_details: List[OrderPreviewDetail] = []
+
+    for idx, detail in enumerate(preview.details):
+        raw_code = (detail.customerMaterialNo or detail.materialCode or "").strip()
+        if not raw_code:
+            next_details.append(detail)
+            continue
+
+        hit = exact_index.get(raw_code)
+        method = "exact"
+        if hit is None:
+            norm = normalize_customer_material_code(raw_code)
+            if norm and norm not in duplicate_normalized:
+                hit = normalized_index.get(norm)
+                method = "normalized"
+
+        if hit is None:
+            unmatched += 1
+            issues.append(
+                PreviewIssue(
+                    path=f"details[{idx}].materialCode",
+                    level="warning",
+                    message=f"客户物料编码 {raw_code} 未匹配到 ERP 内部物料编码，请人工核对",
+                )
+            )
+            next_details.append(detail)
+            continue
+
+        matched += 1
+        if method == "exact":
+            exact += 1
+        else:
+            normalized += 1
+        next_details.append(
+            detail.model_copy(
+                update={
+                    "customerMaterialNo": raw_code,
+                    "materialCode": hit.get("materialNumber") or detail.materialCode,
+                }
+            )
+        )
+
+    return (
+        preview.model_copy(update={"details": next_details}),
+        {
+            "mapping_rows": len(exact_index),
+            "matched": matched,
+            "exact": exact,
+            "normalized": normalized,
+            "unmatched": unmatched,
+        },
+        issues,
+    )
 
 
 def preview_editable_fields(preview: OrderPreviewData) -> List[PreviewEditableField]:

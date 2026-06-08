@@ -38,7 +38,7 @@ from app.erp_client import ErpClientError, ErpClientProtocol, clear_last_upstrea
 from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus
 from app.extraction_profile import apply_field_aliases, get_profile, refresh_ingestion_required_keys
 from app.llm_extract import try_apply_llm_preview
-from app.order_preview import apply_preview_to_ingestion, build_order_preview_data
+from app.order_preview import apply_customer_material_mapping, apply_preview_to_ingestion, build_order_preview_data
 from app.structured_extract import (
     extract_po_cn_layout_entities,
     extract_structured_fields,
@@ -462,17 +462,49 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
         if preview is None:
             apply_preview_to_ingestion(ing, None)
             return {"preview": 0}
+        customer_material_metrics: Dict[str, int] = {}
+        customer_name = (preview.order.customerName or "").strip()
+        if customer_name:
+            try:
+                rows = state["erp"].get_customer_material_details_by_customer(customer_name)
+            except Exception as exc:
+                if getattr(exc, "code", None) is None:
+                    raise
+                rows = []
+                logger.warning(
+                    "customer_material_mapping_fetch_failed ingestion_id=%s code=%s status=%s",
+                    ing.ingestion_id,
+                    getattr(exc, "code", ""),
+                    getattr(exc, "status_code", 0),
+                )
+            if rows:
+                preview, customer_material_metrics, mapping_issues = apply_customer_material_mapping(preview, rows)
+            else:
+                customer_material_metrics = {"mapping_rows": 0, "matched": 0, "exact": 0, "normalized": 0, "unmatched": 0}
+                mapping_issues = []
+        else:
+            customer_material_metrics = {"mapping_rows": 0, "matched": 0, "exact": 0, "normalized": 0, "unmatched": 0}
+            mapping_issues = []
         apply_preview_to_ingestion(ing, preview)
+        if mapping_issues:
+            ing.issues.extend(mapping_issues)
         state["append_event"](
             ing,
             IngestionStatus.MAPPED,
-            f"order preview prepared details={len(preview.details)} editable={len(ing.editable_fields)} issues={len(ing.issues)}",
+            f"order preview prepared details={len(preview.details)} editable={len(ing.editable_fields)} issues={len(ing.issues)} "
+            f"customer_material matched={customer_material_metrics.get('matched', 0)} "
+            f"exact={customer_material_metrics.get('exact', 0)} normalized={customer_material_metrics.get('normalized', 0)} "
+            f"unmatched={customer_material_metrics.get('unmatched', 0)} rows={customer_material_metrics.get('mapping_rows', 0)}",
         )
         return {
             "preview": 1,
             "details": len(preview.details),
             "editable_fields": len(ing.editable_fields),
             "issues": len(ing.issues),
+            "customer_material_matched": customer_material_metrics.get("matched", 0),
+            "customer_material_exact": customer_material_metrics.get("exact", 0),
+            "customer_material_normalized": customer_material_metrics.get("normalized", 0),
+            "customer_material_unmatched": customer_material_metrics.get("unmatched", 0),
         }
 
     _run_node(state["ingestion"], "build_preview", _preview_impl)
