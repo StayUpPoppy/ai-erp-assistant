@@ -65,6 +65,13 @@ def _should_force_datynk_sale_order_doc_type() -> bool:
     )
 
 
+def _should_require_purchase_order_evidence() -> bool:
+    raw = os.getenv("WORKFLOW_REQUIRE_PURCHASE_ORDER_EVIDENCE")
+    if raw is not None:
+        return _env_truthy("WORKFLOW_REQUIRE_PURCHASE_ORDER_EVIDENCE", True)
+    return _should_force_datynk_sale_order_doc_type()
+
+
 def _force_datynk_sale_order_doc_type(ing: IngestionResponse) -> bool:
     if not _should_force_datynk_sale_order_doc_type():
         return False
@@ -107,6 +114,8 @@ def _map_erp_error_for_workflow(err_code: str) -> str:
 
 def _resolve_workflow_error_code(exc: NodeExecutionError) -> str:
     # 细粒度错误码映射：优先返回“节点 + 场景”级别，便于前端与告警分流。
+    if exc.reason.startswith("unsupported_document"):
+        return ErrorCode.UNSUPPORTED_DOCUMENT.value
     if exc.failure_type == "timeout":
         timeout_map = {
             "parse": ErrorCode.WORKFLOW_PARSE_RETRY_TIMEOUT.value,
@@ -122,6 +131,64 @@ def _resolve_workflow_error_code(exc: NodeExecutionError) -> str:
         }
         return exhausted_map.get(exc.node_name, ErrorCode.WORKFLOW_RETRY_EXHAUSTED.value)
     return ErrorCode.WORKFLOW_NODE_FAILED.value
+
+
+def _purchase_order_evidence(ing: IngestionResponse, text: str) -> Tuple[bool, str]:
+    if not _should_require_purchase_order_evidence():
+        return True, "disabled"
+    name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
+    name_guess = classify_doc_type_from_name(name)
+    text_guess = classify_doc_type_from_text(text)
+    if name_guess in {"INV", "GR"}:
+        return False, f"name_classified_as_{name_guess}"
+    if text_guess in {"INV", "GR"}:
+        return False, f"text_classified_as_{text_guess}"
+    if name_guess == "PO":
+        return True, "name_classified_as_PO"
+    if text_guess == "PO":
+        return True, "text_classified_as_PO"
+
+    corpus = f"{name}\n{text}".lower()
+    strong_phrases = (
+        "purchase order",
+        "purchase order no",
+        "purchase order number",
+        "po number",
+        "supplier po",
+        "standard purchase order",
+        "采购订单",
+        "标准采购订单",
+        "客户采购订单",
+        "采购订单号",
+    )
+    if any(phrase in corpus for phrase in strong_phrases):
+        return True, "strong_purchase_order_phrase"
+
+    weak_signals = (
+        "srm",
+        "sap",
+        "supplier",
+        "vendor",
+        "material",
+        "material code",
+        "quantity",
+        "delivery date",
+        "plant",
+        "采购",
+        "供应商",
+        "物料",
+        "数量",
+        "交货",
+        "工厂",
+        "采购组织",
+        "订单日期",
+    )
+    weak_count = sum(1 for signal in weak_signals if signal in corpus)
+    has_line_signal = any(signal in corpus for signal in ("material", "material code", "物料"))
+    has_quantity_signal = any(signal in corpus for signal in ("quantity", "qty", "数量"))
+    if weak_count >= 4 and has_line_signal and has_quantity_signal:
+        return True, f"weak_purchase_order_signals={weak_count}"
+    return False, f"insufficient_purchase_order_evidence name_guess={name_guess or 'none'} text_guess={text_guess or 'none'} weak={weak_count}"
 
 
 def _node_retry_config(node_name: str, default_max_retries: int = 0, default_backoff_ms: int = 0) -> Dict[str, int]:
@@ -168,6 +235,8 @@ def _run_node(
     logger.info("workflow_node_start ingestion_id=%s node=%s", ingestion.ingestion_id, node_name)
     try:
         metrics = fn()
+    except NodeExecutionError:
+        raise
     except Exception as exc:
         elapsed_ms = int((perf_counter() - start) * 1000)
         logger.exception(
@@ -259,6 +328,17 @@ def _node_extract(state: WorkflowState) -> WorkflowState:
     def _extract_impl() -> Dict[str, int]:
         ing = state["ingestion"]
         text = state["document_text"] or ""
+        ok, evidence_reason = _purchase_order_evidence(ing, text)
+        if not ok:
+            ing.error_details = {
+                "category": "unsupported_document",
+                "reason": evidence_reason,
+            }
+            raise NodeExecutionError(
+                node_name="extract",
+                reason=f"unsupported_document {evidence_reason}",
+                failure_type="node",
+            )
         if ing.doc_type_hint is None:
             gt = classify_doc_type_from_text(text)
             if gt:
@@ -338,6 +418,8 @@ def _run_node_with_retry(
             return metrics
         except NodeExecutionError as exc:
             elapsed_ms = int((perf_counter() - started) * 1000)
+            if "unsupported_document" in exc.reason:
+                raise exc
             if max_elapsed_ms > 0 and elapsed_ms >= max_elapsed_ms:
                 logger.error(
                     "workflow_node_timeout ingestion_id=%s node=%s elapsed_ms=%s max_elapsed_ms=%s",

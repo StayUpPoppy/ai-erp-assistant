@@ -98,6 +98,41 @@ def test_workflow_unknown_node_falls_back_to_generic_error(monkeypatch):
     assert ingestion.error_code == ErrorCode.WORKFLOW_RETRY_EXHAUSTED.value
 
 
+def test_workflow_unsupported_document_maps_to_error(monkeypatch):
+    def _raise_unsupported(_state):
+        raise NodeExecutionError(
+            node_name="extract",
+            reason="unsupported_document insufficient_purchase_order_evidence",
+            failure_type="node",
+        )
+
+    monkeypatch.setattr("app.workflow._run_linearly", _raise_unsupported)
+    monkeypatch.setattr("app.workflow.StateGraph", None)
+    monkeypatch.setattr("app.workflow.END", None)
+
+    ingestion = run_ingestion_processing_workflow(
+        ingestion=_new_ingestion(),
+        erp=MockErpClient(),
+        append_event=_append_event,
+    )
+    assert ingestion.status == IngestionStatus.FAILED
+    assert ingestion.error_code == ErrorCode.UNSUPPORTED_DOCUMENT.value
+
+
+def test_purchase_order_evidence_rejects_unrelated_pdf(monkeypatch):
+    from app.workflow import _purchase_order_evidence
+
+    monkeypatch.setenv("WORKFLOW_REQUIRE_PURCHASE_ORDER_EVIDENCE", "true")
+    ingestion = _new_ingestion()
+    ingestion.source_file_name = "resume.pdf"
+    ok, reason = _purchase_order_evidence(
+        ingestion,
+        "Curriculum vitae. Education, work experience, project summary, skills, contact information.",
+    )
+    assert not ok
+    assert reason.startswith("insufficient_purchase_order_evidence")
+
+
 def test_node_map_continues_when_erp_search_raises():
     """主数据映射阶段：单个 ERP 查询失败时降级为空列表，避免简历等非单据 PDF 因上游 5xx 整单失败。"""
     from app.erp_client import ErpClientError, MockErpClient

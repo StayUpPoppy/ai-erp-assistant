@@ -392,6 +392,12 @@ function pdfToErpWorkflowCardText(ingestion: IngestionResponse, status: Ingestio
   if (status === "DRAFT_CREATED") {
     return ingestion.draft_no ? `ERP 草稿已经创建：${ingestion.draft_no}` : "ERP 草稿已经创建。";
   }
+  if (status === "FAILED" && ingestion.error_code === "UNSUPPORTED_DOCUMENT") {
+    return "";
+  }
+  if (status === "FAILED" && ingestion.error_code === "UNSUPPORTED_DOCUMENT") {
+    return "当前文件非采购订单，已停止处理。请重新上传采购订单";
+  }
   if (status === "FAILED") {
     return "这次 PDF 转 ERP 处理失败了，我把错误信息放在下面。";
   }
@@ -413,6 +419,19 @@ function hasWorkflowCardForIngestion(messages: ChatMessage[], ingestion: Ingesti
     if (!["missing_fields_form", "upload_confirm", "draft_result", "error"].includes(ui.type)) return false;
     return String(ui.data.ingestion_id ?? "") === ingestion.ingestion_id && String(ui.data.status ?? "") === status;
   });
+}
+
+function chatMessageDedupeKey(message: Pick<ChatMessage, "role" | "content" | "toolUi">): string {
+  const ui = message.toolUi;
+  if (!ui) return `${message.role}:text:${message.content}`;
+  return [
+    message.role,
+    ui.type,
+    String(ui.data.ingestion_id ?? ""),
+    String(ui.data.status ?? ""),
+    String(ui.data.error_code ?? ""),
+    message.content,
+  ].join(":");
 }
 
 function formatPreviewAmount(value: number | null | undefined, currency: string | null | undefined): string {
@@ -957,16 +976,27 @@ export default function HomePage() {
   }, [ingestion?.ingestion_id, ingestion?.preview_data, orgId, userName]);
 
   const appendChat = useCallback((role: ChatRole, content: string, extra?: Partial<ChatMessage>) => {
-    setChatMessages((prev) => [
-      ...prev,
-      {
+    setChatMessages((prev) => {
+      const nextMessage: ChatMessage = {
         id: `${Date.now()}-${Math.random()}`,
         role,
         content,
         createdAt: new Date().toISOString(),
         ...extra,
-      },
-    ]);
+      };
+      const nextKey = chatMessageDedupeKey(nextMessage);
+      if (nextMessage.toolUi) {
+        if (prev.some((message) => chatMessageDedupeKey(message) === nextKey)) {
+          return prev;
+        }
+      } else {
+        const last = prev[prev.length - 1];
+        if (last && chatMessageDedupeKey(last) === nextKey) {
+          return prev;
+        }
+      }
+      return [...prev, nextMessage];
+    });
   }, []);
 
   const getAssistantSessionId = useCallback(() => {
@@ -2121,7 +2151,12 @@ export default function HomePage() {
           return acc;
         }, {});
         return (
-          <div className="mt-3 rounded-xl border border-red-200 bg-red-50/80 p-3 text-sm text-red-950">
+          <div
+            className={[
+              "mt-3 rounded-xl border border-red-200 bg-red-50/80 p-3 text-sm text-red-950",
+              String(ui.data.error_code ?? "UNKNOWN") === "UNSUPPORTED_DOCUMENT" ? "[&>div:first-child]:hidden" : "",
+            ].join(" ")}
+          >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="font-semibold">需要补充的信息</div>
               <span className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-red-800 ring-1 ring-red-100">
@@ -2354,9 +2389,18 @@ export default function HomePage() {
       }
       if (ui.type === "error") {
         return (
-          <div className="mt-3 rounded-xl border border-red-200 bg-red-50/80 p-3 text-sm text-red-950">
+          <div
+            className={[
+              "mt-3 rounded-xl border border-red-200 bg-red-50/80 p-3 text-sm text-red-950",
+              String(ui.data.error_code ?? "UNKNOWN") === "UNSUPPORTED_DOCUMENT" ? "[&>div:first-child]:hidden" : "",
+            ].join(" ")}
+          >
             <div className="font-semibold">工具执行失败</div>
-            <div className="mt-1 font-mono text-xs">{String(ui.data.error_code ?? "UNKNOWN")}</div>
+            <div className={String(ui.data.error_code ?? "UNKNOWN") === "UNSUPPORTED_DOCUMENT" ? "text-sm" : "mt-1 font-mono text-xs"}>
+              {String(ui.data.error_code ?? "UNKNOWN") === "UNSUPPORTED_DOCUMENT"
+                ? "当前文件非采购订单，已停止处理。请重新上传采购订单"
+                : String(ui.data.error_code ?? "UNKNOWN")}
+            </div>
           </div>
         );
       }

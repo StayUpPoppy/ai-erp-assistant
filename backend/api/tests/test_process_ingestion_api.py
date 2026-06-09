@@ -194,7 +194,7 @@ def test_process_ingestion_inv_auto_validated_when_text_complete(monkeypatch):
     assert result.resolved_fields.get("invoice_date") == "2026-05-12"
 
 
-def test_datynk_sale_order_mode_forces_invoice_named_upload_to_po(monkeypatch):
+def test_datynk_sale_order_mode_rejects_invoice_named_upload(monkeypatch):
     os.environ.pop("DATABASE_URL", None)
     monkeypatch.setenv("ERP_CREATE_BODY_STYLE", "datynk_sale_order")
     _reset_in_memory_store()
@@ -216,8 +216,9 @@ def test_datynk_sale_order_mode_forces_invoice_named_upload_to_po(monkeypatch):
 
     result = process_ingestion_route(created.ingestion_id, _build_request())
 
-    assert result.doc_type_hint and result.doc_type_hint.value == "PO"
-    assert result.preview_data is not None
+    assert result.status == IngestionStatus.FAILED
+    assert result.error_code == ErrorCode.UNSUPPORTED_DOCUMENT.value
+    assert result.preview_data is None
     assert any("forced=datynk_sale_order" in ev.message for ev in result.audit_events)
 
 
