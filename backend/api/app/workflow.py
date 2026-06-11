@@ -35,7 +35,7 @@ from app.document_extract import (
 )
 from app.erp_audit_log import append_erp_call_log_with_upstream
 from app.erp_client import ErpClientError, ErpClientProtocol, clear_last_upstream_meta
-from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus
+from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus, OrderPreviewData
 from app.extraction_profile import apply_field_aliases, get_profile, refresh_ingestion_required_keys
 from app.llm_extract import try_apply_llm_preview
 from app.order_preview import apply_customer_material_mapping, apply_preview_to_ingestion, build_order_preview_data
@@ -69,6 +69,13 @@ def _should_require_purchase_order_evidence() -> bool:
     raw = os.getenv("WORKFLOW_REQUIRE_PURCHASE_ORDER_EVIDENCE")
     if raw is not None:
         return _env_truthy("WORKFLOW_REQUIRE_PURCHASE_ORDER_EVIDENCE", True)
+    return _should_force_datynk_sale_order_doc_type()
+
+
+def _should_validate_order_preview() -> bool:
+    raw = os.getenv("WORKFLOW_VALIDATE_ORDER_PREVIEW")
+    if raw is not None:
+        return _env_truthy("WORKFLOW_VALIDATE_ORDER_PREVIEW", True)
     return _should_force_datynk_sale_order_doc_type()
 
 
@@ -164,6 +171,18 @@ def _purchase_order_evidence(ing: IngestionResponse, text: str) -> Tuple[bool, s
     if any(phrase in corpus for phrase in strong_phrases):
         return True, "strong_purchase_order_phrase"
 
+    obvious_non_order_signals = (
+        "curriculum vitae",
+        "resume",
+        "work experience",
+        "education",
+        "skills",
+        "contact information",
+        "personal profile",
+    )
+    if any(signal in corpus for signal in obvious_non_order_signals):
+        return False, "obvious_non_order_document"
+
     weak_signals = (
         "srm",
         "sap",
@@ -188,7 +207,103 @@ def _purchase_order_evidence(ing: IngestionResponse, text: str) -> Tuple[bool, s
     has_quantity_signal = any(signal in corpus for signal in ("quantity", "qty", "数量"))
     if weak_count >= 4 and has_line_signal and has_quantity_signal:
         return True, f"weak_purchase_order_signals={weak_count}"
-    return False, f"insufficient_purchase_order_evidence name_guess={name_guess or 'none'} text_guess={text_guess or 'none'} weak={weak_count}"
+    return True, f"insufficient_purchase_order_evidence_continue name_guess={name_guess or 'none'} text_guess={text_guess or 'none'} weak={weak_count}"
+
+
+def _has_preview_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
+def _is_positive_number(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_order_preview(preview: OrderPreviewData) -> Tuple[bool, str, Dict[str, int]]:
+    if not _should_validate_order_preview():
+        return True, "disabled", {}
+
+    order = preview.order
+    details = preview.details or []
+    header_values = (
+        order.customerName,
+        order.customerPoNo,
+        order.orderDate,
+        order.currency,
+        order.deliveryDate,
+        order.deliveryAddr,
+    )
+    header_signal_count = sum(1 for value in header_values if _has_preview_value(value))
+
+    valid_detail_rows = 0
+    text_detail_rows = 0
+    quantity_rows = 0
+    money_rows = 0
+    detail_signal_count = 0
+    for detail in details:
+        text_signals = sum(
+            1
+            for value in (
+                detail.materialCode,
+                detail.productName,
+                detail.productSpec,
+                detail.ph,
+                detail.customerMaterialNo,
+            )
+            if _has_preview_value(value)
+        )
+        has_text = text_signals > 0
+        has_qty = _is_positive_number(detail.qty)
+        has_money = any(
+            _is_positive_number(value)
+            for value in (
+                detail.price,
+                detail.taxPrice,
+                detail.amount,
+                detail.allAmount,
+                detail.taxAmount,
+            )
+        )
+        if has_text:
+            text_detail_rows += 1
+        if has_qty:
+            quantity_rows += 1
+        if has_money:
+            money_rows += 1
+        detail_signal_count += text_signals + int(has_qty) + int(has_money)
+        if (has_text and has_qty) or (has_text and has_money) or (has_qty and has_money):
+            valid_detail_rows += 1
+
+    metrics = {
+        "header_signals": header_signal_count,
+        "details": len(details),
+        "valid_detail_rows": valid_detail_rows,
+        "text_detail_rows": text_detail_rows,
+        "quantity_rows": quantity_rows,
+        "money_rows": money_rows,
+        "detail_signals": detail_signal_count,
+    }
+    if valid_detail_rows >= 2:
+        return True, "valid_multiple_detail_rows", metrics
+    if valid_detail_rows >= 1 and header_signal_count >= 1:
+        return True, "valid_header_and_detail_row", metrics
+    if valid_detail_rows >= 1 and detail_signal_count >= 4:
+        return True, "valid_rich_single_detail_row", metrics
+
+    reason = (
+        f"invalid_order_preview header_signals={header_signal_count} "
+        f"details={len(details)} valid_detail_rows={valid_detail_rows} "
+        f"detail_signals={detail_signal_count}"
+    )
+    return False, reason, metrics
 
 
 def _node_retry_config(node_name: str, default_max_retries: int = 0, default_backoff_ms: int = 0) -> Dict[str, int]:
@@ -543,7 +658,36 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
         ing.preview_data = existing_preview
         if preview is None:
             apply_preview_to_ingestion(ing, None)
+            if _should_validate_order_preview():
+                ing.error_details = {
+                    "category": "unsupported_document",
+                    "reason": "missing_order_preview",
+                    "metrics": {
+                        "header_signals": 0,
+                        "details": 0,
+                        "valid_detail_rows": 0,
+                        "detail_signals": 0,
+                    },
+                }
+                raise NodeExecutionError(
+                    node_name="build_preview",
+                    reason="unsupported_document missing_order_preview",
+                    failure_type="node",
+                )
             return {"preview": 0}
+        preview_valid, preview_reason, preview_metrics = _validate_order_preview(preview)
+        if not preview_valid:
+            apply_preview_to_ingestion(ing, None)
+            ing.error_details = {
+                "category": "unsupported_document",
+                "reason": preview_reason,
+                "metrics": preview_metrics,
+            }
+            raise NodeExecutionError(
+                node_name="build_preview",
+                reason=f"unsupported_document {preview_reason}",
+                failure_type="node",
+            )
         customer_material_metrics: Dict[str, int] = {}
         customer_name = (preview.order.customerName or "").strip()
         if customer_name:
@@ -587,6 +731,8 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             "customer_material_exact": customer_material_metrics.get("exact", 0),
             "customer_material_normalized": customer_material_metrics.get("normalized", 0),
             "customer_material_unmatched": customer_material_metrics.get("unmatched", 0),
+            "preview_header_signals": preview_metrics.get("header_signals", 0),
+            "preview_valid_detail_rows": preview_metrics.get("valid_detail_rows", 0),
         }
 
     _run_node(state["ingestion"], "build_preview", _preview_impl)

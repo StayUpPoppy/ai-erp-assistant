@@ -86,6 +86,26 @@ def test_process_job_retries_urlerror_then_succeeds(monkeypatch):
     assert sleeps == [1.0]
 
 
+def test_process_job_retries_timeout_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def _fake_urlopen(_req, timeout=None, **_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("timed out")
+        return _DummyResponse(status=200)
+
+    monkeypatch.setattr("worker.urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("worker.time.sleep", lambda s: sleeps.append(float(s)))
+    monkeypatch.setattr("worker.API_BASE", "http://api-test")
+
+    worker.process_job("ing-timeout")
+
+    assert calls["n"] == 2
+    assert sleeps == [1.0]
+
+
 def test_process_job_handles_http_error(monkeypatch):
     def _fake_urlopen(_req, timeout=None, **_kw):
         raise urllib.error.HTTPError(

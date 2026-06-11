@@ -136,6 +136,28 @@ def process_job(ingestion_id: str, redis_client: Optional[redis.Redis] = None) -
                 max_attempts=max_attempts,
             )
             return
+        except TimeoutError as exc:
+            if attempt + 1 < max_attempts:
+                sleep_s = WORKER_PROCESS_RETRY_BACKOFF_SEC * (attempt + 1)
+                logger.warning(
+                    "process_retry ingestion_id=%s timeout=%r attempt=%s/%s sleep_s=%s",
+                    ingestion_id,
+                    exc,
+                    attempt + 1,
+                    max_attempts,
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
+                continue
+            logger.error("process_failed ingestion_id=%s timeout=%r", ingestion_id, exc)
+            push_process_job_failure_dlq(
+                redis_client,
+                ingestion_id,
+                kind="timeout",
+                detail=repr(exc),
+                max_attempts=max_attempts,
+            )
+            return
         except Exception as exc:
             logger.exception("process_failed ingestion_id=%s err=%s", ingestion_id, str(exc))
             push_process_job_failure_dlq(

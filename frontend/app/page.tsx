@@ -56,6 +56,12 @@ interface ChatSessionMeta {
 }
 
 type ClientDraftStateByIngestion = Record<string, { draft_no?: string | null; draft_url?: string | null }>;
+type IngestionById = Record<string, IngestionResponse>;
+type PreviewDraftByIngestion = Record<string, OrderPreviewData | null>;
+type ResolveFieldsByIngestion = Record<string, Record<string, string>>;
+type BooleanByIngestion = Record<string, true>;
+type StatusByIngestion = Record<string, IngestionStatus | null>;
+type StringByIngestion = Record<string, string | null>;
 
 /** 已切换到新任务前的解析任务摘要（会话内保留，便于回看编号与文件名） */
 interface IngestionHistoryItem {
@@ -70,6 +76,7 @@ interface PendingReprocessUpload {
   orgId: string;
   extractionProfileId?: string;
   sessionId: string;
+  ingestionId?: string;
 }
 
 interface WorkspaceWindowState {
@@ -78,16 +85,25 @@ interface WorkspaceWindowState {
   assistantSessionId: string | null;
   ingestion: IngestionResponse | null;
   ingestionId: string | null;
+  ingestionsById: IngestionById;
+  pollingIngestionIds: BooleanByIngestion;
   ingestionHistory: IngestionHistoryItem[];
   resolveFields: Record<string, string>;
+  resolveFieldsByIngestion: ResolveFieldsByIngestion;
   previewDraft: OrderPreviewData | null;
+  previewDraftsByIngestion: PreviewDraftByIngestion;
   confirmedPreviewIds: Record<string, true>;
+  previewDirtyByIngestion: BooleanByIngestion;
   lastStatus: IngestionStatus | null;
+  lastStatusByIngestion: StatusByIngestion;
   workflowToolCardKey: string | null;
+  workflowToolCardKeyByIngestion: StringByIngestion;
   lastIngestionFileName: string | null;
+  lastIngestionFileNameByIngestion: StringByIngestion;
   previewDirty: boolean;
   previewIngestionId: string | null;
   poll404Warned: boolean;
+  poll404WarnedByIngestion: BooleanByIngestion;
 }
 
 const INGESTION_HISTORY_SS_KEY = "ai_erp_assistant_ingestion_history_v1";
@@ -153,7 +169,8 @@ function sessionTaskLabel(taskType?: string | null): string | null {
   return taskType;
 }
 
-function pdfToErpProgressPercent(status: IngestionStatus | null | undefined): number {
+function pdfToErpProgressPercent(status: IngestionStatus | null | undefined, previewReady = false): number {
+  if (previewReady) return 100;
   if (!status) return 0;
   if (status === "VALIDATED" || status === "DRAFT_CREATED") return 100;
   if (status === "CANCELED") return 100;
@@ -193,6 +210,16 @@ function isBackgroundRunningStatus(status: IngestionStatus | null | undefined): 
   return Boolean(status && BACKGROUND_RUNNING_STATUSES.has(status));
 }
 
+function pdfToErpProgressState(
+  status: IngestionStatus | null | undefined,
+  previewReady = false,
+): "running" | "done" | "failed" | "canceled" {
+  if (status === "FAILED") return "failed";
+  if (status === "CANCELED") return "canceled";
+  if (previewReady || status === "NEED_USER_INPUT" || status === "VALIDATED" || status === "DRAFT_CREATED") return "done";
+  return "running";
+}
+
 function nextIngestionPollDelay(status: IngestionStatus | null | undefined, failureCount = 0): number | null {
   if (status && TERMINAL_STATUSES.has(status)) return null;
   if (!isBackgroundRunningStatus(status)) return null;
@@ -212,6 +239,7 @@ function buildPdfToErpProgressUi(ingestion: IngestionResponse, status: Ingestion
       status,
       tool_status: status,
       file_name: ingestion.file?.source_file_name ?? ingestion.source_file_name ?? "",
+      preview_ready: Boolean(ingestion.preview_data),
     },
   };
 }
@@ -493,6 +521,16 @@ function updateWorkflowToolCard(messages: ChatMessage[], ingestion: IngestionRes
 }
 
 /** FAILED 时根据审计事件推断失败前最后一档，用于进度条高亮已走过节点 */
+function removePdfToErpTaskCards(messages: ChatMessage[], ingestionId: string): ChatMessage[] {
+  const removableTypes = new Set(["processing", "missing_fields_form", "upload_confirm", "draft_result", "error"]);
+  const next = messages.filter((message) => {
+    const ui = message.toolUi;
+    if (!ui || !removableTypes.has(ui.type)) return true;
+    return String(ui.data.ingestion_id ?? "") !== ingestionId;
+  });
+  return next.length === messages.length ? messages : next;
+}
+
 function pipelineHighlightStepIndex(
   status: IngestionStatus | null | undefined,
   auditEvents: AuditEvent[] | undefined,
@@ -574,6 +612,29 @@ function syncPreviewDefaults(preview: OrderPreviewData, salesUser: string, org: 
   return syncPreviewOrg(bindPreviewSalesUser(preview, salesUser), org);
 }
 
+function resolvedFieldsFromIngestion(ingestion: IngestionResponse): Record<string, string> {
+  if (!ingestion.resolved_fields) return {};
+  const rf = ingestion.resolved_fields as Record<string, string | undefined>;
+  const keys = resolveFieldKeys(ingestion.doc_type_hint, ingestion);
+  const next: Record<string, string> = {};
+  for (const k of keys) {
+    const v = rf[k];
+    if (v != null && String(v).trim() !== "") next[k] = String(v);
+  }
+  for (const k of OPTIONAL_RESOLVE_KEYS) {
+    const v = rf[k];
+    if (v != null && String(v).trim() !== "") next[k] = String(v);
+  }
+  return next;
+}
+
+function withoutRecordKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
+
 export default function HomePage() {
   /** 简化认证：先从 ERP userInfo Cookie 同步用户和组织，后续再升级为服务端可信身份 */
   const [orgId, setOrgId] = useState("英科一厂");
@@ -596,6 +657,8 @@ export default function HomePage() {
   /** 当前 ingestion 详情：由轮询刷新 */
   const [ingestion, setIngestion] = useState<IngestionResponse | null>(null);
   const [ingestionId, setIngestionId] = useState<string | null>(null);
+  const [ingestionsById, setIngestionsById] = useState<IngestionById>({});
+  const [pollingIngestionIds, setPollingIngestionIds] = useState<BooleanByIngestion>({});
   const [ingestionPollNonce, setIngestionPollNonce] = useState(0);
   const [ingestionHistory, setIngestionHistory] = useState<IngestionHistoryItem[]>([]);
 
@@ -606,27 +669,42 @@ export default function HomePage() {
 
   /** 补全表单：键与后端 `required_field_keys` 对齐 */
   const [resolveFields, setResolveFields] = useState<Record<string, string>>({});
+  const [resolveFieldsByIngestion, setResolveFieldsByIngestion] = useState<ResolveFieldsByIngestion>({});
   const [previewDraft, setPreviewDraft] = useState<OrderPreviewData | null>(null);
+  const [previewDraftsByIngestion, setPreviewDraftsByIngestion] = useState<PreviewDraftByIngestion>({});
   const [confirmedPreviewIds, setConfirmedPreviewIds] = useState<Record<string, true>>({});
+  const [previewDirtyByIngestion, setPreviewDirtyByIngestion] = useState<BooleanByIngestion>({});
 
   const [isResolving, setIsResolving] = useState(false);
   const [isConfirmingPreview, setIsConfirmingPreview] = useState(false);
   const [isCreatingDraft, setIsCreatingDraft] = useState(false);
+  const [resolvingIngestionIds, setResolvingIngestionIds] = useState<BooleanByIngestion>({});
+  const [confirmingPreviewIngestionIds, setConfirmingPreviewIngestionIds] = useState<BooleanByIngestion>({});
+  const [creatingDraftIngestionIds, setCreatingDraftIngestionIds] = useState<BooleanByIngestion>({});
 
   const lastStatusRef = useRef<IngestionStatus | null>(null);
+  const lastStatusByIngestionRef = useRef<StatusByIngestion>({});
   const workflowToolCardKeyRef = useRef<string | null>(null);
+  const workflowToolCardKeyByIngestionRef = useRef<StringByIngestion>({});
+  const resolveFieldsByIngestionRef = useRef<ResolveFieldsByIngestion>({});
   const historyHydratedRef = useRef(false);
   const chatSessionsHydratedRef = useRef(false);
   const previewDirtyRef = useRef(false);
+  const previewDirtyByIngestionRef = useRef<BooleanByIngestion>({});
   const previewIngestionIdRef = useRef<string | null>(null);
   const chatSessionMetaTimerRef = useRef<number | null>(null);
   /** 当前 ingestion 对应的上传文件名，用于归档进历史/聊天时展示（跨多次上传仍准确） */
   const lastIngestionFileNameRef = useRef<string | null>(null);
+  const lastIngestionFileNameByIngestionRef = useRef<StringByIngestion>({});
   const pollTimerRef = useRef<number | null>(null);
+  const multiPollTimerRef = useRef<number | null>(null);
+  const pollingInFlightRef = useRef<BooleanByIngestion>({});
   const assistantSessionIdRef = useRef<string | null>(null);
   const ingestionIdRef = useRef<string | null>(null);
+  const ingestionsByIdRef = useRef<IngestionById>({});
   const clientDraftStateRef = useRef<ClientDraftStateByIngestion>({});
   const poll404WarnedRef = useRef(false);
+  const poll404WarnedByIngestionRef = useRef<BooleanByIngestion>({});
   /** 避免子元素触发 dragleave 导致「拖拽高亮」闪烁 */
   const dragDepthRef = useRef(0);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
@@ -671,22 +749,104 @@ export default function HomePage() {
     return process.env.NEXT_PUBLIC_ENABLE_DEV_INTERNAL === "1";
   }, []);
 
+  useEffect(() => {
+    resolveFieldsByIngestionRef.current = resolveFieldsByIngestion;
+  }, [resolveFieldsByIngestion]);
+
+  const upsertIngestionState = useCallback(
+    (raw: IngestionResponse, opts?: { activate?: boolean; fileName?: string | null; poll?: boolean }) => {
+      const data = applyClientDraftState(raw, clientDraftStateRef.current);
+      const id = data.ingestion_id;
+      const activate = opts?.activate ?? true;
+      ingestionsByIdRef.current = { ...ingestionsByIdRef.current, [id]: data };
+      setIngestionsById((prev) => ({ ...prev, [id]: data }));
+
+      const displayStatus = displayIngestionStatus(data, clientDraftStateRef.current) ?? data.status;
+      lastStatusByIngestionRef.current = { ...lastStatusByIngestionRef.current, [id]: displayStatus };
+      const fileName = opts?.fileName ?? data.file?.source_file_name ?? data.source_file_name ?? null;
+      if (fileName) {
+        lastIngestionFileNameByIngestionRef.current = {
+          ...lastIngestionFileNameByIngestionRef.current,
+          [id]: fileName,
+        };
+      }
+
+      const resolved = resolvedFieldsFromIngestion(data);
+      if (Object.keys(resolved).length > 0) {
+        setResolveFieldsByIngestion((prev) => ({
+          ...prev,
+          [id]: {
+            ...(prev[id] ?? {}),
+            ...resolved,
+          },
+        }));
+      }
+
+      if (!previewDirtyByIngestionRef.current[id]) {
+        const nextPreview = data.preview_data ? syncPreviewDefaults(data.preview_data, userName, orgId) : null;
+        setPreviewDraftsByIngestion((prev) => {
+          if (prev[id] === nextPreview) return prev;
+          return { ...prev, [id]: nextPreview };
+        });
+        if (activate) setPreviewDraft(nextPreview);
+      }
+
+      if (opts?.poll ?? isBackgroundRunningStatus(displayStatus)) {
+        setPollingIngestionIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
+      } else if (!isBackgroundRunningStatus(displayStatus)) {
+        setPollingIngestionIds((prev) => withoutRecordKey(prev, id) as BooleanByIngestion);
+      }
+
+      if (activate) {
+        setIngestion(data);
+        setIngestionId(id);
+        ingestionIdRef.current = id;
+        lastStatusRef.current = displayStatus;
+        lastIngestionFileNameRef.current = fileName;
+        const activeResolved = Object.keys(resolved).length > 0 ? resolved : resolveFieldsByIngestionRef.current[id] ?? {};
+        setResolveFields(activeResolved);
+      }
+
+      return data;
+    },
+    [orgId, userName],
+  );
+
   const resetCurrentTaskState = useCallback(() => {
     setIngestion(null);
     setIngestionId(null);
+    setIngestionsById({});
+    ingestionsByIdRef.current = {};
+    setPollingIngestionIds({});
+    pollingInFlightRef.current = {};
     ingestionIdRef.current = null;
     lastStatusRef.current = null;
+    lastStatusByIngestionRef.current = {};
     workflowToolCardKeyRef.current = null;
+    workflowToolCardKeyByIngestionRef.current = {};
     lastIngestionFileNameRef.current = null;
+    lastIngestionFileNameByIngestionRef.current = {};
     setResolveFields({});
+    setResolveFieldsByIngestion({});
     setPreviewDraft(null);
+    setPreviewDraftsByIngestion({});
     setConfirmedPreviewIds({});
+    setPreviewDirtyByIngestion({});
+    setResolvingIngestionIds({});
+    setConfirmingPreviewIngestionIds({});
+    setCreatingDraftIngestionIds({});
     previewDirtyRef.current = false;
+    previewDirtyByIngestionRef.current = {};
     previewIngestionIdRef.current = null;
     poll404WarnedRef.current = false;
+    poll404WarnedByIngestionRef.current = {};
     if (pollTimerRef.current) {
       window.clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
+    }
+    if (multiPollTimerRef.current) {
+      window.clearTimeout(multiPollTimerRef.current);
+      multiPollTimerRef.current = null;
     }
   }, []);
 
@@ -706,20 +866,24 @@ export default function HomePage() {
       ingestionIdRef.current = activeIngestionId;
       poll404WarnedRef.current = false;
       previewDirtyRef.current = false;
+      previewDirtyByIngestionRef.current = withoutRecordKey(previewDirtyByIngestionRef.current, activeIngestionId) as BooleanByIngestion;
       previewIngestionIdRef.current = null;
       setPreviewDraft(null);
       try {
         const data = await getIngestion(activeIngestionId);
         if (isCancelled() || assistantSessionIdRef.current !== sid || data.ingestion_id !== ingestionIdRef.current) return;
-        const displayData = applyClientDraftState(data, clientDraftStateRef.current);
+        const displayData = upsertIngestionState(data, { activate: true });
         const displayStatus = displayIngestionStatus(displayData, clientDraftStateRef.current) ?? data.status;
-        setIngestion(displayData);
-        lastStatusRef.current = displayStatus;
         lastIngestionFileNameRef.current =
           displayData.file?.source_file_name ?? displayData.source_file_name ?? lastIngestionFileNameRef.current;
         previewDirtyRef.current = false;
         previewIngestionIdRef.current = displayData.ingestion_id;
-        setPreviewDraft(displayData.preview_data ?? null);
+        workflowToolCardKeyByIngestionRef.current = {
+          ...workflowToolCardKeyByIngestionRef.current,
+          [displayData.ingestion_id]: hasWorkflowCardForIngestion(restoredMessages, displayData)
+            ? pdfToErpWorkflowCardKey(displayData, displayStatus)
+            : null,
+        };
         workflowToolCardKeyRef.current = hasWorkflowCardForIngestion(restoredMessages, displayData)
           ? pdfToErpWorkflowCardKey(displayData, displayStatus)
           : null;
@@ -729,7 +893,7 @@ export default function HomePage() {
         resetCurrentTaskState();
       }
     },
-    [resetCurrentTaskState],
+    [resetCurrentTaskState, upsertIngestionState],
   );
 
   const activateAssistantSession = useCallback(
@@ -1028,18 +1192,42 @@ export default function HomePage() {
       assistantSessionId: assistantSessionIdRef.current ?? assistantSessionId,
       ingestion,
       ingestionId,
+      ingestionsById,
+      pollingIngestionIds,
       ingestionHistory,
       resolveFields,
+      resolveFieldsByIngestion,
       previewDraft,
+      previewDraftsByIngestion,
       confirmedPreviewIds,
+      previewDirtyByIngestion,
       lastStatus: lastStatusRef.current,
+      lastStatusByIngestion: lastStatusByIngestionRef.current,
       workflowToolCardKey: workflowToolCardKeyRef.current,
+      workflowToolCardKeyByIngestion: workflowToolCardKeyByIngestionRef.current,
       lastIngestionFileName: lastIngestionFileNameRef.current,
+      lastIngestionFileNameByIngestion: lastIngestionFileNameByIngestionRef.current,
       previewDirty: previewDirtyRef.current,
       previewIngestionId: previewIngestionIdRef.current,
       poll404Warned: poll404WarnedRef.current,
+      poll404WarnedByIngestion: poll404WarnedByIngestionRef.current,
     };
-  }, [assistantSessionId, chatInput, chatMessages, confirmedPreviewIds, ingestion, ingestionHistory, ingestionId, previewDraft, resolveFields]);
+  }, [
+    assistantSessionId,
+    chatInput,
+    chatMessages,
+    confirmedPreviewIds,
+    ingestion,
+    ingestionHistory,
+    ingestionId,
+    ingestionsById,
+    pollingIngestionIds,
+    previewDirtyByIngestion,
+    previewDraft,
+    previewDraftsByIngestion,
+    resolveFields,
+    resolveFieldsByIngestion,
+  ]);
 
   const applyWorkspaceWindow = useCallback((state: WorkspaceWindowState | null, mode: WorkspaceMode) => {
     const nextState =
@@ -1050,16 +1238,25 @@ export default function HomePage() {
         assistantSessionId: createAssistantSessionId(),
         ingestion: null,
         ingestionId: null,
+        ingestionsById: {},
+        pollingIngestionIds: {},
         ingestionHistory: [],
         resolveFields: {},
+        resolveFieldsByIngestion: {},
         previewDraft: null,
+        previewDraftsByIngestion: {},
         confirmedPreviewIds: {},
+        previewDirtyByIngestion: {},
         lastStatus: null,
+        lastStatusByIngestion: {},
         workflowToolCardKey: null,
+        workflowToolCardKeyByIngestion: {},
         lastIngestionFileName: null,
+        lastIngestionFileNameByIngestion: {},
         previewDirty: false,
         previewIngestionId: null,
         poll404Warned: false,
+        poll404WarnedByIngestion: {},
       } satisfies WorkspaceWindowState);
 
     setWorkspaceMode(mode);
@@ -1069,21 +1266,36 @@ export default function HomePage() {
     setAssistantSessionId(nextState.assistantSessionId);
     setIngestion(nextState.ingestion);
     setIngestionId(nextState.ingestionId);
+    setIngestionsById(nextState.ingestionsById);
+    ingestionsByIdRef.current = nextState.ingestionsById;
+    setPollingIngestionIds(nextState.pollingIngestionIds);
     ingestionIdRef.current = nextState.ingestionId;
     setIngestionHistory(nextState.ingestionHistory);
     setResolveFields(nextState.resolveFields);
+    setResolveFieldsByIngestion(nextState.resolveFieldsByIngestion);
     setPreviewDraft(nextState.previewDraft);
+    setPreviewDraftsByIngestion(nextState.previewDraftsByIngestion);
     setConfirmedPreviewIds(nextState.confirmedPreviewIds);
+    setPreviewDirtyByIngestion(nextState.previewDirtyByIngestion);
     lastStatusRef.current = nextState.lastStatus;
+    lastStatusByIngestionRef.current = nextState.lastStatusByIngestion;
     workflowToolCardKeyRef.current = nextState.workflowToolCardKey;
+    workflowToolCardKeyByIngestionRef.current = nextState.workflowToolCardKeyByIngestion;
     lastIngestionFileNameRef.current = nextState.lastIngestionFileName;
+    lastIngestionFileNameByIngestionRef.current = nextState.lastIngestionFileNameByIngestion;
     previewDirtyRef.current = nextState.previewDirty;
+    previewDirtyByIngestionRef.current = nextState.previewDirtyByIngestion;
     previewIngestionIdRef.current = nextState.previewIngestionId;
     poll404WarnedRef.current = nextState.poll404Warned;
+    poll404WarnedByIngestionRef.current = nextState.poll404WarnedByIngestion;
     shouldAutoScrollRef.current = true;
     if (pollTimerRef.current) {
       window.clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
+    }
+    if (multiPollTimerRef.current) {
+      window.clearTimeout(multiPollTimerRef.current);
+      multiPollTimerRef.current = null;
     }
     if (nextState.ingestionId) setIngestionPollNonce((n) => n + 1);
   }, []);
@@ -1101,6 +1313,18 @@ export default function HomePage() {
     const currentIngestionId = ingestionIdRef.current;
     const currentStatus =
       displayIngestionStatus(ingestion, clientDraftStateRef.current) ?? ingestion?.status ?? lastStatusRef.current;
+    if (workspaceMode === "pdf_to_erp") {
+      for (const item of Object.values(ingestionsByIdRef.current)) {
+        if (item.ingestion_id === currentIngestionId) continue;
+        const status = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
+        if (!shouldCancelTaskOnSessionDelete(status)) continue;
+        try {
+          await postCancelIngestion(item.ingestion_id);
+        } catch (e) {
+          clientLogger.warn("清除页面时取消 PDF 任务失败", { ingestionId: item.ingestion_id, error: e });
+        }
+      }
+    }
     if (workspaceMode === "pdf_to_erp" && currentIngestionId && shouldCancelTaskOnSessionDelete(currentStatus)) {
       try {
         await postCancelIngestion(currentIngestionId);
@@ -1129,16 +1353,25 @@ export default function HomePage() {
       assistantSessionId: sid,
       ingestion: null,
       ingestionId: null,
+      ingestionsById: {},
+      pollingIngestionIds: {},
       ingestionHistory: [],
       resolveFields: {},
+      resolveFieldsByIngestion: {},
       previewDraft: null,
+      previewDraftsByIngestion: {},
       confirmedPreviewIds: {},
+      previewDirtyByIngestion: {},
       lastStatus: null,
+      lastStatusByIngestion: {},
       workflowToolCardKey: null,
+      workflowToolCardKeyByIngestion: {},
       lastIngestionFileName: null,
+      lastIngestionFileNameByIngestion: {},
       previewDirty: false,
       previewIngestionId: null,
       poll404Warned: false,
+      poll404WarnedByIngestion: {},
     };
   }, [ingestion, resetCurrentTaskState, workspaceMode]);
 
@@ -1268,11 +1501,15 @@ export default function HomePage() {
         }
       }
       if (nextIngestion) {
-        setIngestion(nextIngestion);
-        setIngestionId(nextIngestion.ingestion_id);
-        ingestionIdRef.current = nextIngestion.ingestion_id;
+        const displayData = upsertIngestionState(nextIngestion, { activate: true });
         if (!opts?.skipMessages && ui && ui.type !== "processing") {
-          workflowToolCardKeyRef.current = pdfToErpWorkflowCardKey(nextIngestion, nextIngestion.status);
+          const displayStatus = displayIngestionStatus(displayData, clientDraftStateRef.current) ?? displayData.status;
+          const cardKey = pdfToErpWorkflowCardKey(displayData, displayStatus);
+          workflowToolCardKeyRef.current = cardKey;
+          workflowToolCardKeyByIngestionRef.current = {
+            ...workflowToolCardKeyByIngestionRef.current,
+            [displayData.ingestion_id]: cardKey,
+          };
         }
       }
       const draft = res.tool_result?.draft;
@@ -1281,15 +1518,20 @@ export default function HomePage() {
           draft_no: draft.draft_no,
           draft_url: draft.draft_url,
         };
-        setIngestion((prev) => (prev ? mergeDraftCreatedState(prev, draft) : prev));
-        lastStatusRef.current = "DRAFT_CREATED";
-        if (pollTimerRef.current) {
-          window.clearInterval(pollTimerRef.current);
-          pollTimerRef.current = null;
+        const base = ingestionsByIdRef.current[draft.ingestion_id];
+        if (base) {
+          const merged = mergeDraftCreatedState(base, draft);
+          upsertIngestionState(merged, { activate: ingestionIdRef.current === draft.ingestion_id, poll: false });
         }
+        setPollingIngestionIds((prev) => withoutRecordKey(prev, draft.ingestion_id) as BooleanByIngestion);
+        lastStatusByIngestionRef.current = {
+          ...lastStatusByIngestionRef.current,
+          [draft.ingestion_id]: "DRAFT_CREATED",
+        };
+        if (ingestionIdRef.current === draft.ingestion_id) lastStatusRef.current = "DRAFT_CREATED";
       }
     },
-    [appendChat],
+    [appendChat, upsertIngestionState],
   );
 
   const [copiedTag, setCopiedTag] = useState<string | null>(null);
@@ -1343,7 +1585,7 @@ export default function HomePage() {
 
   /** 轮询 ingestion：在终态前持续拉取，便于展示 worker 异步推进效果 */
   useEffect(() => {
-    if (!ingestionId) return;
+    if (!ingestionId || pollingIngestionIds[ingestionId]) return;
     let cancelled = false;
     let failureCount = 0;
 
@@ -1438,7 +1680,116 @@ export default function HomePage() {
       cancelled = true;
       clearPollTimer();
     };
-  }, [ingestionId, ingestionPollNonce, appendChat]);
+  }, [ingestionId, ingestionPollNonce, appendChat, pollingIngestionIds]);
+
+  /** Poll every running PDF task so each order card can remain editable and actionable. */
+  useEffect(() => {
+    const ids = Object.keys(pollingIngestionIds);
+    if (ids.length === 0) return;
+    let cancelled = false;
+
+    const clearTimer = () => {
+      if (multiPollTimerRef.current) {
+        window.clearTimeout(multiPollTimerRef.current);
+        multiPollTimerRef.current = null;
+      }
+    };
+
+    const tickOne = async (id: string) => {
+      if (pollingInFlightRef.current[id]) return;
+      pollingInFlightRef.current = { ...pollingInFlightRef.current, [id]: true };
+      try {
+        const data = await getIngestion(id);
+        if (cancelled) return;
+        const activate = ingestionIdRef.current === id;
+        const displayData = upsertIngestionState(data, { activate });
+        const polledName = data.file?.source_file_name ?? data.source_file_name ?? null;
+        if (polledName) {
+          lastIngestionFileNameByIngestionRef.current = {
+            ...lastIngestionFileNameByIngestionRef.current,
+            [id]: polledName,
+          };
+          if (activate) lastIngestionFileNameRef.current = polledName;
+        }
+
+        const displayStatus = displayIngestionStatus(displayData, clientDraftStateRef.current) ?? data.status;
+        setChatMessages((prev) => updatePdfToErpProgressCards(prev, displayData, displayStatus));
+        const previousStatus = lastStatusByIngestionRef.current[id] ?? null;
+        if (previousStatus !== displayStatus) {
+          clientLogger.info("ingestion status changed", {
+            from: previousStatus,
+            to: displayStatus,
+            ingestionId: id,
+          });
+          lastStatusByIngestionRef.current = {
+            ...lastStatusByIngestionRef.current,
+            [id]: displayStatus,
+          };
+          if (activate) lastStatusRef.current = displayStatus;
+        }
+
+        const workflowToolUi = isBackgroundRunningStatus(displayStatus) ? null : buildPdfToErpToolUi(displayData);
+        if (workflowToolUi) {
+          const cardKey = pdfToErpWorkflowCardKey(displayData, displayStatus);
+          if (workflowToolCardKeyByIngestionRef.current[id] !== cardKey) {
+            workflowToolCardKeyByIngestionRef.current = {
+              ...workflowToolCardKeyByIngestionRef.current,
+              [id]: cardKey,
+            };
+            if (activate) workflowToolCardKeyRef.current = cardKey;
+            let updatedExistingCard = false;
+            setChatMessages((prev) => {
+              const next = updateWorkflowToolCard(prev, displayData, workflowToolUi);
+              updatedExistingCard = next !== prev;
+              return next;
+            });
+            if (!updatedExistingCard) {
+              appendChat("assistant", pdfToErpWorkflowCardText(displayData, displayStatus), {
+                toolUi: workflowToolUi,
+              });
+            }
+          }
+        }
+
+        if (nextIngestionPollDelay(displayStatus) == null) {
+          setPollingIngestionIds((prev) => withoutRecordKey(prev, id) as BooleanByIngestion);
+          clientLogger.info("stop ingestion polling", { status: displayStatus, ingestionId: id });
+        }
+      } catch (e) {
+        clientLogger.error("poll ingestion failed", e);
+        const st =
+          typeof e === "object" && e !== null && "status" in e
+            ? (e as { status?: number }).status
+            : undefined;
+        if (st === 404 && !poll404WarnedByIngestionRef.current[id]) {
+          poll404WarnedByIngestionRef.current = {
+            ...poll404WarnedByIngestionRef.current,
+            [id]: true,
+          };
+          if (ingestionIdRef.current === id) poll404WarnedRef.current = true;
+          appendChat("system", "找不到这条解析任务。请重新上传文件；若经常发生，请联系管理员检查任务持久化配置。");
+        }
+      } finally {
+        pollingInFlightRef.current = withoutRecordKey(pollingInFlightRef.current, id) as BooleanByIngestion;
+      }
+    };
+
+    const tick = async () => {
+      clearTimer();
+      await Promise.all(Object.keys(pollingIngestionIds).map((id) => tickOne(id)));
+      if (!cancelled && Object.keys(pollingIngestionIds).length > 0) {
+        multiPollTimerRef.current = window.setTimeout(() => void tick(), POLL_FAST_MS);
+      }
+    };
+
+    void tick();
+
+    return () => {
+      cancelled = true;
+      clearTimer();
+    };
+  }, [appendChat, ingestionPollNonce, pollingIngestionIds, upsertIngestionState]);
+
   const chatInputPlaceholder = useMemo(() => {
     if (workspaceMode === "pdf_to_erp") return "PDF 转 ERP 模式只支持上传 PDF，不支持文字对话。";
     return "可普通对话，也可查询 ERP 库存、供应商、物料等信息。Enter 发送，Shift+Enter 换行";
@@ -1608,26 +1959,37 @@ export default function HomePage() {
           pending.sessionId,
           true,
         );
-        appendToolResponse(uploadRes);
         const resp = uploadRes.tool_result?.ingestion;
         if (!resp) {
           appendChat("system", `${pending.file.name} 重新处理请求没有返回任务信息，请稍后重试。`);
           return;
         }
+        const resetIngestionId = resp.ingestion_id || pending.ingestionId || "";
+        if (resetIngestionId) {
+          delete clientDraftStateRef.current[resetIngestionId];
+          setChatMessages((prev) => removePdfToErpTaskCards(prev, resetIngestionId));
+        }
+        appendToolResponse(uploadRes);
         previewDirtyRef.current = false;
-        setIngestionId(resp.ingestion_id);
-        setPreviewDraft(null);
+        previewDirtyByIngestionRef.current = withoutRecordKey(
+          previewDirtyByIngestionRef.current,
+          resp.ingestion_id,
+        ) as BooleanByIngestion;
+        setPreviewDirtyByIngestion((prev) => withoutRecordKey(prev, resp.ingestion_id) as BooleanByIngestion);
+        upsertIngestionState(resp, { activate: true, fileName: pending.file.name, poll: isBackgroundRunningStatus(resp.status) });
+        setPreviewDraftsByIngestion((prev) => ({ ...prev, [resp.ingestion_id]: null }));
         setConfirmedPreviewIds((prev) => {
           if (!prev[resp.ingestion_id]) return prev;
           const next = { ...prev };
           delete next[resp.ingestion_id];
           return next;
         });
-        ingestionIdRef.current = resp.ingestion_id;
         delete clientDraftStateRef.current[resp.ingestion_id];
-        lastStatusRef.current = resp.status;
-        lastIngestionFileNameRef.current = pending.file.name;
         workflowToolCardKeyRef.current = null;
+        workflowToolCardKeyByIngestionRef.current = withoutRecordKey(
+          workflowToolCardKeyByIngestionRef.current,
+          resp.ingestion_id,
+        ) as StringByIngestion;
         setIngestionPollNonce((n) => n + 1);
         clientLogger.info("重新处理任务已创建", resp);
       } catch (e) {
@@ -1637,7 +1999,7 @@ export default function HomePage() {
         setIsUploading(false);
       }
     },
-    [appendChat, appendToolResponse],
+    [appendChat, appendToolResponse, upsertIngestionState],
   );
 
   const handleFiles = useCallback(
@@ -1669,7 +2031,7 @@ export default function HomePage() {
           if (prevId) {
             const prevFileName =
               lastIngestionFileNameRef.current ?? lastUploadedName ?? "（上一任务）";
-            const prevStatus = String(lastStatusRef.current ?? "");
+            const prevStatus = String(lastStatusByIngestionRef.current[prevId] ?? lastStatusRef.current ?? "");
             setIngestionHistory((h) => {
               if (h.some((x) => x.id === prevId)) return h;
               return [
@@ -1698,8 +2060,9 @@ export default function HomePage() {
               orgId,
               extractionProfileId: prof || undefined,
               sessionId: getAssistantSessionId(),
+              ingestionId: resp.ingestion_id,
             };
-            appendChat("assistant", "该文件已经上传过 ERP。请确认是否重新处理。", {
+            appendChat("assistant", " ", {
               toolUi: {
                 type: "reprocess_confirm",
                 data: {
@@ -1716,19 +2079,21 @@ export default function HomePage() {
           }
           appendToolResponse(uploadRes);
           previewDirtyRef.current = false;
-          setIngestionId(resp.ingestion_id);
-          setPreviewDraft(null);
+          previewDirtyByIngestionRef.current = withoutRecordKey(
+            previewDirtyByIngestionRef.current,
+            resp.ingestion_id,
+          ) as BooleanByIngestion;
+          setPreviewDirtyByIngestion((prev) => withoutRecordKey(prev, resp.ingestion_id) as BooleanByIngestion);
+          upsertIngestionState(resp, { activate: true, fileName: file.name, poll: isBackgroundRunningStatus(resp.status) });
+          setPreviewDraftsByIngestion((prev) => ({ ...prev, [resp.ingestion_id]: null }));
           setConfirmedPreviewIds((prev) => {
             if (!prev[resp.ingestion_id]) return prev;
             const next = { ...prev };
             delete next[resp.ingestion_id];
             return next;
           });
-          ingestionIdRef.current = resp.ingestion_id;
           delete clientDraftStateRef.current[resp.ingestion_id];
-          lastStatusRef.current = resp.status;
           lastUploadedName = file.name;
-          lastIngestionFileNameRef.current = file.name;
           uploadSuccessCount += 1;
           clientLogger.info("上传任务创建成功（服务端已计算文件哈希）", resp);
         }
@@ -1749,7 +2114,17 @@ export default function HomePage() {
         setIsUploading(false);
       }
     },
-    [appendChat, appendToolResponse, extractionProfileId, getAssistantSessionId, ingestionHistory, orgId, userId, workspaceMode],
+    [
+      appendChat,
+      appendToolResponse,
+      extractionProfileId,
+      getAssistantSessionId,
+      ingestionHistory,
+      orgId,
+      upsertIngestionState,
+      userId,
+      workspaceMode,
+    ],
   );
 
   const onDrop = useCallback(
@@ -1967,6 +2342,217 @@ export default function HomePage() {
   ]);
 
   /** 仅开发：当 worker/Redis 未启动时，可手动触发内部 process 推进状态机 */
+  const onResolveTask = useCallback(
+    async (targetIngestionId: string, overrideFields?: Record<string, string>) => {
+      if (!targetIngestionId) return;
+      const targetIngestion = ingestionsById[targetIngestionId] ?? (targetIngestionId === ingestionId ? ingestion : null);
+      if (!targetIngestion) return;
+      setIsResolving(true);
+      setResolvingIngestionIds((prev) => ({ ...prev, [targetIngestionId]: true }));
+      try {
+        const keys = resolveFieldKeys(targetIngestion.doc_type_hint, targetIngestion);
+        const sourceFields =
+          overrideFields ??
+          resolveFieldsByIngestion[targetIngestionId] ??
+          (targetIngestionId === ingestionId ? resolveFields : {});
+        const fields: Record<string, string> = {};
+        for (const k of keys) fields[k] = (sourceFields[k] ?? "").trim();
+        for (const k of OPTIONAL_RESOLVE_KEYS) {
+          const v = (sourceFields[k] ?? "").trim();
+          if (v) fields[k] = v;
+        }
+        clientLogger.info("submit resolve fields", { ingestionId: targetIngestionId, fields });
+        const chatRes = await postAssistantMessage({
+          session_id: getAssistantSessionId(),
+          action: "submit_missing_fields",
+          message: "submit missing fields",
+          org_id: orgId,
+          user_id: userId,
+          active_task_id: targetIngestionId,
+          fields,
+        });
+        appendToolResponse(chatRes, { skipMessages: true });
+        const data = chatRes.tool_result?.ingestion;
+        if (!data || data.ingestion_id !== targetIngestionId) return;
+        upsertIngestionState(data, { activate: true });
+        appendChat("system", `已保存您填写的内容。${ingestionStatusLabelZh(data.status)}`);
+      } catch (e) {
+        clientLogger.error("resolve failed", e);
+        appendChat("system", "保存失败：请把标红的空项填好后再试。");
+      } finally {
+        setIsResolving(false);
+        setResolvingIngestionIds((prev) => withoutRecordKey(prev, targetIngestionId) as BooleanByIngestion);
+      }
+    },
+    [
+      appendChat,
+      appendToolResponse,
+      getAssistantSessionId,
+      ingestion,
+      ingestionId,
+      ingestionsById,
+      orgId,
+      resolveFields,
+      resolveFieldsByIngestion,
+      upsertIngestionState,
+      userId,
+    ],
+  );
+
+  const onPreviewDraftChangeTask = useCallback(
+    (targetIngestionId: string, next: OrderPreviewData) => {
+      if (!targetIngestionId) return;
+      const bound = bindPreviewSalesUser(next, userName);
+      previewDirtyByIngestionRef.current = {
+        ...previewDirtyByIngestionRef.current,
+        [targetIngestionId]: true,
+      };
+      setPreviewDirtyByIngestion((prev) => ({ ...prev, [targetIngestionId]: true }));
+      setConfirmedPreviewIds((prev) => withoutRecordKey(prev, targetIngestionId) as Record<string, true>);
+      setPreviewDraftsByIngestion((prev) => ({ ...prev, [targetIngestionId]: bound }));
+      if (ingestionIdRef.current === targetIngestionId) {
+        previewDirtyRef.current = true;
+        setPreviewDraft(bound);
+      }
+    },
+    [userName],
+  );
+
+  const onConfirmPreviewTask = useCallback(
+    async (targetIngestionId: string) => {
+      if (!targetIngestionId) return;
+      const targetIngestion = ingestionsById[targetIngestionId] ?? (targetIngestionId === ingestionId ? ingestion : null);
+      const draft = previewDraftsByIngestion[targetIngestionId] ?? targetIngestion?.preview_data ?? null;
+      if (!draft) return;
+      const previewToConfirm = bindPreviewSalesUser(draft, userName);
+      setIsConfirmingPreview(true);
+      setConfirmingPreviewIngestionIds((prev) => ({ ...prev, [targetIngestionId]: true }));
+      try {
+        clientLogger.info("confirm order preview", { ingestionId: targetIngestionId, details: previewToConfirm.details.length });
+        const chatRes = await postAssistantMessage({
+          session_id: getAssistantSessionId(),
+          action: "confirm_preview",
+          message: "确认订单预览",
+          org_id: orgId,
+          user_id: userId,
+          active_task_id: targetIngestionId,
+          preview_data: previewToConfirm,
+        });
+        appendToolResponse(chatRes);
+        const data = chatRes.tool_result?.ingestion;
+        if (!data || data.ingestion_id !== targetIngestionId) return;
+        previewDirtyByIngestionRef.current = withoutRecordKey(
+          previewDirtyByIngestionRef.current,
+          targetIngestionId,
+        ) as BooleanByIngestion;
+        setPreviewDirtyByIngestion((prev) => withoutRecordKey(prev, targetIngestionId) as BooleanByIngestion);
+        setConfirmedPreviewIds((prev) => ({ ...prev, [targetIngestionId]: true }));
+        const nextPreview = syncPreviewDefaults(data.preview_data ?? previewToConfirm, userName, orgId);
+        setPreviewDraftsByIngestion((prev) => ({ ...prev, [targetIngestionId]: nextPreview }));
+        const displayData = upsertIngestionState(data, { activate: true });
+        const workflowToolUi = buildPdfToErpToolUi(displayData);
+        if (workflowToolUi) {
+          setChatMessages((prev) => updateWorkflowToolCard(prev, displayData, workflowToolUi));
+          const displayStatus = displayIngestionStatus(displayData, clientDraftStateRef.current) ?? displayData.status;
+          const cardKey = pdfToErpWorkflowCardKey(displayData, displayStatus);
+          workflowToolCardKeyByIngestionRef.current = {
+            ...workflowToolCardKeyByIngestionRef.current,
+            [targetIngestionId]: cardKey,
+          };
+          workflowToolCardKeyRef.current = cardKey;
+        }
+      } catch (e) {
+        clientLogger.error("confirm preview failed", e);
+        appendChat("system", "订单预览确认失败：请检查表格中的必填项后再试。");
+      } finally {
+        setIsConfirmingPreview(false);
+        setConfirmingPreviewIngestionIds((prev) => withoutRecordKey(prev, targetIngestionId) as BooleanByIngestion);
+      }
+    },
+    [
+      appendChat,
+      appendToolResponse,
+      getAssistantSessionId,
+      ingestion,
+      ingestionId,
+      ingestionsById,
+      orgId,
+      previewDraftsByIngestion,
+      upsertIngestionState,
+      userId,
+      userName,
+    ],
+  );
+
+  const onCreateDraftTask = useCallback(
+    async (targetIngestionId: string) => {
+      if (!targetIngestionId || creatingDraftIngestionIds[targetIngestionId]) return;
+      const targetIngestion = ingestionsById[targetIngestionId] ?? (targetIngestionId === ingestionId ? ingestion : null);
+      if (!targetIngestion) return;
+      const targetPreview = previewDraftsByIngestion[targetIngestionId] ?? targetIngestion.preview_data ?? null;
+      const isDirty = Boolean(targetPreview && previewDirtyByIngestion[targetIngestionId]);
+      if (targetPreview && isDirty) {
+        appendChat("system", "订单预览有未确认的修改，请先确认预览后再上传 ERP。");
+        return;
+      }
+      const isConfirmed = Boolean(confirmedPreviewIds[targetIngestionId] && !isDirty);
+      if (targetPreview && !isConfirmed) {
+        appendChat("system", "请先点击“确认预览”，确认订单信息无误后再上传 ERP。");
+        return;
+      }
+      const currentStatus = displayIngestionStatus(targetIngestion, clientDraftStateRef.current);
+      if (currentStatus !== "VALIDATED") {
+        appendChat("system", "当前订单还没有进入可上传状态，请先补全必填信息并等待校验通过。");
+        return;
+      }
+      setIsCreatingDraft(true);
+      setCreatingDraftIngestionIds((prev) => ({ ...prev, [targetIngestionId]: true }));
+      try {
+        clientLogger.info("create ERP draft", { ingestionId: targetIngestionId });
+        const chatRes = await postAssistantMessage({
+          session_id: getAssistantSessionId(),
+          action: "create_draft",
+          message: "确认上传 ERP，创建草稿",
+          org_id: orgId,
+          user_id: userId,
+          active_task_id: targetIngestionId,
+        });
+        appendToolResponse(chatRes);
+        const data = chatRes.tool_result?.draft;
+        if (!data || data.ingestion_id !== targetIngestionId) return;
+        clientDraftStateRef.current[data.ingestion_id] = {
+          draft_no: data.draft_no,
+          draft_url: data.draft_url,
+        };
+        const base = ingestionsByIdRef.current[data.ingestion_id] ?? targetIngestion;
+        const merged = mergeDraftCreatedState(base, data);
+        upsertIngestionState(merged, { activate: true, poll: false });
+        setPollingIngestionIds((prev) => withoutRecordKey(prev, targetIngestionId) as BooleanByIngestion);
+      } catch (e) {
+        clientLogger.error("create draft failed", e);
+        appendChat("system", "草稿没生成出来：请先补全必填项，等进度显示可以生成草稿后再点按钮。");
+      } finally {
+        setIsCreatingDraft(false);
+        setCreatingDraftIngestionIds((prev) => withoutRecordKey(prev, targetIngestionId) as BooleanByIngestion);
+      }
+    },
+    [
+      appendChat,
+      appendToolResponse,
+      confirmedPreviewIds,
+      creatingDraftIngestionIds,
+      getAssistantSessionId,
+      ingestion,
+      ingestionId,
+      ingestionsById,
+      orgId,
+      previewDirtyByIngestion,
+      previewDraftsByIngestion,
+      upsertIngestionState,
+      userId,
+    ],
+  );
+
   const onDevProcess = useCallback(async () => {
     if (!ingestionId) return;
     const base = getApiBaseUrl();
@@ -2068,7 +2654,7 @@ export default function HomePage() {
         return (
           <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-sm text-amber-950">
             <div className="font-semibold">该文件已经上传过 ERP</div>
-            <div className="mt-1 text-amber-900">重新处理会复用该任务编号，清空当前识别状态，并重新进入 PDF 转 ERP 流程。</div>
+            <div className="mt-1 text-amber-900">请确认是否要重复上传同一订单?</div>
             {fileName ? (
               <div className="mt-2 truncate text-xs text-amber-800" title={fileName}>
                 {fileName}
@@ -2095,7 +2681,7 @@ export default function HomePage() {
                 onClick={() => onCancelReprocessUpload(token)}
                 className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-50"
               >
-                保留已有结果
+                否，保留已有结果
               </button>
             </div>
           </div>
@@ -2103,18 +2689,28 @@ export default function HomePage() {
       }
       if (ui.type === "missing_fields_form") {
         const cardIngestionId = String(ui.data.ingestion_id ?? "");
-        const isCurrentTaskCard = Boolean(cardIngestionId && ingestionId && cardIngestionId === ingestionId);
+        const taskIngestion = cardIngestionId
+          ? ingestionsById[cardIngestionId] ?? (cardIngestionId === ingestionId ? ingestion : null)
+          : null;
+        const isCurrentTaskCard = Boolean(cardIngestionId && taskIngestion);
+        const cardPreviewDirty = Boolean(cardIngestionId && previewDirtyByIngestion[cardIngestionId]);
+        const cardPreviewConfirmed = Boolean(cardIngestionId && confirmedPreviewIds[cardIngestionId] && !cardPreviewDirty);
+        const isResolvingCard = Boolean(cardIngestionId && resolvingIngestionIds[cardIngestionId]);
+        const isConfirmingPreviewCard = Boolean(cardIngestionId && confirmingPreviewIngestionIds[cardIngestionId]);
+        const isCreatingDraftCard = Boolean(cardIngestionId && creatingDraftIngestionIds[cardIngestionId]);
         const cardPreview =
           ui.data.preview_data && typeof ui.data.preview_data === "object"
             ? (ui.data.preview_data as OrderPreviewData)
             : null;
-        const previewForCard = isCurrentTaskCard ? previewDraft ?? ingestion?.preview_data ?? cardPreview : cardPreview;
+        const previewForCard = isCurrentTaskCard
+          ? previewDraftsByIngestion[cardIngestionId] ?? taskIngestion?.preview_data ?? cardPreview
+          : cardPreview;
         if (previewForCard) {
-          const currentStatus = displayIngestionStatus(ingestion, clientDraftStateRef.current);
+          const currentStatus = displayIngestionStatus(taskIngestion, clientDraftStateRef.current);
           const canCreateDraft =
-            isCurrentTaskCard && Boolean(ingestionId) && currentStatus === "VALIDATED" && isPreviewConfirmed && !isPreviewDirty;
-          const editableFields = isCurrentTaskCard ? ingestion?.editable_fields ?? [] : [];
-          const issues = isCurrentTaskCard ? ingestion?.issues ?? [] : [];
+            isCurrentTaskCard && currentStatus === "VALIDATED" && cardPreviewConfirmed && !cardPreviewDirty;
+          const editableFields = isCurrentTaskCard ? taskIngestion?.editable_fields ?? [] : [];
+          const issues = isCurrentTaskCard ? taskIngestion?.issues ?? [] : [];
           return (
             <div className="mt-3 rounded-xl border border-red-200 bg-red-50/80 p-3 text-sm text-red-950">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2129,11 +2725,11 @@ export default function HomePage() {
                   preview={previewForCard}
                   editableFields={editableFields}
                   issues={issues}
-                  onChange={onPreviewDraftChange}
-                  onConfirm={onConfirmPreview}
-                  onCreateDraft={onCreateDraft}
-                  confirming={isConfirmingPreview}
-                  creatingDraft={isCreatingDraft}
+                  onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
+                  onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
+                  onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                  confirming={isConfirmingPreviewCard}
+                  creatingDraft={isCreatingDraftCard}
                   createDraftDisabled={!canCreateDraft}
                   lockedSalesUser={userName}
                   readOnly={!isCurrentTaskCard}
@@ -2147,7 +2743,11 @@ export default function HomePage() {
         const cardFields = rows.reduce<Record<string, string>>((acc, field) => {
           const key = String(field.key ?? "");
           if (!key) return acc;
-          acc[key] = String((isCurrentTaskCard ? resolveFields[key] : undefined) ?? field.current_value ?? "");
+          acc[key] = String(
+            (isCurrentTaskCard ? resolveFieldsByIngestion[cardIngestionId]?.[key] : undefined) ??
+              field.current_value ??
+              "",
+          );
           return acc;
         }, {});
         return (
@@ -2170,14 +2770,17 @@ export default function HomePage() {
                   <div className="font-medium">{String(field.label ?? field.key ?? "")}</div>
                   <input
                     value={
-                      (isCurrentTaskCard ? resolveFields[String(field.key)] : undefined) ??
+                      (isCurrentTaskCard ? resolveFieldsByIngestion[cardIngestionId]?.[String(field.key)] : undefined) ??
                       String(field.current_value ?? "")
                     }
-                    disabled={disabled || isResolving}
+                    disabled={disabled || isResolvingCard}
                     onChange={(e) =>
-                      setResolveFields((prev) => ({
+                      setResolveFieldsByIngestion((prev) => ({
                         ...prev,
-                        [String(field.key)]: e.target.value,
+                        [cardIngestionId]: {
+                          ...(prev[cardIngestionId] ?? {}),
+                          [String(field.key)]: e.target.value,
+                        },
                       }))
                     }
                     className="mt-1 w-full rounded-lg border border-red-200 bg-white px-2.5 py-2 text-sm text-slate-900 outline-none focus:border-red-400 focus:ring-2 focus:ring-red-100 disabled:cursor-not-allowed disabled:bg-slate-100"
@@ -2190,18 +2793,23 @@ export default function HomePage() {
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"
-                disabled={disabled || isResolving || !ingestionId}
-                onClick={() => void onResolve(cardFields)}
+                disabled={disabled || isResolvingCard || !cardIngestionId}
+                onClick={() => void onResolveTask(cardIngestionId, cardFields)}
                 className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {isResolving ? "正在保存..." : "保存补充信息"}
+                {isResolvingCard ? "正在保存..." : "保存补充信息"}
               </button>
               <button
                 type="button"
-                disabled={disabled || isResolving}
+                disabled={disabled || isResolvingCard}
                 onClick={() => {
                   const text = rows
-                    .map((field) => `${String(field.label ?? field.key ?? "")}是${resolveFields[String(field.key)] ?? ""}`)
+                    .map(
+                      (field) =>
+                        `${String(field.label ?? field.key ?? "")}是${
+                          resolveFieldsByIngestion[cardIngestionId]?.[String(field.key)] ?? ""
+                        }`,
+                    )
                     .join("，");
                   setChatInput(text);
                 }}
@@ -2215,22 +2823,31 @@ export default function HomePage() {
       }
       if (ui.type === "upload_confirm") {
         const cardIngestionId = String(ui.data.ingestion_id ?? "");
-        const isCurrentTaskCard = Boolean(cardIngestionId && ingestionId && cardIngestionId === ingestionId);
+        const taskIngestion = cardIngestionId
+          ? ingestionsById[cardIngestionId] ?? (cardIngestionId === ingestionId ? ingestion : null)
+          : null;
+        const isCurrentTaskCard = Boolean(cardIngestionId && taskIngestion);
         const disabled = !isCurrentTaskCard;
+        const cardPreviewDirty = Boolean(cardIngestionId && previewDirtyByIngestion[cardIngestionId]);
+        const cardPreviewConfirmed = Boolean(cardIngestionId && confirmedPreviewIds[cardIngestionId] && !cardPreviewDirty);
+        const isConfirmingPreviewCard = Boolean(cardIngestionId && confirmingPreviewIngestionIds[cardIngestionId]);
+        const isCreatingDraftCard = Boolean(cardIngestionId && creatingDraftIngestionIds[cardIngestionId]);
         const cardPreview =
           ui.data.preview_data && typeof ui.data.preview_data === "object"
             ? (ui.data.preview_data as OrderPreviewData)
             : null;
-        const previewForCard = isCurrentTaskCard ? previewDraft ?? cardPreview : cardPreview;
-        const currentStatus = displayIngestionStatus(ingestion, clientDraftStateRef.current);
-        const canCreateDraft = isCurrentTaskCard && Boolean(ingestionId) && currentStatus === "VALIDATED" && isPreviewConfirmed && !isPreviewDirty;
+        const previewForCard = isCurrentTaskCard
+          ? previewDraftsByIngestion[cardIngestionId] ?? taskIngestion?.preview_data ?? cardPreview
+          : cardPreview;
+        const currentStatus = displayIngestionStatus(taskIngestion, clientDraftStateRef.current);
+        const canCreateDraft = isCurrentTaskCard && currentStatus === "VALIDATED" && cardPreviewConfirmed && !cardPreviewDirty;
         const editableFields = isCurrentTaskCard
-          ? ingestion?.editable_fields ?? []
+          ? taskIngestion?.editable_fields ?? []
           : Array.isArray(ui.data.editable_fields)
             ? (ui.data.editable_fields as NonNullable<IngestionResponse["editable_fields"]>)
             : [];
         const issues = isCurrentTaskCard
-          ? ingestion?.issues ?? []
+          ? taskIngestion?.issues ?? []
           : Array.isArray(ui.data.issues)
             ? (ui.data.issues as NonNullable<IngestionResponse["issues"]>)
             : [];
@@ -2254,10 +2871,10 @@ export default function HomePage() {
             </div>
             <div className="mt-1">确认后将调用 ERP 创建草稿单。</div>
             {disabled ? <div className="mt-2 text-xs text-emerald-800">这是历史任务的确认卡，不能在这里上传 ERP。</div> : null}
-            {!disabled && isPreviewDirty ? (
+            {!disabled && cardPreviewDirty ? (
               <div className="mt-2 text-xs font-medium text-amber-800">预览有未确认修改，请先确认预览。</div>
             ) : null}
-            {!disabled && !isPreviewDirty && !isPreviewConfirmed ? (
+            {!disabled && !cardPreviewDirty && !cardPreviewConfirmed ? (
               <div className="mt-2 text-xs font-medium text-amber-800">请先点击「确认预览」，确认后才能上传 ERP。</div>
             ) : null}
             {summaryRows.length > 0 ? (
@@ -2275,19 +2892,19 @@ export default function HomePage() {
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"
-                disabled={disabled || isConfirmingPreview || !previewForCard}
-                onClick={() => void onConfirmPreview()}
+                disabled={disabled || isConfirmingPreviewCard || !previewForCard}
+                onClick={() => void onConfirmPreviewTask(cardIngestionId)}
                 className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {isConfirmingPreview ? "正在确认..." : "确认预览"}
+                {isConfirmingPreviewCard ? "正在确认..." : "确认预览"}
               </button>
               <button
                 type="button"
-                disabled={!canCreateDraft || isCreatingDraft}
-                onClick={() => void onCreateDraft()}
+                disabled={!canCreateDraft || isCreatingDraftCard}
+                onClick={() => void onCreateDraftTask(cardIngestionId)}
                 className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {isCreatingDraft ? "正在上传..." : "上传 ERP"}
+                {isCreatingDraftCard ? "正在上传..." : "上传 ERP"}
               </button>
             </div>
             {previewForCard ? (
@@ -2300,11 +2917,11 @@ export default function HomePage() {
                     preview={previewForCard}
                     editableFields={editableFields}
                     issues={issues}
-                    onChange={onPreviewDraftChange}
-                    onConfirm={onConfirmPreview}
-                    onCreateDraft={onCreateDraft}
-                    confirming={isConfirmingPreview}
-                    creatingDraft={isCreatingDraft}
+                    onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
+                    onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
+                    onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                    confirming={isConfirmingPreviewCard}
+                    creatingDraft={isCreatingDraftCard}
                     createDraftDisabled={!canCreateDraft}
                     lockedSalesUser={userName}
                     hideActions
@@ -2359,14 +2976,39 @@ export default function HomePage() {
       }
       if (ui.type === "processing") {
         const status = String(ui.data.status ?? "UPLOADED") as IngestionStatus;
-        const percent = pdfToErpProgressPercent(status);
+        const previewReady = Boolean(ui.data.preview_ready);
+        const progressState = pdfToErpProgressState(status, previewReady);
+        const percent = pdfToErpProgressPercent(status, previewReady);
         const fileName = String(ui.data.file_name ?? "");
+        const progressLabel =
+          progressState === "done"
+            ? "订单预览已生成"
+            : progressState === "failed"
+              ? "处理失败"
+              : progressState === "canceled"
+                ? "任务已取消"
+                : ingestionStatusLabelZh(status);
         return (
           <div className="mt-3 w-full max-w-md rounded-lg border border-sky-100 bg-sky-50/80 px-3 py-2 text-sm text-sky-950">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-2 font-semibold">
-                  <ProgressSpinner className="text-sky-700" />
+                  {progressState === "running" ? (
+                    <ProgressSpinner className="text-sky-700" />
+                  ) : (
+                    <span
+                      className={[
+                        "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[11px] font-bold",
+                        progressState === "done"
+                          ? "bg-emerald-600 text-white"
+                          : progressState === "failed"
+                            ? "bg-red-600 text-white"
+                            : "bg-slate-400 text-white",
+                      ].join(" ")}
+                    >
+                      {progressState === "done" ? "√" : "!"}
+                    </span>
+                  )}
                   <span>PDF 转 ERP</span>
                 </div>
                 <div className="mt-0.5 truncate text-xs text-sky-700">
@@ -2381,7 +3023,7 @@ export default function HomePage() {
               <div className="h-full rounded-full bg-sky-500 transition-[width] duration-500" style={{ width: `${percent}%` }} />
             </div>
             <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-sky-700">
-              <span className="truncate">{ingestionStatusLabelZh(status)}</span>
+              <span className="truncate">{progressLabel}</span>
               <span className="font-mono">{percent}%</span>
             </div>
           </div>
@@ -2409,6 +3051,10 @@ export default function HomePage() {
     [
       ingestion,
       ingestionId,
+      confirmingPreviewIngestionIds,
+      creatingDraftIngestionIds,
+      confirmedPreviewIds,
+      ingestionsById,
       isConfirmingPreview,
       isCreatingDraft,
       isUploading,
@@ -2417,12 +3063,20 @@ export default function HomePage() {
       isResolving,
       onCancelReprocessUpload,
       onConfirmPreview,
+      onConfirmPreviewTask,
       onConfirmReprocessUpload,
       onCreateDraft,
+      onCreateDraftTask,
+      onPreviewDraftChangeTask,
       onPreviewDraftChange,
+      onResolveTask,
       onResolve,
+      previewDirtyByIngestion,
       previewDraft,
+      previewDraftsByIngestion,
+      resolvingIngestionIds,
       resolveFields,
+      resolveFieldsByIngestion,
     ],
   );
 

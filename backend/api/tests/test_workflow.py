@@ -3,10 +3,20 @@ from pathlib import Path
 import sys
 import time
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.erp_client import MockErpClient
-from app.schemas import AuditEvent, ErrorCode, IngestionResponse, IngestionStatus
+from app.schemas import (
+    AuditEvent,
+    ErrorCode,
+    IngestionResponse,
+    IngestionStatus,
+    OrderPreviewData,
+    OrderPreviewDetail,
+    OrderPreviewHeader,
+)
 from app.workflow import NodeExecutionError, run_ingestion_processing_workflow
 
 
@@ -130,7 +140,72 @@ def test_purchase_order_evidence_rejects_unrelated_pdf(monkeypatch):
         "Curriculum vitae. Education, work experience, project summary, skills, contact information.",
     )
     assert not ok
-    assert reason.startswith("insufficient_purchase_order_evidence")
+    assert reason == "obvious_non_order_document"
+
+
+def test_purchase_order_evidence_continues_for_uncertain_text(monkeypatch):
+    from app.workflow import _purchase_order_evidence
+
+    monkeypatch.setenv("WORKFLOW_REQUIRE_PURCHASE_ORDER_EVIDENCE", "true")
+    ingestion = _new_ingestion()
+    ingestion.source_file_name = "scanned-order.pdf"
+    ok, reason = _purchase_order_evidence(
+        ingestion,
+        "OCR text is partial and noisy. Some table rows may be unreadable.",
+    )
+    assert ok
+    assert reason.startswith("insufficient_purchase_order_evidence_continue")
+
+
+def test_validate_order_preview_rejects_empty_preview(monkeypatch):
+    from app.workflow import _validate_order_preview
+
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    preview = OrderPreviewData(order=OrderPreviewHeader(), details=[OrderPreviewDetail()])
+
+    ok, reason, metrics = _validate_order_preview(preview)
+
+    assert not ok
+    assert reason.startswith("invalid_order_preview")
+    assert metrics["valid_detail_rows"] == 0
+
+
+def test_validate_order_preview_accepts_realistic_preview(monkeypatch):
+    from app.workflow import _validate_order_preview
+
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(customerName="Yingke", customerPoNo="PO-001"),
+        details=[OrderPreviewDetail(productName="Spring", productSpec="D10", qty=12)],
+    )
+
+    ok, reason, metrics = _validate_order_preview(preview)
+
+    assert ok
+    assert reason == "valid_header_and_detail_row"
+    assert metrics["valid_detail_rows"] == 1
+
+
+def test_node_build_preview_rejects_missing_preview_when_validation_enabled(monkeypatch):
+    from app.workflow import WorkflowState, _node_build_preview
+
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setattr("app.workflow.build_order_preview_data", lambda _ingestion: None)
+    ing = _new_ingestion()
+    state: WorkflowState = {
+        "ingestion": ing,
+        "erp": MockErpClient(),
+        "append_event": _append_event,
+        "mapping_metrics": {},
+        "document_text": "",
+    }
+
+    with pytest.raises(NodeExecutionError) as exc_info:
+        _node_build_preview(state)
+
+    assert exc_info.value.reason == "unsupported_document missing_order_preview"
+    assert ing.error_details["category"] == "unsupported_document"
+    assert ing.error_details["reason"] == "missing_order_preview"
 
 
 def test_node_map_continues_when_erp_search_raises():
