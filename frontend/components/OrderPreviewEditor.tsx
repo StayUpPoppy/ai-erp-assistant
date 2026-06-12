@@ -112,6 +112,7 @@ export interface OrderPreviewEditorProps {
   creatingDraft: boolean;
   createDraftDisabled: boolean;
   hideActions?: boolean;
+  hideCreateDraftAction?: boolean;
   readOnly?: boolean;
   lockedSalesUser?: string;
 }
@@ -127,6 +128,7 @@ export function OrderPreviewEditor({
   creatingDraft,
   createDraftDisabled,
   hideActions = false,
+  hideCreateDraftAction = false,
   readOnly = false,
   lockedSalesUser,
 }: OrderPreviewEditorProps) {
@@ -202,7 +204,7 @@ export function OrderPreviewEditor({
           <div className="text-base font-semibold text-slate-900">订单预览与确认</div>
           <div className="mt-1 text-sm text-slate-600">LLM 已识别的内容会自动填入表格，红色字段需要人工补齐后再确认。</div>
         </div>
-        <div className={hideActions ? "hidden" : "flex flex-wrap gap-2"}>
+        <div className={hideActions ? "hidden" : `flex flex-wrap gap-2 ${hideCreateDraftAction ? "[&>button:nth-of-type(2)]:hidden" : ""}`}>
           <button
             type="button"
             disabled={confirming || readOnly}

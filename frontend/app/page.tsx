@@ -3610,6 +3610,7 @@ export default function HomePage() {
                 isPreviewDirty
               }
               lockedSalesUser={userName}
+              hideCreateDraftAction
             />
           ) : (
           <div className="w-full rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm shadow-slate-200/30 ring-1 ring-slate-900/[0.03] sm:p-5">
