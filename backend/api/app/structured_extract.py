@@ -145,6 +145,165 @@ def _extract_sap_srm_po_line_items(text: str) -> List[Dict[str, str]]:
     return rows
 
 
+def _clean_english_po_cell(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip(" \t\r\n|:："))
+
+
+def _norm_noisy_slash_date(value: str) -> str:
+    raw = (value or "").strip()
+    m = re.search(r"(20\d{2})\s*[/\-]\s*(\d{1,2})\s*[/\-]\s*(\d{1,2})", raw)
+    if not m:
+        return ""
+    year, month_raw, day_raw = m.groups()
+    month = int(month_raw)
+    day = int(day_raw)
+    if month > 12 and len(month_raw) == 2:
+        first_digit = int(month_raw[0])
+        if 1 <= first_digit <= 12:
+            month = first_digit
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return ""
+    return f"{year}-{month:02d}-{day:02d}"
+
+
+def _first_english_po_date(text: str, label_pattern: str) -> str:
+    m = re.search(label_pattern, text, re.IGNORECASE)
+    if not m:
+        return ""
+    window = (text or "")[m.end() : m.end() + 180]
+    for raw in re.findall(r"20\d{2}\s*[/\-]\s*\d{1,2}\s*[/\-]\s*\d{1,2}", window):
+        normalized = _norm_noisy_slash_date(raw)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _first_number(value: str) -> str:
+    m = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?", value or "")
+    return m.group(0).replace(",", "") if m else ""
+
+
+def _numbers_in(value: str) -> List[str]:
+    return [match.replace(",", "") for match in re.findall(r"-?\d+(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?", value or "")]
+
+
+def _format_decimal(value: float) -> str:
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    t = text or ""
+    low = t.lower()
+    if not ("global" in low and ("order no" in low or re.search(r"\bpo[a-z0-9]{6,}\b", low))):
+        return out
+
+    customer = _first_match(
+        t,
+        r"(?im)^\s*(global[\s\-]*set[^\n\r]{0,180}?(?:co\.?\s*,?\s*ltd\.?|ltd\.?))",
+        re.IGNORECASE,
+    )
+    if customer:
+        customer = re.split(r"\s+(?:address|tel|fax|order\s+no)\b", customer, maxsplit=1, flags=re.IGNORECASE)[0]
+        out["customerName"] = _clean_english_po_cell(customer)
+
+    order_no = _first_match(
+        t,
+        r"(?:order\s*no\.?|po\s*(?:no\.?|number))\s*[:#.\s]*([A-Z0-9][A-Z0-9\-_]{5,50})",
+        re.IGNORECASE,
+    )
+    if not order_no:
+        order_no = _first_match(t, r"\b(PO[A-Z0-9]{6,50})\b", re.IGNORECASE)
+    if order_no:
+        out["customerPoNo"] = order_no.upper()
+        out.setdefault("order_no", order_no.upper())
+
+    doc_date = _first_english_po_date(t, r"(?:issue\s*date|order\s*date|date)")
+    if doc_date:
+        out["doc_date"] = doc_date
+
+    addr = _first_match(t, r"(?:address)\s*[:：]?\s*([^\n\r]{8,220})", re.IGNORECASE)
+    if addr and re.search(r"\b(?:payment|delivery)\s+terms\b", addr, re.IGNORECASE) and not re.search(
+        r"\b(?:province|city|road|highway|lane|town)\b", addr, re.IGNORECASE
+    ):
+        addr = ""
+    if not addr:
+        addr = _first_match(t, r"([^\n\r]{8,220}jiangsu\s+province[^\n\r]{0,80})", re.IGNORECASE)
+    if addr:
+        addr = re.split(
+            r"\s+(?:tel|fax|order\s+no|issue\s+date|delivery\s+terms|payment\s+terms)\b",
+            addr,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        out["deliveryAddr"] = _clean_english_po_cell(addr)
+
+    if re.search(r"\b(?:cny|rmb)\b|¥|￥", t, re.IGNORECASE) or "jiangsu province" in low:
+        out["currency"] = "CNY"
+
+    rows: List[Dict[str, str]] = []
+    for raw_line in t.replace("｜", "|").replace("¦", "|").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "|" in line:
+            cells = [_clean_english_po_cell(part) for part in line.split("|")]
+            cells = [cell for cell in cells if cell]
+        else:
+            cells = [_clean_english_po_cell(part) for part in re.split(r"\s{2,}", line)]
+        if len(cells) < 5 or not re.fullmatch(r"\d{1,3}", cells[0]):
+            continue
+        header_like = " ".join(cells).lower()
+        if "qty" in header_like and ("item" in header_like or "description" in header_like):
+            continue
+
+        numeric_cells: List[str] = []
+        for cell in cells[4:]:
+            cleaned = re.sub(r"20\d{2}\s*[/\-]\s*\d{0,2}\s*[/\-]\s*\d{1,2}", " ", cell)
+            numeric_cells.extend(_numbers_in(cleaned))
+
+        delivery = ""
+        for cell in reversed(cells):
+            delivery = _norm_noisy_slash_date(cell)
+            if delivery:
+                break
+
+        item: Dict[str, str] = {"line_no": cells[0], "inventory_code": cells[1]}
+        if len(cells) > 2:
+            item["name"] = cells[2]
+        if len(cells) > 3:
+            item["productSpec"] = cells[3]
+        if numeric_cells:
+            item["quantity"] = numeric_cells[0]
+        tail_numbers = numeric_cells[1:]
+        if len(tail_numbers) >= 2:
+            item["unit_price_excl_tax"] = tail_numbers[-2]
+            item["line_amount_excl_tax"] = tail_numbers[-1]
+            try:
+                qty = float(item["quantity"])
+                amount = float(item["line_amount_excl_tax"])
+                price = float(item["unit_price_excl_tax"])
+                derived_price = amount / qty if qty else 0
+                if qty and derived_price and abs(price * qty - amount) > 0.05:
+                    item["unit_price_excl_tax"] = _format_decimal(derived_price)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        elif len(tail_numbers) == 1:
+            item["unit_price_excl_tax"] = tail_numbers[0]
+        if delivery:
+            item["delivery_date"] = delivery
+            out.setdefault("delivery_date", delivery)
+        rows.append(item)
+
+    if rows:
+        default_delivery = out.get("delivery_date")
+        if default_delivery:
+            for row in rows:
+                row.setdefault("delivery_date", default_delivery)
+        out["line_items_json"] = json.dumps(rows, ensure_ascii=False)
+    return out
+
+
 def extract_po_cn_layout_entities(text: str) -> Dict[str, str]:
     """
     中文采购订单常见抬头 + 表格明细（支持多行）。
@@ -156,6 +315,10 @@ def extract_po_cn_layout_entities(text: str) -> Dict[str, str]:
     t = text or ""
     if not t.strip():
         return out
+
+    english_po = _extract_global_set_pipe_po_entities(t)
+    if english_po:
+        out.update(english_po)
 
     sup = _first_match(t, r"供方\s*[:：]\s*([^\n\r]{2,120})")
     if not sup:
@@ -200,9 +363,9 @@ def extract_po_cn_layout_entities(text: str) -> Dict[str, str]:
                 "delivery_date": _norm_slash_date(deliv),
             },
         )
-    if rows:
+    if rows and "line_items_json" not in out:
         out["line_items_json"] = json.dumps(rows, ensure_ascii=False)
-    else:
+    elif "line_items_json" not in out:
         sap_rows = _extract_sap_srm_po_line_items(t)
         if sap_rows:
             out["line_items_json"] = json.dumps(sap_rows, ensure_ascii=False)

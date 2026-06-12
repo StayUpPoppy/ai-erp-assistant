@@ -10,6 +10,7 @@ from app.llm_extract import (
     _extract_json_with_repair,
     _llm_extract_timeout_seconds,
     _purchase_order_to_preview,
+    try_apply_llm_preview,
 )
 from app.schemas import IngestionResponse, IngestionStatus, PurchaseOrder
 
@@ -248,3 +249,79 @@ def test_llm_quality_issues_marks_uncertain_and_amount_mismatch() -> None:
     assert any("supplier_name" in message for message in messages)
     assert any("置信度较低" in message for message in messages)
     assert any("金额与数量" in message for message in messages)
+
+
+def _ingestion_with_fields(fields: dict[str, str]) -> IngestionResponse:
+    return IngestionResponse(
+        ingestion_id="ing-llm-quality",
+        file_id="file-llm-quality",
+        file_hash="hash-llm-quality",
+        user_id="u-test",
+        org_id="org-test",
+        extract_version="v0",
+        model_version="mock",
+        prompt_version="prompt",
+        status=IngestionStatus.EXTRACTED,
+        missing_fields=[],
+        resolved_fields=dict(fields),
+        audit_events=[],
+    )
+
+
+def test_try_apply_llm_preview_keeps_rule_preview_when_llm_is_empty(monkeypatch) -> None:
+    ingestion = _ingestion_with_fields(
+        {
+            "customerName": "Global-set Valve Components Jiangsu Co., LTD",
+            "customerPoNo": "POGSVC2600205",
+            "doc_date": "2026-03-06",
+            "currency": "CNY",
+            "delivery_date": "2026-03-27",
+            "line_items_json": (
+                '[{"inventory_code":"SOGEYC2600","name":"sooson00s","productSpec":"13.5x27.3 X-750",'
+                '"quantity":"5000","unit_price_excl_tax":"4.9","line_amount_excl_tax":"24500"}]'
+            ),
+        }
+    )
+
+    monkeypatch.setattr("app.llm_extract.llm_available", lambda: True)
+    monkeypatch.setattr(
+        "app.llm_extract.chat_completion_json",
+        lambda *_args, **_kwargs: '{"purchase_order":{"order_number":"","purchaser_name":"","order_date":"","items":[]}}',
+    )
+
+    applied = try_apply_llm_preview(ingestion, "Purchase Order POGSVC2600205")
+
+    assert applied is False
+    assert ingestion.preview_data is None
+    assert ingestion.resolved_fields["customerName"] == "Global-set Valve Components Jiangsu Co., LTD"
+    assert ingestion.resolved_fields["customerPoNo"] == "POGSVC2600205"
+    assert ingestion.resolved_fields["doc_date"] == "2026-03-06"
+    assert ingestion.resolved_fields["line_items_json"]
+    assert any("已保留规则预览" in issue.message for issue in ingestion.issues)
+
+
+def test_try_apply_llm_preview_applies_llm_when_more_complete(monkeypatch) -> None:
+    ingestion = _ingestion_with_fields({"customerPoNo": "PO-ROUGH"})
+
+    monkeypatch.setattr("app.llm_extract.llm_available", lambda: True)
+    monkeypatch.setattr(
+        "app.llm_extract.chat_completion_json",
+        lambda *_args, **_kwargs: (
+            '{"purchase_order":{"order_number":"PO-BETTER","purchaser_name":"Better Customer",'
+            '"order_date":"2026-04-01","delivery_address":"Delivery Road",'
+            '"items":[{"material_code":"MAT-001","material_name":"Spring","specification":"10x20",'
+            '"quantity":12,"unit_price_without_tax":3.5,"total_amount_without_tax":42,'
+            '"delivery_date":"2026-04-15"}]}}'
+        ),
+    )
+
+    applied = try_apply_llm_preview(ingestion, "Purchase Order PO-BETTER MAT-001")
+
+    assert applied is True
+    assert ingestion.preview_data is not None
+    assert ingestion.preview_data.order.customerName == "Better Customer"
+    assert ingestion.preview_data.order.customerPoNo == "PO-BETTER"
+    assert ingestion.preview_data.order.orderDate == "2026-04-01"
+    assert ingestion.preview_data.details[0].materialCode == "MAT-001"
+    assert ingestion.preview_data.details[0].qty == 12
+    assert ingestion.resolved_fields["customerPoNo"] == "PO-BETTER"

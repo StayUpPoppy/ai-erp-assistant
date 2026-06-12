@@ -8,7 +8,7 @@ from time import perf_counter
 from typing import Any, Dict, Optional
 
 from app.llm_client import chat_completion_json, llm_available, llm_model_name, llm_prompt_version
-from app.order_preview import apply_preview_to_ingestion, preview_to_resolved_fields
+from app.order_preview import apply_preview_to_ingestion, build_order_preview_data, preview_missing_keys, preview_to_resolved_fields
 from app.schemas import IngestionResponse, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader, PreviewIssue, PurchaseOrder
 
 logger = logging.getLogger("ai_erp_api")
@@ -374,6 +374,67 @@ def _append_llm_quality_issues(ingestion: IngestionResponse, order: PurchaseOrde
             add("llm.extraction_notes", text[:200])
 
 
+def _has_preview_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    try:
+        return float(value) != 0
+    except (TypeError, ValueError):
+        return bool(value)
+
+
+def _preview_completeness_score(preview: OrderPreviewData | None) -> tuple[int, int]:
+    if preview is None:
+        return (0, -99)
+    order = preview.order
+    score = sum(
+        2
+        for value in (
+            order.customerName,
+            order.customerPoNo,
+            order.orderDate,
+            order.currency,
+            order.deliveryDate,
+            order.deliveryAddr,
+        )
+        if _has_preview_value(value)
+    )
+    for detail in preview.details or []:
+        score += sum(
+            2
+            for value in (
+                detail.materialCode,
+                detail.productName,
+                detail.productSpec,
+                detail.customerMaterialNo,
+            )
+            if _has_preview_value(value)
+        )
+        score += sum(
+            1
+            for value in (
+                detail.qty,
+                detail.price,
+                detail.taxPrice,
+                detail.amount,
+                detail.allAmount,
+                detail.tax,
+                detail.taxAmount,
+            )
+            if _has_preview_value(value)
+        )
+    missing_count = len(preview_missing_keys(preview))
+    return (score, -missing_count)
+
+
+def _should_keep_rule_preview(rule_preview: OrderPreviewData | None, llm_preview: OrderPreviewData) -> bool:
+    rule_score = _preview_completeness_score(rule_preview)
+    llm_score = _preview_completeness_score(llm_preview)
+    return rule_score[0] > 0 and llm_score < rule_score
+
+
 def _purchase_order_to_preview(order: PurchaseOrder, org_hint: str) -> OrderPreviewData:
     details: list[OrderPreviewDetail] = []
     for item in order.items:
@@ -443,6 +504,7 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
     if not document_text.strip():
         logger.info("llm_preview_skipped ingestion_id=%s reason=empty_document_text", ingestion.ingestion_id)
         return False
+    rule_preview = build_order_preview_data(ingestion)
     try:
         llm_started = perf_counter()
         user_prompt = _build_user_prompt(document_text, ingestion.resolved_fields)
@@ -460,7 +522,6 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
             parsed = parsed["purchase_order"]
         purchase_order = PurchaseOrder.model_validate(parsed)
         preview = _purchase_order_to_preview(purchase_order, ingestion.org_id)
-        _append_llm_quality_issues(ingestion, purchase_order)
     except Exception as exc:
         logger.warning("llm_preview_failed ingestion_id=%s err=%s", ingestion.ingestion_id, exc)
         ingestion.issues.append(
@@ -468,6 +529,19 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
         )
         return False
 
+    if _should_keep_rule_preview(rule_preview, preview):
+        logger.warning(
+            "llm_preview_rejected_by_quality ingestion_id=%s rule_score=%s llm_score=%s",
+            ingestion.ingestion_id,
+            _preview_completeness_score(rule_preview),
+            _preview_completeness_score(preview),
+        )
+        ingestion.issues.append(
+            PreviewIssue(path="llm", level="warning", message="LLM 抽取结果少于规则抽取结果，已保留规则预览。")
+        )
+        return False
+
+    _append_llm_quality_issues(ingestion, purchase_order)
     apply_preview_to_ingestion(ingestion, preview)
     fields = preview_to_resolved_fields(preview)
     fields.update(

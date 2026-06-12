@@ -137,9 +137,22 @@ def test_classify_doc_type_from_name_extended():
 
 def test_classify_doc_type_from_text_extended():
     assert classify_doc_type_from_text("Commercial invoice INV-1 dated today") == "INV"
+    assert classify_doc_type_from_text("Commercial Invoice\nPO Number: PO-2026-01\nInvoice Date 2026-05-01") == "INV"
     assert classify_doc_type_from_text("Proforma invoice for export clearance") == "INV"
     assert classify_doc_type_from_text("Stock receipt for movement type 101") == "GR"
+    assert classify_doc_type_from_text("Goods Receipt\nPurchase Order 4500012345\nMaterial M001") == "GR"
     assert classify_doc_type_from_text("Warehouse receipt line 10") == "GR"
+    assert (
+        classify_doc_type_from_text(
+            "Purchase Order\n"
+            "Order No.: POGSVC2600205\n"
+            "Buyer: Global-set Valve Components Jiangsu Co., LTD\n"
+            "Supplier: Yingke\n"
+            "Material Code Qty-UOM Delivery Date Unit Price Total Price\n"
+            "Domestic supplier pls provide 13% VAT invoice."
+        )
+        == "PO"
+    )
     assert classify_doc_type_from_text("Supplier PO 4500012345 confirmation") == "PO"
     assert classify_doc_type_from_text("Random packing list without keywords") is None
 

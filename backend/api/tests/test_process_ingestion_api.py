@@ -222,6 +222,96 @@ def test_datynk_sale_order_mode_rejects_invoice_named_upload(monkeypatch):
     assert any("forced=datynk_sale_order" in ev.message for ev in result.audit_events)
 
 
+def test_datynk_sale_order_mode_accepts_purchase_order_with_invoice_terms(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    monkeypatch.setenv("ERP_CREATE_BODY_STYLE", "datynk_sale_order")
+    monkeypatch.setenv("WORKFLOW_REQUIRE_PURCHASE_ORDER_EVIDENCE", "true")
+    monkeypatch.setenv("LLM_EXTRACT_ENABLED", "false")
+    _reset_in_memory_store()
+    payload = CreateIngestionRequest(
+        file_id="file-datynk-pogs",
+        file_hash="hash-datynk-pogs-1",
+        user_id="u-test",
+        org_id="org-test",
+        source_file_object_key="uploads/org/2026-05-01/pogs-POGSVC2600205.txt",
+        source_file_name="POGSVC2600205.pdf",
+        extract_version="v0",
+        model_version="mock-llm-v1",
+        prompt_version="prompt-v1",
+    )
+    created = create_ingestion(payload)
+    monkeypatch.setattr(
+        "app.workflow.get_object_bytes",
+        lambda _k: (
+            b"Purchase Order\n"
+            b"Order No.: POGSVC2600205\n"
+            b"Buyer: Global-set Valve Components Jiangsu Co., LTD\n"
+            b"Supplier: Zhejiang Yingke\n"
+            b"Vendor Code: 010054\n"
+            b"Date 2026-03-06\n"
+            b"Currency CNY\n"
+            b"Material Code: SOGEYC2600\n"
+            b"Qty: 5000\n"
+            b"Delivery Date: 2026/3/27\n"
+            b"Unit Price: 4.9\n"
+            b"PO Number must be stated on packing list and invoice.\n"
+            b"Domestic supplier pls provide 13% VAT invoice.\n"
+        ),
+    )
+
+    result = process_ingestion_route(created.ingestion_id, _build_request())
+
+    assert result.status != IngestionStatus.FAILED
+    assert result.error_code != ErrorCode.UNSUPPORTED_DOCUMENT.value
+    assert result.doc_type_hint and result.doc_type_hint.value == "PO"
+    assert result.preview_data is not None
+    assert result.resolved_fields.get("customerName") == "Global-set Valve Components Jiangsu Co., LTD"
+    assert result.resolved_fields.get("material_code") == "SOGEYC2600"
+
+
+def test_datynk_sale_order_mode_sends_incomplete_purchase_order_to_user_input(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    monkeypatch.setenv("ERP_CREATE_BODY_STYLE", "datynk_sale_order")
+    monkeypatch.setenv("WORKFLOW_REQUIRE_PURCHASE_ORDER_EVIDENCE", "true")
+    monkeypatch.setenv("LLM_EXTRACT_ENABLED", "false")
+    _reset_in_memory_store()
+    payload = CreateIngestionRequest(
+        file_id="file-datynk-pogs-partial",
+        file_hash="hash-datynk-pogs-partial-1",
+        user_id="u-test",
+        org_id="org-test",
+        source_file_object_key="uploads/org/2026-05-01/pogs-partial-POGSVC2600205.txt",
+        source_file_name="POGSVC2600205.pdf",
+        extract_version="v0",
+        model_version="mock-llm-v1",
+        prompt_version="prompt-v1",
+    )
+    created = create_ingestion(payload)
+    monkeypatch.setattr(
+        "app.workflow.get_object_bytes",
+        lambda _k: (
+            b"Purchase Order\n"
+            b"Order No.: POGSVC2600205\n"
+            b"Buyer: Global-set Valve Components Jiangsu Co., LTD\n"
+            b"Supplier: Zhejiang Yingke\n"
+            b"Vendor Code: 010054\n"
+            b"Date 2026-03-06\n"
+            b"Currency CNY\n"
+            b"PO Number must be stated on packing list and invoice.\n"
+            b"Domestic supplier pls provide 13% VAT invoice.\n"
+        ),
+    )
+
+    result = process_ingestion_route(created.ingestion_id, _build_request())
+
+    assert result.status == IngestionStatus.NEED_USER_INPUT
+    assert result.error_code is None
+    assert result.error_details == {}
+    assert result.doc_type_hint and result.doc_type_hint.value == "PO"
+    assert "material_code" in result.missing_fields
+    assert "line_qty" in result.missing_fields
+
+
 def test_process_ingestion_po_incomplete_stays_need_user_input(monkeypatch):
     """正文未抽全 PO 行字段时，不自动 VALIDATED。"""
     os.environ.pop("DATABASE_URL", None)

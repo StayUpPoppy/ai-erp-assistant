@@ -602,11 +602,79 @@ def classify_doc_type_from_name(file_name: str) -> str | None:
     )
     if any(k in n for k in po_keys):
         return "PO"
+    if re.search(r"(?:^|[^a-z0-9])po[a-z0-9]{4,}", n):
+        return "PO"
     return None
+
+
+def _document_front(text: str, max_chars: int = 1600) -> str:
+    return (text or "").strip().lower()[:max_chars]
+
+
+def _has_invoice_header_signal(text: str) -> bool:
+    front = _document_front(text, 1000)
+    if not front:
+        return False
+    invoice_title = re.search(
+        r"(?m)^\s*(?:tax\s+invoice|vat\s+invoice|commercial\s+invoice|proforma\s+invoice)\b",
+        front,
+    )
+    if invoice_title:
+        return True
+    return bool(
+        re.search(r"\binvoice\s*(?:no\.?|number|#)\b", front)
+        and re.search(r"\b(?:invoice\s+date|date\s+of\s+invoice|bill\s+to|ship\s+to)\b", front)
+    )
+
+
+def _has_goods_receipt_header_signal(text: str) -> bool:
+    front = _document_front(text, 1000)
+    if not front:
+        return False
+    return bool(
+        re.search(r"(?m)^\s*(?:goods\s+receipt|goods\s+receipt\s+note|stock\s+receipt|warehouse\s+receipt)\b", front)
+        or "\u6536\u8d27\u5355" in front
+        or "\u5165\u5e93\u51ed\u8bc1" in front
+    )
+
+
+def _has_purchase_order_header_signal(text: str) -> bool:
+    front = _document_front(text)
+    if not front:
+        return False
+    if re.search(r"\bpurchase\s+order\b", front) or "\u91c7\u8d2d\u8ba2\u5355" in front:
+        return True
+    has_order_no = bool(
+        re.search(r"\border\s+no\.?\b|\border\s+number\b|\bpo\s*(?:no\.?|number)\b", front)
+        or "\u5ba2\u6237\u91c7\u8d2d\u5355\u53f7" in front
+        or "\u91c7\u8d2d\u8ba2\u5355\u53f7" in front
+        or "\u8ba2\u5355\u53f7" in front
+    )
+    has_party = bool(
+        re.search(r"\b(?:buyer|supplier|vendor|customer)\b", front)
+        or "\u9700\u65b9" in front
+        or "\u4f9b\u65b9" in front
+        or "\u4f9b\u5e94\u5546" in front
+        or "\u5ba2\u6237" in front
+    )
+    has_line_signal = bool(
+        re.search(r"\b(?:material|material\s+code|qty|quantity|uom|unit\s+price|total\s+price|delivery\s+date)\b", front)
+        or "\u7269\u6599" in front
+        or "\u6570\u91cf" in front
+        or "\u4ea4\u8d27" in front
+    )
+    return has_order_no and has_party and has_line_signal
 
 
 def classify_doc_type_from_text(text: str) -> str | None:
     t = (text or "").lower()
+    if _has_invoice_header_signal(t):
+        return "INV"
+    if _has_goods_receipt_header_signal(t):
+        return "GR"
+    if _has_purchase_order_header_signal(t):
+        return "PO"
+
     inv_phrases = (
         "tax invoice",
         "vat invoice",

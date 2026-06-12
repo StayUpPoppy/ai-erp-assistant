@@ -272,6 +272,37 @@ def test_extract_sap_srm_po_multiline_metric_rows():
     assert rows[2]["line_amount_excl_tax"] == "0.0200"
 
 
+def test_extract_global_set_pipe_po_layout():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD Address: Yao Lane Paragraph,122 Highway,"
+        "Picheng Town Danyang City,Jiangsu Province (212300)\n"
+        "Order No. :POGSVC2600205\n"
+        "Issue Date : 6 / 2\n"
+        "Fax: 0511-86322635 - 2026/3/6\n"
+        "Item | Part No | Drawing No | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGEYC2600 | sooson00s | 13.5x27.3 X-750 | 5000 | 4] 2026//27 49 24500\n"
+        "2 | SOGEYC2601 | sooson00t | 14.5x28.3 X-750 | 2000 | 5.1 | 10200 | 2026/3/27\n"
+        "3 | SOGEYC2602 | sooson00u | 15.5x29.3 X-750 | 1000 | 5.2 | 5200 | 2026/3/27\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert got["customerName"] == "Global-set Valve Components Jiangsu Co., LTD"
+    assert got["customerPoNo"] == "POGSVC2600205"
+    assert got["doc_date"] == "2026-03-06"
+    assert got["delivery_date"] == "2026-03-27"
+    assert got["currency"] == "CNY"
+    assert got["deliveryAddr"].startswith("Yao Lane Paragraph")
+    assert len(rows) == 3
+    assert rows[0]["inventory_code"] == "SOGEYC2600"
+    assert rows[0]["productSpec"] == "13.5x27.3 X-750"
+    assert rows[0]["quantity"] == "5000"
+    assert rows[0]["unit_price_excl_tax"] == "4.9"
+    assert rows[0]["line_amount_excl_tax"] == "24500"
+    assert rows[0]["delivery_date"] == "2026-03-27"
+
+
 def test_extract_inv_mixed_noise_invoice_token():
     text = (
         "Export packing list noise\n"

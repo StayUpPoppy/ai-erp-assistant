@@ -306,6 +306,11 @@ def _validate_order_preview(preview: OrderPreviewData) -> Tuple[bool, str, Dict[
     return False, reason, metrics
 
 
+def _should_continue_on_incomplete_purchase_order_preview(ing: IngestionResponse, text: str) -> bool:
+    name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
+    return classify_doc_type_from_name(name) == "PO" or classify_doc_type_from_text(text) == "PO"
+
+
 def _node_retry_config(node_name: str, default_max_retries: int = 0, default_backoff_ms: int = 0) -> Dict[str, int]:
     """
     获取节点重试配置，优先读取节点级环境变量，其次读取通用默认值。
@@ -677,6 +682,23 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             return {"preview": 0}
         preview_valid, preview_reason, preview_metrics = _validate_order_preview(preview)
         if not preview_valid:
+            if _should_continue_on_incomplete_purchase_order_preview(ing, state["document_text"] or ""):
+                apply_preview_to_ingestion(ing, preview)
+                ing.error_code = None
+                ing.error_details = {}
+                state["append_event"](
+                    ing,
+                    IngestionStatus.MAPPED,
+                    f"order preview incomplete but purchase order evidence is strong; waiting user input reason={preview_reason}",
+                )
+                return {
+                    "preview": 1,
+                    "details": len(preview.details),
+                    "editable_fields": len(ing.editable_fields),
+                    "issues": len(ing.issues),
+                    "preview_header_signals": preview_metrics.get("header_signals", 0),
+                    "preview_valid_detail_rows": preview_metrics.get("valid_detail_rows", 0),
+                }
             apply_preview_to_ingestion(ing, None)
             ing.error_details = {
                 "category": "unsupported_document",
