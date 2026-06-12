@@ -2732,6 +2732,7 @@ export default function HomePage() {
                   creatingDraft={isCreatingDraftCard}
                   createDraftDisabled={!canCreateDraft}
                   lockedSalesUser={userName}
+                  hideCreateDraftAction
                   readOnly={!isCurrentTaskCard}
                 />
               </div>

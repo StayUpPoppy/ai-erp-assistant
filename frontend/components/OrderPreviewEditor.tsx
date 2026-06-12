@@ -204,7 +204,7 @@ export function OrderPreviewEditor({
           <div className="text-base font-semibold text-slate-900">订单预览与确认</div>
           <div className="mt-1 text-sm text-slate-600">LLM 已识别的内容会自动填入表格，红色字段需要人工补齐后再确认。</div>
         </div>
-        <div className={hideActions ? "hidden" : `flex flex-wrap gap-2 ${hideCreateDraftAction ? "[&>button:nth-of-type(2)]:hidden" : ""}`}>
+        <div className={hideActions ? "hidden" : "flex flex-wrap gap-2"}>
           <button
             type="button"
             disabled={confirming || readOnly}
@@ -215,6 +215,7 @@ export function OrderPreviewEditor({
           </button>
           <button
             type="button"
+            hidden={hideCreateDraftAction}
             disabled={createDraftDisabled || creatingDraft || readOnly}
             onClick={() => void onCreateDraft()}
             className="rounded-xl bg-emerald-700 px-5 py-3 text-base font-semibold text-white shadow-sm transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
