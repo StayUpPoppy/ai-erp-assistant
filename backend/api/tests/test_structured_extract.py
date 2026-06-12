@@ -60,6 +60,11 @@ def test_extract_po_order_qty():
     assert got.get("line_qty") == "24"
 
 
+def test_extract_po_english_order_no_keeps_po_prefix():
+    got = extract_structured_fields("Purchase Order\nOrder No.: POGSVC2600205\n", "PO")
+    assert got.get("customerPoNo") == "POGSVC2600205"
+
+
 def test_extract_po_total_qty_chinese():
     got = extract_structured_fields("明细\n合计数量：120\n", "PO")
     assert got.get("line_qty") == "120"

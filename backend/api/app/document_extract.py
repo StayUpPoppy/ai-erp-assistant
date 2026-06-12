@@ -94,7 +94,7 @@ def _pixmap_to_png_bytes(pix) -> bytes:
         return tmp.getvalue()
 
 
-def _ocr_pdf_pages_supplement(raw: bytes, file_name: str = "") -> Tuple[str, int]:
+def _ocr_pdf_pages_supplement(raw: bytes, file_name: str = "", max_pages_override: int | None = None) -> Tuple[str, int]:
     """
     将 PDF 前 N 页逐页渲染为 PNG 后 OCR，拼接正文。
     页数上限：环境变量 PDF_OCR_MAX_PAGES（默认 3，最大 20）。
@@ -108,10 +108,13 @@ def _ocr_pdf_pages_supplement(raw: bytes, file_name: str = "") -> Tuple[str, int
         logger.info("document_extract_pymupdf_missing skip_pdf_page_ocr")
         return "", 0
 
-    try:
-        max_pages = int(os.getenv("PDF_OCR_MAX_PAGES", "5").strip() or "5")
-    except ValueError:
-        max_pages = 3
+    if max_pages_override is not None:
+        max_pages = max_pages_override
+    else:
+        try:
+            max_pages = int(os.getenv("PDF_OCR_MAX_PAGES", "5").strip() or "5")
+        except ValueError:
+            max_pages = 3
     max_pages = max(1, min(max_pages, 20))
 
     doc = None
@@ -175,6 +178,46 @@ def _mineru_pdf_supplement(raw: bytes, file_name: str = "") -> Tuple[str, str]:
     except Exception as exc:
         logger.exception("document_extract_mineru_unexpected file_name=%s err=%s", file_name, exc)
         return "", "mineru_error"
+
+
+def extract_pdf_text_with_forced_ocr(raw: bytes, file_name: str = "", max_pages: int = 3) -> Tuple[str, str]:
+    """Extract a PDF text layer plus forced rendered-page OCR, ignoring sparse-text thresholds."""
+    if not raw:
+        return "", "empty"
+    if guess_extension(file_name) != "pdf":
+        return extract_text_from_bytes(raw, file_name)
+
+    started = perf_counter()
+    text, engine = _extract_pdf_text_layer(raw, file_name)
+    if engine == "no_engine":
+        return "", "pdf_no_text_engine"
+    if engine == "pdf_error":
+        return "", "pdf_error"
+
+    extra, pages_done = _ocr_pdf_pages_supplement(raw, file_name, max_pages_override=max_pages)
+    base = "pdf_text" if engine == "pypdf" else "pdf_text_pymupdf"
+    if extra:
+        merged = _normalize_text(text + "\n" + extra)
+        suffix = "forced_ocr_first_page" if pages_done <= 1 else f"forced_ocr_pages_{pages_done}"
+        logger.info(
+            "document_extract_pdf_forced_ocr_done file_name=%s format=%s+%s chars=%s elapsed_ms=%s",
+            file_name,
+            base,
+            suffix,
+            len(merged),
+            int((perf_counter() - started) * 1000),
+        )
+        return merged, f"{base}+{suffix}"
+
+    logger.warning(
+        "document_extract_pdf_forced_ocr_empty file_name=%s base=%s text_chars=%s pages=%s elapsed_ms=%s",
+        file_name,
+        base,
+        len(text),
+        pages_done,
+        int((perf_counter() - started) * 1000),
+    )
+    return text, f"{base}+forced_ocr_empty"
 
 
 def _extract_pdf_text_layer(raw: bytes, file_name: str = "") -> Tuple[str, str]:

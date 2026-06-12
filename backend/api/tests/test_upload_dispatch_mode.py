@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import sys
 
+import pytest
 from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -139,6 +140,35 @@ def test_upload_route_resets_canceled_ingestion_and_enqueues(monkeypatch):
     assert reset.status == IngestionStatus.UPLOADED
     assert reset.error_code is None
     assert reset.error_details == {}
+    assert enqueue_calls == [first.ingestion_id, first.ingestion_id]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [IngestionStatus.NEED_USER_INPUT, IngestionStatus.FAILED, IngestionStatus.VALIDATED],
+)
+def test_upload_route_resets_non_draft_reupload_and_enqueues(monkeypatch, status):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    enqueue_calls: list[str] = []
+    monkeypatch.setattr("app.routes.enqueue_ingestion_job", lambda ingestion_id: enqueue_calls.append(ingestion_id) or True)
+
+    first = upload(_payload(f"hash-upload-reprocess-{status.value.lower()}"), _build_request())
+    ingestion = get_ingestion(first.ingestion_id)
+    assert ingestion is not None
+    ingestion.status = status
+    ingestion.resolved_fields = {"customerName": "manual fake value"}
+    ingestion.preview_data = None
+    store.ingestions[ingestion.ingestion_id] = ingestion
+
+    second = upload(_payload(f"hash-upload-reprocess-{status.value.lower()}"), _build_request())
+    reset = get_ingestion(second.ingestion_id)
+
+    assert second.ingestion_id == first.ingestion_id
+    assert second.status == IngestionStatus.UPLOADED
+    assert reset is not None
+    assert reset.status == IngestionStatus.UPLOADED
+    assert reset.resolved_fields == {}
     assert enqueue_calls == [first.ingestion_id, first.ingestion_id]
 
 

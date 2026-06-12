@@ -285,3 +285,75 @@ def test_node_map_runs_erp_searches_concurrently():
     assert ing.material_candidates == [{"material_code": "M001"}]
     assert ing.warehouse_candidates == [{"warehouse_code": "WH01"}]
     assert ing.tax_code_candidates == [{"tax_code": "T13"}]
+
+
+def test_workflow_forced_ocr_retry_recovers_low_quality_first_pass(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setenv("LLM_EXTRACT_ENABLED", "false")
+    monkeypatch.setattr("app.workflow.StateGraph", None)
+    monkeypatch.setattr("app.workflow.END", None)
+    monkeypatch.setattr("app.workflow.get_object_bytes", lambda _key: b"%PDF fake")
+    monkeypatch.setattr(
+        "app.workflow.extract_text_from_bytes",
+        lambda _raw, _name="": ("Purchase Order\nOrder No.: POGSVC2600205\n", "pdf_text"),
+    )
+    monkeypatch.setattr(
+        "app.workflow.extract_pdf_text_with_forced_ocr",
+        lambda _raw, _name="", max_pages=3: (
+            "Global-set Valve Components Jiangsu Co., LTD Address: Yao Lane Paragraph,122 Highway,"
+            "Picheng Town Danyang City,Jiangsu Province (212300)\n"
+            "Order No. :POGSVC2600205\n"
+            "Vendor Code: 010054\n"
+            "Issue Date : 6 / 2\n"
+            "Fax: 0511-86322635 - 2026/3/6\n"
+            "Item | Part No | Drawing No | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+            "1 | SOGEYC2600 | sooson00s | 13.5x27.3 X-750 | 5000 | 4] 2026//27 49 24500\n"
+            "2 | SOGEYC2601 | sooson00t | 14.5x28.3 X-750 | 2000 | 5.1 | 10200 | 2026/3/27\n",
+            "pdf_text+forced_ocr_pages_2",
+        ),
+    )
+    ing = _new_ingestion()
+    ing.source_file_object_key = "__local__/uploads/org-test/2099-01-01/POGSVC2600205.pdf"
+    ing.source_file_name = "POGSVC2600205.pdf"
+
+    result = run_ingestion_processing_workflow(ingestion=ing, erp=MockErpClient(), append_event=_append_event)
+
+    assert result.status == IngestionStatus.VALIDATED
+    assert result.parse_format_label == "pdf_text+forced_ocr_pages_2"
+    assert result.preview_data is not None
+    assert result.preview_data.order.customerName == "Global-set Valve Components Jiangsu Co., LTD"
+    assert result.preview_data.order.customerPoNo == "POGSVC2600205"
+    assert result.preview_data.order.orderDate == "2026-03-06"
+    assert result.preview_data.details[0].materialCode == "SOGEYC2600"
+    assert result.preview_data.details[0].qty == 5000
+    assert result.resolved_fields["material_code"] == "SOGEYC2600"
+    assert any("forced_ocr_retry attempted applied=1" in event.message for event in result.audit_events)
+
+
+def test_workflow_forced_ocr_retry_keeps_first_pass_when_not_better(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setenv("LLM_EXTRACT_ENABLED", "false")
+    monkeypatch.setattr("app.workflow.StateGraph", None)
+    monkeypatch.setattr("app.workflow.END", None)
+    monkeypatch.setattr("app.workflow.get_object_bytes", lambda _key: b"%PDF fake")
+    monkeypatch.setattr(
+        "app.workflow.extract_text_from_bytes",
+        lambda _raw, _name="": ("Purchase Order\nOrder No.: POGSVCEMPTY\n", "pdf_text"),
+    )
+    monkeypatch.setattr(
+        "app.workflow.extract_pdf_text_with_forced_ocr",
+        lambda _raw, _name="", max_pages=3: ("Purchase Order\nOrder No.: POGSVCEMPTY\n", "pdf_text+forced_ocr_empty"),
+    )
+    ing = _new_ingestion()
+    ing.source_file_object_key = "__local__/uploads/org-test/2099-01-01/POGSVCEMPTY.pdf"
+    ing.source_file_name = "POGSVCEMPTY.pdf"
+
+    result = run_ingestion_processing_workflow(ingestion=ing, erp=MockErpClient(), append_event=_append_event)
+
+    assert result.status == IngestionStatus.NEED_USER_INPUT
+    assert result.preview_data is not None
+    assert result.preview_data.order.customerPoNo == "POGSVCEMPTY"
+    assert "material_code" in result.missing_fields
+    assert "line_qty" in result.missing_fields
+    assert result.parse_format_label == "pdf_text"
+    assert any("forced_ocr_retry attempted applied=0" in event.message for event in result.audit_events)

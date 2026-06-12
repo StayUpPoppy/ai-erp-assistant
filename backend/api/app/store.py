@@ -196,7 +196,12 @@ def _reset_ingestion_for_reprocess(ingestion: IngestionResponse, payload: Create
 
 
 def _should_auto_reset_existing_ingestion(existing: IngestionResponse) -> bool:
-    return existing.status == IngestionStatus.CANCELED
+    return existing.status in {
+        IngestionStatus.CANCELED,
+        IngestionStatus.FAILED,
+        IngestionStatus.NEED_USER_INPUT,
+        IngestionStatus.VALIDATED,
+    }
 
 
 def _db_session():
@@ -253,14 +258,16 @@ def create_ingestion(payload: CreateIngestionRequest) -> IngestionResponse:
                 existing = ingestion_db.get_by_file_hash_and_user_id(session, payload.file_hash, payload.user_id)
                 if existing:
                     if payload.force_reprocess or _should_auto_reset_existing_ingestion(existing):
+                        reset_reason = "force_reprocess" if payload.force_reprocess else f"reupload_status_{existing.status.value}"
                         existing = _reset_ingestion_for_reprocess(existing, payload)
                         ingestion_db.upsert_ingestion(session, existing)
                         session.commit()
                         logger.info(
-                            "create_ingestion_reset_existing ingestion_id=%s status=%s file_hash_prefix=%s",
+                            "create_ingestion_reset_existing_for_reupload ingestion_id=%s status=%s file_hash_prefix=%s reason=%s",
                             existing.ingestion_id,
                             existing.status,
                             payload.file_hash[:12],
+                            reset_reason,
                         )
                     elif _merge_upload_payload_into_ingestion(existing, payload):
                         ingestion_db.upsert_ingestion(session, existing)
@@ -297,13 +304,15 @@ def create_ingestion(payload: CreateIngestionRequest) -> IngestionResponse:
         if existing_id:
             existing = store.ingestions[existing_id]
             if payload.force_reprocess or _should_auto_reset_existing_ingestion(existing):
+                reset_reason = "force_reprocess" if payload.force_reprocess else f"reupload_status_{existing.status.value}"
                 existing = _reset_ingestion_for_reprocess(existing, payload)
                 store.ingestions[existing_id] = existing
                 logger.info(
-                    "create_ingestion_reset_existing ingestion_id=%s status=%s file_hash_prefix=%s",
+                    "create_ingestion_reset_existing_for_reupload ingestion_id=%s status=%s file_hash_prefix=%s reason=%s",
                     existing.ingestion_id,
                     existing.status,
                     payload.file_hash[:12],
+                    reset_reason,
                 )
             elif _merge_upload_payload_into_ingestion(existing, payload):
                 logger.info(

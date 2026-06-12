@@ -424,7 +424,7 @@ def extract_structured_fields(
 
         order_no = _first_match(
             text,
-            r"(?:客户采购单号|客户PO|客户订单号|采购订单号|订单编号|订单号|合同编号|PO\s*(?:No\.?|Number)?)\s*[:：#]?\s*([A-Za-z0-9\-_/]{4,50})",
+            r"(?:客户采购单号|客户PO|客户订单号|采购订单号|订单编号|订单号|合同编号|Order\s*(?:No\.?|Number)|PO\s*(?:No\.?|Number)?)\s*[:：#.]?\s*([A-Za-z0-9\-_/]{4,50})",
             re.IGNORECASE,
         )
         if order_no:

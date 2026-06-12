@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.document_extract import (
     classify_doc_type_from_name,
     classify_doc_type_from_text,
+    extract_pdf_text_with_forced_ocr,
     extract_text_from_bytes,
     heuristic_fill_fields,
     heuristic_vendor_code,
@@ -296,6 +297,27 @@ def test_pdf_dense_text_layer_skips_ocr(monkeypatch):
     assert text == dense
     assert fmt == "pdf_text"
     assert called["ocr"] is False
+
+
+def test_pdf_forced_ocr_runs_even_when_text_layer_is_dense(monkeypatch):
+    raw = b"%PDF-1.4 dense text layer"
+    dense = "purchase order " * 20
+    called = {"max_pages": None}
+
+    monkeypatch.setattr("app.document_extract._extract_pdf_text_layer", lambda raw_bytes, fn="": (dense, "pypdf"))
+
+    def _forced_ocr(raw_bytes, fn="", max_pages_override=None):
+        called["max_pages"] = max_pages_override
+        return "forced ocr POGSVC2600205", 3
+
+    monkeypatch.setattr("app.document_extract._ocr_pdf_pages_supplement", _forced_ocr)
+
+    text, fmt = extract_pdf_text_with_forced_ocr(raw, "dense.pdf", max_pages=3)
+
+    assert "purchase order" in text
+    assert "POGSVC2600205" in text
+    assert fmt == "pdf_text+forced_ocr_pages_3"
+    assert called["max_pages"] == 3
 
 
 def test_truncate_for_api():

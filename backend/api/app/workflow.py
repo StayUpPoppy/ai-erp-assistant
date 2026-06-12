@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover
 from app.document_extract import (
     classify_doc_type_from_name,
     classify_doc_type_from_text,
+    extract_pdf_text_with_forced_ocr,
     extract_text_from_bytes,
     heuristic_fill_fields,
     heuristic_vendor_code,
@@ -35,7 +36,7 @@ from app.document_extract import (
 )
 from app.erp_audit_log import append_erp_call_log_with_upstream
 from app.erp_client import ErpClientError, ErpClientProtocol, clear_last_upstream_meta
-from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus, OrderPreviewData
+from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus, OrderPreviewData, PreviewIssue
 from app.extraction_profile import apply_field_aliases, get_profile, refresh_ingestion_required_keys
 from app.llm_extract import try_apply_llm_preview
 from app.order_preview import apply_customer_material_mapping, apply_preview_to_ingestion, build_order_preview_data
@@ -95,6 +96,8 @@ class WorkflowState(TypedDict):
     mapping_metrics: Dict[str, int]
     # 解析后的全文（仅内存传递，不落库；预览见 ingestion.extract_preview）
     document_text: str
+    forced_ocr_retry_done: bool
+    first_parse_format: str
 
 
 class NodeExecutionError(Exception):
@@ -306,6 +309,98 @@ def _validate_order_preview(preview: OrderPreviewData) -> Tuple[bool, str, Dict[
     return False, reason, metrics
 
 
+def _preview_for_scoring(ing: IngestionResponse) -> OrderPreviewData | None:
+    existing_preview = ing.preview_data
+    ing.preview_data = None
+    preview = build_order_preview_data(ing)
+    ing.preview_data = existing_preview
+    return preview
+
+
+def _preview_completeness_score(preview: OrderPreviewData | None) -> Tuple[int, int, int, int]:
+    if preview is None:
+        return (0, 0, 0, -999)
+    valid, _reason, metrics = _validate_order_preview(preview)
+    score = 0
+    order = preview.order
+    for value in (
+        order.customerName,
+        order.customerPoNo,
+        order.orderDate,
+        order.currency,
+        order.deliveryDate,
+        order.deliveryAddr,
+    ):
+        if _has_preview_value(value):
+            score += 2
+    for detail in preview.details or []:
+        for value in (
+            detail.materialCode,
+            detail.productName,
+            detail.productSpec,
+            detail.ph,
+            detail.customerMaterialNo,
+        ):
+            if _has_preview_value(value):
+                score += 2
+        for value in (
+            detail.qty,
+            detail.price,
+            detail.taxPrice,
+            detail.amount,
+            detail.allAmount,
+            detail.taxAmount,
+        ):
+            if _has_preview_value(value):
+                score += 1
+    return (int(valid), metrics.get("valid_detail_rows", 0), score, -len(preview.details or []))
+
+
+def _has_strong_purchase_order_signal(ing: IngestionResponse, text: str) -> bool:
+    name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
+    corpus = f"{name}\n{text}".lower()
+    if classify_doc_type_from_name(name) == "PO" or classify_doc_type_from_text(text) == "PO":
+        return True
+    strong = (
+        "purchase order",
+        "order no",
+        "po number",
+        "issue date",
+        "delivery date",
+        "qty",
+        "quantity",
+        "material",
+        "supplier",
+        "buyer",
+        "采购订单",
+        "订单编号",
+        "交货期",
+    )
+    return sum(1 for item in strong if item in corpus) >= 3
+
+
+def _is_pdf_bytes(raw: bytes | None) -> bool:
+    return bool(raw and raw.lstrip()[:4] == b"%PDF")
+
+
+def _should_retry_with_forced_pdf_ocr(
+    ing: IngestionResponse,
+    text: str,
+    preview: OrderPreviewData | None,
+    raw: bytes | None,
+) -> Tuple[bool, str, Dict[str, int]]:
+    if not _is_pdf_bytes(raw):
+        return False, "not_pdf_bytes", {}
+    if not _has_strong_purchase_order_signal(ing, text):
+        return False, "no_strong_purchase_order_signal", {}
+    if preview is None:
+        return True, "missing_preview", {"header_signals": 0, "valid_detail_rows": 0, "detail_signals": 0}
+    valid, reason, metrics = _validate_order_preview(preview)
+    if valid:
+        return False, "preview_already_valid", metrics
+    return True, reason, metrics
+
+
 def _should_continue_on_incomplete_purchase_order_preview(ing: IngestionResponse, text: str) -> bool:
     name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
     return classify_doc_type_from_name(name) == "PO" or classify_doc_type_from_text(text) == "PO"
@@ -421,6 +516,7 @@ def _node_parse(state: WorkflowState) -> WorkflowState:
         text, fmt = extract_text_from_bytes(raw, name)
         elapsed_ms = int((perf_counter() - started) * 1000)
         state["document_text"] = text
+        state["first_parse_format"] = fmt
         ing.parsed_char_count = len(text)
         ing.extract_preview = truncate_for_api(text) if text else None
         ing.parse_format_label = fmt
@@ -444,64 +540,135 @@ def _node_parse(state: WorkflowState) -> WorkflowState:
     return state
 
 
+def _apply_extraction_pass(ing: IngestionResponse, text: str) -> Dict[str, int]:
+    ok, evidence_reason = _purchase_order_evidence(ing, text)
+    if not ok:
+        ing.error_details = {
+            "category": "unsupported_document",
+            "reason": evidence_reason,
+        }
+        raise NodeExecutionError(
+            node_name="extract",
+            reason=f"unsupported_document {evidence_reason}",
+            failure_type="node",
+        )
+    if ing.doc_type_hint is None:
+        gt = classify_doc_type_from_text(text)
+        if gt:
+            ing.doc_type_hint = DocType(gt)
+    _force_datynk_sale_order_doc_type(ing)
+    dt_val = ing.doc_type_hint.value if ing.doc_type_hint else None
+    prof = get_profile(ing.extraction_profile_id)
+    hints = heuristic_fill_fields(text)
+    hints.update(heuristic_vendor_code(text))
+    hints.update(extract_structured_fields(text, dt_val, prof))
+    if dt_val == "PO":
+        hints.update(extract_po_cn_layout_entities(text))
+    apply_field_aliases(hints, prof)
+    for k, v in hints.items():
+        if v and not (ing.resolved_fields.get(k) or "").strip():
+            ing.resolved_fields[k] = v
+    lj = (ing.resolved_fields.get("line_items_json") or "").strip()
+    if lj and dt_val == "PO":
+        try:
+            items = json.loads(lj)
+            if isinstance(items, list) and items:
+                first = items[0]
+                ic = (first.get("inventory_code") or first.get("materialCode") or first.get("material_code") or "").strip()
+                q = str(first.get("quantity") or first.get("qty") or "").strip()
+                if ic and not (ing.resolved_fields.get("material_code") or "").strip():
+                    ing.resolved_fields["material_code"] = ic
+                if q and not (ing.resolved_fields.get("line_qty") or "").strip():
+                    ing.resolved_fields["line_qty"] = q
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    refresh_ingestion_required_keys(ing)
+    required = ing.required_resolve_keys
+    ing.missing_fields = [k for k in required if not (ing.resolved_fields.get(k) or "").strip()]
+    llm_applied = try_apply_llm_preview(ing, text)
+    if llm_applied:
+        refresh_ingestion_required_keys(ing)
+    return {"missing": len(ing.missing_fields), "llm_preview": int(llm_applied)}
+
+
+def _copy_extraction_state(dst: IngestionResponse, src: IngestionResponse) -> None:
+    for attr in (
+        "doc_type_hint",
+        "required_resolve_keys",
+        "missing_fields",
+        "resolved_fields",
+        "preview_data",
+        "editable_fields",
+        "issues",
+        "error_code",
+        "error_details",
+    ):
+        setattr(dst, attr, getattr(src, attr))
+
+
 def _node_extract(state: WorkflowState) -> WorkflowState:
     def _extract_impl() -> Dict[str, int]:
         ing = state["ingestion"]
         text = state["document_text"] or ""
-        ok, evidence_reason = _purchase_order_evidence(ing, text)
-        if not ok:
-            ing.error_details = {
-                "category": "unsupported_document",
-                "reason": evidence_reason,
-            }
-            raise NodeExecutionError(
-                node_name="extract",
-                reason=f"unsupported_document {evidence_reason}",
-                failure_type="node",
-            )
-        if ing.doc_type_hint is None:
-            gt = classify_doc_type_from_text(text)
-            if gt:
-                ing.doc_type_hint = DocType(gt)
-        _force_datynk_sale_order_doc_type(ing)
-        dt_val = ing.doc_type_hint.value if ing.doc_type_hint else None
-        prof = get_profile(ing.extraction_profile_id)
-        hints = heuristic_fill_fields(text)
-        hints.update(heuristic_vendor_code(text))
-        hints.update(extract_structured_fields(text, dt_val, prof))
-        if dt_val == "PO":
-            hints.update(extract_po_cn_layout_entities(text))
-        apply_field_aliases(hints, prof)
-        for k, v in hints.items():
-            if v and not (ing.resolved_fields.get(k) or "").strip():
-                ing.resolved_fields[k] = v
-        lj = (ing.resolved_fields.get("line_items_json") or "").strip()
-        if lj and dt_val == "PO":
+        first_input = ing.model_copy(deep=True)
+        metrics = _apply_extraction_pass(ing, text)
+        first_preview = _preview_for_scoring(ing)
+        first_score = _preview_completeness_score(first_preview)
+        raw = get_object_bytes(ing.source_file_object_key)
+        should_retry, retry_reason, first_preview_metrics = _should_retry_with_forced_pdf_ocr(
+            ing,
+            text,
+            first_preview,
+            raw,
+        )
+        forced_ocr_applied = 0
+        retry_score = first_score
+        retry_fmt = ""
+        if should_retry and not state.get("forced_ocr_retry_done", False) and raw:
+            state["forced_ocr_retry_done"] = True
+            name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
             try:
-                items = json.loads(lj)
-                if isinstance(items, list) and items:
-                    first = items[0]
-                    ic = (first.get("inventory_code") or "").strip()
-                    q = (first.get("quantity") or "").strip()
-                    if ic and not (ing.resolved_fields.get("material_code") or "").strip():
-                        ing.resolved_fields["material_code"] = ic
-                    if q and not (ing.resolved_fields.get("line_qty") or "").strip():
-                        ing.resolved_fields["line_qty"] = q
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-        refresh_ingestion_required_keys(ing)
-        required = ing.required_resolve_keys
-        ing.missing_fields = [k for k in required if not (ing.resolved_fields.get(k) or "").strip()]
-        llm_applied = try_apply_llm_preview(ing, text)
-        if llm_applied:
-            refresh_ingestion_required_keys(ing)
+                max_pages = int(os.getenv("PDF_FORCED_OCR_MAX_PAGES", "3").strip() or "3")
+            except ValueError:
+                max_pages = 3
+            retry_text, retry_fmt = extract_pdf_text_with_forced_ocr(raw, name, max_pages=max(1, min(max_pages, 3)))
+            if retry_text and retry_text != text:
+                candidate = first_input.model_copy(deep=True)
+                _apply_extraction_pass(candidate, retry_text)
+                retry_preview = _preview_for_scoring(candidate)
+                retry_score = _preview_completeness_score(retry_preview)
+                if retry_score > first_score:
+                    _copy_extraction_state(ing, candidate)
+                    state["document_text"] = retry_text
+                    ing.parsed_char_count = len(retry_text)
+                    ing.extract_preview = truncate_for_api(retry_text) if retry_text else None
+                    ing.parse_format_label = retry_fmt
+                    metrics = {
+                        "missing": len(ing.missing_fields),
+                        "llm_preview": int(candidate.preview_data is not None),
+                    }
+                    forced_ocr_applied = 1
+                else:
+                    ing.issues.append(
+                        PreviewIssue(path="parse", level="warning", message="强制 OCR 二次解析结果未优于首轮，已保留首轮结果。")
+                    )
+            state["append_event"](
+                ing,
+                IngestionStatus.EXTRACTED,
+                f"forced_ocr_retry attempted applied={forced_ocr_applied} reason={retry_reason} "
+                f"first_format={state.get('first_parse_format') or ''} retry_format={retry_fmt or 'none'} "
+                f"chars_before={len(text)} chars_after={len(state['document_text'] or '')} "
+                f"first_score={first_score} retry_score={retry_score} first_metrics={first_preview_metrics}",
+            )
         state["append_event"](
             ing,
             IngestionStatus.EXTRACTED,
             f"structured fields extracted missing_count={len(ing.missing_fields)} doc_type_hint="
-            f"{ing.doc_type_hint.value if ing.doc_type_hint else 'none'} llm_preview={int(llm_applied)}",
+            f"{ing.doc_type_hint.value if ing.doc_type_hint else 'none'} llm_preview={metrics.get('llm_preview', 0)} "
+            f"preview_score={_preview_completeness_score(_preview_for_scoring(ing))}",
         )
-        return {"missing": len(ing.missing_fields), "llm_preview": int(llm_applied)}
+        metrics["forced_ocr_retry"] = forced_ocr_applied
+        return metrics
 
     _run_node_with_retry(
         state=state,
@@ -893,6 +1060,8 @@ def run_ingestion_processing_workflow(
         "append_event": append_event,
         "mapping_metrics": {},
         "document_text": "",
+        "forced_ocr_retry_done": False,
+        "first_parse_format": "",
     }
     try:
         if StateGraph is not None and END is not None:
