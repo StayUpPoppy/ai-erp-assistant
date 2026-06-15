@@ -191,6 +191,114 @@ def _format_decimal(value: float) -> str:
     return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
+_CJK_RE = re.compile(r"[一-龥]")
+_CHINESE_COMPANY_RE = re.compile(
+    r"([一-龥A-Za-z0-9（）()·\-]{2,80}?(?:有限责任公司|股份有限公司|有限公司|公司|工厂|厂))"
+)
+_CHINESE_ADDRESS_TOKENS = ("省", "市", "区", "县", "镇", "乡", "村", "路", "道", "街", "号", "段", "园", "楼")
+_BUYER_LABEL_RE = re.compile(r"(?:客户名称|客户|需方|买方|采购方|采购商|收货方|购买方)\s*[:：]?\s*(.+)")
+_SUPPLIER_LABEL_RE = re.compile(r"(?:供应商|供方|卖方|供货方|生产商|厂商)\s*[:：]")
+_DELIVERY_ADDR_LABEL_RE = re.compile(r"(?:收货地址|送货地址|交货地址|交货地点|到货地址|Delivery\s*Address)\s*[:：]?\s*(.*)", re.IGNORECASE)
+
+
+def _has_chinese(value: str) -> bool:
+    return bool(_CJK_RE.search(value or ""))
+
+
+def _clean_cn_candidate(value: str) -> str:
+    text = re.sub(r"\s+", " ", (value or "").strip(" \t\r\n|:：,，;；"))
+    text = re.split(
+        r"\s+(?:Order\s+No\.?|Issue\s+Date|Delivery\s+Terms|Payment\s+Terms|Tel|Fax)\b",
+        text,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" \t\r\n|:：,，;；")
+    return text
+
+
+def _looks_like_chinese_company(value: str) -> bool:
+    text = _clean_cn_candidate(value)
+    return bool(_CHINESE_COMPANY_RE.search(text))
+
+
+def _extract_company_from_line(line: str) -> str:
+    text = _clean_cn_candidate(line)
+    labeled = _BUYER_LABEL_RE.search(text)
+    if labeled:
+        text = labeled.group(1)
+    m = _CHINESE_COMPANY_RE.search(text)
+    return _clean_cn_candidate(m.group(1)) if m else ""
+
+
+def _looks_like_chinese_address(value: str) -> bool:
+    text = _clean_cn_candidate(value)
+    if not _has_chinese(text):
+        return False
+    token_count = sum(1 for token in _CHINESE_ADDRESS_TOKENS if token in text)
+    return token_count >= 2 and len(text) >= 6
+
+
+def _extract_address_from_line(line: str) -> str:
+    text = _clean_cn_candidate(line)
+    labeled = _DELIVERY_ADDR_LABEL_RE.search(text)
+    if labeled:
+        text = labeled.group(1)
+    if not _looks_like_chinese_address(text):
+        return ""
+    return _clean_cn_candidate(text)
+
+
+def _extract_preferred_chinese_po_header_fields(text: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    raw_lines = [line.strip() for line in (text or "").splitlines()]
+    lines = [line for line in raw_lines if line]
+
+    company_candidates: list[tuple[int, int, str]] = []
+    address_candidates: list[tuple[int, int, str]] = []
+    for idx, line in enumerate(lines):
+        clean = _clean_cn_candidate(line)
+        if not clean or not _has_chinese(clean):
+            continue
+
+        if _SUPPLIER_LABEL_RE.search(clean):
+            supplier_company = _extract_company_from_line(clean)
+            if supplier_company and _BUYER_LABEL_RE.search(clean):
+                company_candidates.append((idx, 80, supplier_company))
+        else:
+            company = _extract_company_from_line(clean)
+            if company:
+                score = 50
+                if _BUYER_LABEL_RE.search(clean):
+                    score += 80
+                if idx <= 8:
+                    score += 10
+                company_candidates.append((idx, score, company))
+
+        addr_match = _DELIVERY_ADDR_LABEL_RE.search(clean)
+        if addr_match:
+            same_line = _extract_address_from_line(addr_match.group(1))
+            if same_line:
+                address_candidates.append((idx, 120, same_line))
+            for nxt in lines[idx + 1 : idx + 4]:
+                next_addr = _extract_address_from_line(nxt)
+                if next_addr:
+                    address_candidates.append((idx, 110, next_addr))
+                    break
+        else:
+            addr = _extract_address_from_line(clean)
+            if addr:
+                score = 40 + (10 if idx <= 12 else 0)
+                address_candidates.append((idx, score, addr))
+
+    if company_candidates:
+        company_candidates.sort(key=lambda item: (-item[1], item[0]))
+        out["customerName"] = company_candidates[0][2]
+    if address_candidates:
+        address_candidates.sort(key=lambda item: (-item[1], item[0]))
+        out["deliveryAddr"] = address_candidates[0][2]
+    return out
+
+
 def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
     out: Dict[str, str] = {}
     t = text or ""
@@ -369,6 +477,7 @@ def extract_po_cn_layout_entities(text: str) -> Dict[str, str]:
         sap_rows = _extract_sap_srm_po_line_items(t)
         if sap_rows:
             out["line_items_json"] = json.dumps(sap_rows, ensure_ascii=False)
+    out.update(_extract_preferred_chinese_po_header_fields(t))
     return out
 
 
@@ -576,6 +685,11 @@ def extract_structured_fields(
             any_d = _first_match(text, r"(20\d{2}-\d{2}-\d{2})")
             if any_d:
                 out["invoice_date"] = any_d
+
+    if dt == "PO":
+        cn_header = _extract_preferred_chinese_po_header_fields(text)
+        if cn_header:
+            out.update(cn_header)
 
     if profile is not None:
         from app.extraction_profile import apply_extract_rules

@@ -56,6 +56,14 @@ class HealthResponse(BaseModel):
     ocr_http_url_configured: bool = False
     ocr_engine_auto_fallback: bool = True
     paddleocr_importable: bool = False
+    paddleocr_initializable: bool = False
+    paddleocr_init_status: str = ""
+    paddle_ocr_lang: str = "ch"
+    paddle_ocr_use_gpu: bool = False
+    tesseract_ocr_lang: str = "chi_sim+eng"
+    tesseract_languages: List[str] = Field(default_factory=list)
+    tesseract_has_chi_sim: bool = False
+    ocr_chinese_ready: bool = False
     aliyun_ocr_configured: bool = False
     mineru_enabled: bool = False
     mineru_api_base: str = ""

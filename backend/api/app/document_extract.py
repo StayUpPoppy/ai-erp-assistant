@@ -94,7 +94,13 @@ def _pixmap_to_png_bytes(pix) -> bytes:
         return tmp.getvalue()
 
 
-def _ocr_pdf_pages_supplement(raw: bytes, file_name: str = "", max_pages_override: int | None = None) -> Tuple[str, int]:
+def _ocr_pdf_pages_supplement(
+    raw: bytes,
+    file_name: str = "",
+    max_pages_override: int | None = None,
+    *,
+    ocr_kwargs: dict[str, object] | None = None,
+) -> Tuple[str, int]:
     """
     将 PDF 前 N 页逐页渲染为 PNG 后 OCR，拼接正文。
     页数上限：环境变量 PDF_OCR_MAX_PAGES（默认 3，最大 20）。
@@ -131,7 +137,7 @@ def _ocr_pdf_pages_supplement(raw: bytes, file_name: str = "", max_pages_overrid
                 page = doc.load_page(i)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 png_bytes = _pixmap_to_png_bytes(pix)
-                ocr_text, occ_fmt = ocr_image_bytes(png_bytes, f"{file_name}#pdf_p{i + 1}.png")
+                ocr_text, occ_fmt = ocr_image_bytes(png_bytes, f"{file_name}#pdf_p{i + 1}.png", **(ocr_kwargs or {}))
                 if occ_fmt in OCR_FATAL_OCR_FORMATS:
                     logger.warning(
                         "document_extract_pdf_page_ocr_fatal file_name=%s page=%s fmt=%s",
@@ -218,6 +224,56 @@ def extract_pdf_text_with_forced_ocr(raw: bytes, file_name: str = "", max_pages:
         int((perf_counter() - started) * 1000),
     )
     return text, f"{base}+forced_ocr_empty"
+
+
+def extract_pdf_text_with_forced_chinese_ocr(raw: bytes, file_name: str = "", max_pages: int = 3) -> Tuple[str, str]:
+    """Extract PDF text plus a forced Chinese OCR pass over rendered pages."""
+    if not raw:
+        return "", "empty"
+    if guess_extension(file_name) != "pdf":
+        return extract_text_from_bytes(raw, file_name)
+
+    started = perf_counter()
+    text, engine = _extract_pdf_text_layer(raw, file_name)
+    if engine == "no_engine":
+        return "", "pdf_no_text_engine"
+    if engine == "pdf_error":
+        return "", "pdf_error"
+
+    extra, pages_done = _ocr_pdf_pages_supplement(
+        raw,
+        file_name,
+        max_pages_override=max_pages,
+        ocr_kwargs={
+            "engine_override": "paddle",
+            "paddle_lang_override": "ch",
+            "tesseract_lang_override": "chi_sim+eng",
+            "auto_fallback_override": True,
+        },
+    )
+    base = "pdf_text" if engine == "pypdf" else "pdf_text_pymupdf"
+    if extra:
+        merged = _normalize_text(text + "\n" + extra)
+        suffix = "ocr_paddle_ch_first_page" if pages_done <= 1 else f"ocr_paddle_ch_pages_{pages_done}"
+        logger.info(
+            "document_extract_pdf_forced_chinese_ocr_done file_name=%s format=%s+%s chars=%s elapsed_ms=%s",
+            file_name,
+            base,
+            suffix,
+            len(merged),
+            int((perf_counter() - started) * 1000),
+        )
+        return merged, f"{base}+{suffix}"
+
+    logger.warning(
+        "document_extract_pdf_forced_chinese_ocr_empty file_name=%s base=%s text_chars=%s pages=%s elapsed_ms=%s",
+        file_name,
+        base,
+        len(text),
+        pages_done,
+        int((perf_counter() - started) * 1000),
+    )
+    return text, f"{base}+ocr_paddle_ch_empty"
 
 
 def _extract_pdf_text_layer(raw: bytes, file_name: str = "") -> Tuple[str, str]:

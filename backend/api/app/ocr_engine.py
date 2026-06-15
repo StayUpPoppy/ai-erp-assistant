@@ -113,14 +113,14 @@ def _configure_pytesseract_cmd() -> None:
             _tesseract_autodetect_logged = True
 
 
-def _ocr_tesseract(raw: bytes, file_name: str) -> Tuple[str, str]:
+def _ocr_tesseract(raw: bytes, file_name: str, lang_override: str | None = None) -> Tuple[str, str]:
     if not raw:
         return "", "empty"
     tesseract_cmd, _how = resolve_tesseract_executable_path()
     if not tesseract_cmd:
         logger.warning("ocr_tesseract_not_found file_name=%s", file_name)
         return "", "tesseract_not_found"
-    lang = os.getenv("TESSERACT_OCR_LANG", "eng").strip() or "eng"
+    lang = (lang_override or os.getenv("TESSERACT_OCR_LANG") or "chi_sim+eng").strip() or "chi_sim+eng"
     timeout_raw = (os.getenv("TESSERACT_TIMEOUT_SECONDS") or "120").strip()
     try:
         timeout = max(5.0, min(float(timeout_raw), 300.0))
@@ -185,14 +185,14 @@ def _json_get_text_field(payload: Any, path: str) -> str:
     return str(cur).strip()
 
 
-def _ocr_http(raw: bytes, file_name: str) -> Tuple[str, str]:
+def _ocr_http(raw: bytes, file_name: str, lang_override: str | None = None) -> Tuple[str, str]:
     url = (os.getenv("OCR_HTTP_URL") or "").strip()
     if not url:
         return "", "ocr_http_not_configured"
 
     img_field = (os.getenv("OCR_HTTP_REQUEST_IMAGE_FIELD") or "image_base64").strip() or "image_base64"
     lang_field = (os.getenv("OCR_HTTP_REQUEST_LANG_FIELD") or "lang").strip() or "lang"
-    lang = (os.getenv("OCR_HTTP_LANG") or os.getenv("TESSERACT_OCR_LANG") or "chi_sim+eng").strip() or "chi_sim+eng"
+    lang = (lang_override or os.getenv("OCR_HTTP_LANG") or os.getenv("TESSERACT_OCR_LANG") or "chi_sim+eng").strip() or "chi_sim+eng"
     text_path = (os.getenv("OCR_HTTP_RESPONSE_TEXT_FIELD") or "text").strip() or "text"
 
     body: Dict[str, Any] = {
@@ -260,12 +260,12 @@ def _ocr_http(raw: bytes, file_name: str) -> Tuple[str, str]:
     return text, f"ocr_http(field={text_path})"
 
 
-def _get_paddle_ocr_singleton():
+def _get_paddle_ocr_singleton(lang_override: str | None = None):
     """PaddleOCR 初始化较重，进程内复用同一实例（按 lang + use_gpu 维度）。"""
     global _paddle_ocr_instance, _paddle_ocr_sig
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
-    lang = (os.getenv("PADDLE_OCR_LANG") or "ch").strip() or "ch"
+    lang = (lang_override or os.getenv("PADDLE_OCR_LANG") or "ch").strip() or "ch"
     use_gpu = os.getenv("PADDLE_OCR_USE_GPU", "false").strip().lower() in {"1", "true", "yes", "on"}
     sig = (lang, use_gpu)
     with _paddle_lock():
@@ -304,7 +304,7 @@ def _paddle_collect_lines(result: Any) -> list[str]:
     return lines
 
 
-def _ocr_paddle(raw: bytes, file_name: str) -> Tuple[str, str]:
+def _ocr_paddle(raw: bytes, file_name: str, lang_override: str | None = None) -> Tuple[str, str]:
     try:
         from paddleocr import PaddleOCR  # noqa: F401
     except ImportError:
@@ -325,7 +325,7 @@ def _ocr_paddle(raw: bytes, file_name: str) -> Tuple[str, str]:
         return "", "ocr_error"
 
     try:
-        ocr, lang = _get_paddle_ocr_singleton()
+        ocr, lang = _get_paddle_ocr_singleton(lang_override)
         result = ocr.ocr(arr, cls=True)
     except Exception as exc:
         logger.exception("ocr_paddle_run_failed file_name=%s err=%s", file_name, exc)
@@ -338,18 +338,34 @@ def _ocr_paddle(raw: bytes, file_name: str) -> Tuple[str, str]:
     return text, f"ocr_paddle(lang={lang})"
 
 
-def ocr_image_bytes(raw: bytes, file_name: str = "") -> Tuple[str, str]:
+def ocr_image_bytes(
+    raw: bytes,
+    file_name: str = "",
+    *,
+    engine_override: str | None = None,
+    paddle_lang_override: str | None = None,
+    tesseract_lang_override: str | None = None,
+    http_lang_override: str | None = None,
+    auto_fallback_override: bool | None = None,
+) -> Tuple[str, str]:
     """
     按 OCR_ENGINE 选择引擎；支持自动回退到 Tesseract（OCR_ENGINE_AUTO_FALLBACK）。
     """
     if not raw:
         return "", "empty"
 
-    engine = (os.getenv("OCR_ENGINE") or "tesseract").strip().lower() or "tesseract"
-    auto_fb = (os.getenv("OCR_ENGINE_AUTO_FALLBACK") or "true").strip().lower() not in {"0", "false", "no", "off"}
+    engine = (engine_override or os.getenv("OCR_ENGINE") or "tesseract").strip().lower() or "tesseract"
+    auto_fb = (
+        auto_fallback_override
+        if auto_fallback_override is not None
+        else (os.getenv("OCR_ENGINE_AUTO_FALLBACK") or "true").strip().lower() not in {"0", "false", "no", "off"}
+    )
 
     def _try_tesseract(reason: str) -> Tuple[str, str]:
-        t2, f2 = _ocr_tesseract(raw, file_name)
+        if tesseract_lang_override is None:
+            t2, f2 = _ocr_tesseract(raw, file_name)
+        else:
+            t2, f2 = _ocr_tesseract(raw, file_name, lang_override=tesseract_lang_override)
         if t2:
             return t2, f"{reason}+fallback({f2})"
         return t2, f2
@@ -360,7 +376,10 @@ def ocr_image_bytes(raw: bytes, file_name: str = "") -> Tuple[str, str]:
             if auto_fb:
                 return _try_tesseract("ocr_http_skipped_no_url")
             return "", "ocr_http_not_configured"
-        text, fmt = _ocr_http(raw, file_name)
+        if http_lang_override is None:
+            text, fmt = _ocr_http(raw, file_name)
+        else:
+            text, fmt = _ocr_http(raw, file_name, lang_override=http_lang_override)
         if text:
             return text, fmt
         if auto_fb and fmt not in OCR_FATAL_OCR_FORMATS:
@@ -378,7 +397,10 @@ def ocr_image_bytes(raw: bytes, file_name: str = "") -> Tuple[str, str]:
         return text, fmt
 
     if engine == "paddle":
-        text, fmt = _ocr_paddle(raw, file_name)
+        if paddle_lang_override is None:
+            text, fmt = _ocr_paddle(raw, file_name)
+        else:
+            text, fmt = _ocr_paddle(raw, file_name, lang_override=paddle_lang_override)
         if text:
             return text, fmt
         if fmt == "paddleocr_not_installed" or not auto_fb:
@@ -387,7 +409,32 @@ def ocr_image_bytes(raw: bytes, file_name: str = "") -> Tuple[str, str]:
             return text, fmt
         return _try_tesseract(f"{fmt}_empty")
 
-    return _ocr_tesseract(raw, file_name)
+    if tesseract_lang_override is None:
+        return _ocr_tesseract(raw, file_name)
+    return _ocr_tesseract(raw, file_name, lang_override=tesseract_lang_override)
+
+
+def _tesseract_available_languages(tesseract_cmd: str | None) -> list[str]:
+    if not tesseract_cmd:
+        return []
+    try:
+        proc = subprocess.run(
+            [tesseract_cmd, "--list-langs"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as exc:
+        logger.warning("ocr_tesseract_list_langs_failed err=%s", exc)
+        return []
+    if proc.returncode != 0:
+        logger.warning("ocr_tesseract_list_langs_nonzero code=%s stderr=%s", proc.returncode, (proc.stderr or "")[:300])
+        return []
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    return [line for line in lines if not line.lower().startswith("list of available languages")]
 
 
 def build_ocr_health_payload() -> dict[str, object]:
@@ -395,6 +442,9 @@ def build_ocr_health_payload() -> dict[str, object]:
     out: dict[str, object] = {}
     engine = (os.getenv("OCR_ENGINE") or "tesseract").strip().lower() or "tesseract"
     out["ocr_engine"] = engine
+    out["paddle_ocr_lang"] = (os.getenv("PADDLE_OCR_LANG") or "ch").strip() or "ch"
+    out["paddle_ocr_use_gpu"] = os.getenv("PADDLE_OCR_USE_GPU", "false").strip().lower() in {"1", "true", "yes", "on"}
+    out["tesseract_ocr_lang"] = (os.getenv("TESSERACT_OCR_LANG") or "chi_sim+eng").strip() or "chi_sim+eng"
     out["ocr_http_url_configured"] = bool((os.getenv("OCR_HTTP_URL") or "").strip())
     out["ocr_engine_auto_fallback"] = (os.getenv("OCR_ENGINE_AUTO_FALLBACK") or "true").strip().lower() not in {
         "0",
@@ -407,8 +457,21 @@ def build_ocr_health_payload() -> dict[str, object]:
         import importlib.util
 
         out["paddleocr_importable"] = importlib.util.find_spec("paddleocr") is not None
+        out["paddleocr_initializable"] = False
+        out["paddleocr_init_status"] = "not_checked"
+        if out["paddleocr_importable"] and os.getenv("OCR_HEALTH_INIT_PADDLE", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                _get_paddle_ocr_singleton(str(out["paddle_ocr_lang"]))
+                out["paddleocr_initializable"] = True
+                out["paddleocr_init_status"] = "ok"
+            except Exception as exc:
+                out["paddleocr_initializable"] = False
+                out["paddleocr_init_status"] = f"failed:{type(exc).__name__}"
+                logger.warning("ocr_health_paddle_init_failed err=%s", exc)
     except Exception:
         out["paddleocr_importable"] = False
+        out["paddleocr_initializable"] = False
+        out["paddleocr_init_status"] = "import_probe_failed"
 
     try:
         from app.aliyun_ocr import aliyun_credentials_configured
@@ -434,5 +497,13 @@ def build_ocr_health_payload() -> dict[str, object]:
     out["tesseract_available"] = path is not None
     out["tesseract_resolution"] = how
     out["tesseract_cmd"] = path
+    languages = _tesseract_available_languages(path)
+    out["tesseract_languages"] = languages
+    out["tesseract_has_chi_sim"] = "chi_sim" in languages
+    out["ocr_chinese_ready"] = bool(
+        (engine == "paddle" and out.get("paddleocr_importable") and str(out.get("paddle_ocr_lang") or "").lower().startswith("ch"))
+        or out["tesseract_has_chi_sim"]
+        or (engine in {"http", "aliyun"} and (out.get("ocr_http_url_configured") or out.get("aliyun_ocr_configured")))
+    )
 
     return out

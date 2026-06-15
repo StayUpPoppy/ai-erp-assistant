@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from time import perf_counter, sleep
@@ -26,7 +27,7 @@ except Exception:  # pragma: no cover
 from app.document_extract import (
     classify_doc_type_from_name,
     classify_doc_type_from_text,
-    extract_pdf_text_with_forced_ocr,
+    extract_pdf_text_with_forced_chinese_ocr,
     extract_text_from_bytes,
     heuristic_fill_fields,
     heuristic_vendor_code,
@@ -47,6 +48,7 @@ from app.structured_extract import (
 from app.storage_client import get_object_bytes
 
 logger = logging.getLogger("ai_erp_api")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 # 由调用方注入“写状态+记审计”的实现，保证存储层语义统一。
 AppendEventFn = Callable[[IngestionResponse, IngestionStatus, str], None]
@@ -230,6 +232,10 @@ def _is_positive_number(value: object) -> bool:
         return False
 
 
+def _has_chinese_text(value: object) -> bool:
+    return bool(_CJK_RE.search(str(value or "")))
+
+
 def _validate_order_preview(preview: OrderPreviewData) -> Tuple[bool, str, Dict[str, int]]:
     if not _should_validate_order_preview():
         return True, "disabled", {}
@@ -317,12 +323,13 @@ def _preview_for_scoring(ing: IngestionResponse) -> OrderPreviewData | None:
     return preview
 
 
-def _preview_completeness_score(preview: OrderPreviewData | None) -> Tuple[int, int, int, int]:
+def _preview_completeness_score(preview: OrderPreviewData | None) -> Tuple[int, int, int, int, int]:
     if preview is None:
-        return (0, 0, 0, -999)
+        return (0, 0, 0, 0, -999)
     valid, _reason, metrics = _validate_order_preview(preview)
     score = 0
     order = preview.order
+    chinese_header_signals = sum(1 for value in (order.customerName, order.deliveryAddr) if _has_chinese_text(value))
     for value in (
         order.customerName,
         order.customerPoNo,
@@ -353,7 +360,7 @@ def _preview_completeness_score(preview: OrderPreviewData | None) -> Tuple[int, 
         ):
             if _has_preview_value(value):
                 score += 1
-    return (int(valid), metrics.get("valid_detail_rows", 0), score, -len(preview.details or []))
+    return (int(valid), metrics.get("valid_detail_rows", 0), chinese_header_signals, score, -len(preview.details or []))
 
 
 def _has_strong_purchase_order_signal(ing: IngestionResponse, text: str) -> bool:
@@ -383,6 +390,15 @@ def _is_pdf_bytes(raw: bytes | None) -> bool:
     return bool(raw and raw.lstrip()[:4] == b"%PDF")
 
 
+def _preview_needs_chinese_party_retry(preview: OrderPreviewData | None) -> bool:
+    if preview is None:
+        return True
+    order = preview.order
+    customer = (order.customerName or "").strip()
+    delivery_addr = (order.deliveryAddr or "").strip()
+    return not customer or not delivery_addr or not _has_chinese_text(customer) or not _has_chinese_text(delivery_addr)
+
+
 def _should_retry_with_forced_pdf_ocr(
     ing: IngestionResponse,
     text: str,
@@ -396,6 +412,11 @@ def _should_retry_with_forced_pdf_ocr(
     if preview is None:
         return True, "missing_preview", {"header_signals": 0, "valid_detail_rows": 0, "detail_signals": 0}
     valid, reason, metrics = _validate_order_preview(preview)
+    if _preview_needs_chinese_party_retry(preview):
+        metrics["chinese_party_signals"] = sum(
+            1 for value in (preview.order.customerName, preview.order.deliveryAddr) if _has_chinese_text(value)
+        )
+        return True, "missing_or_non_chinese_party_fields", metrics
     if valid:
         return False, "preview_already_valid", metrics
     return True, reason, metrics
@@ -631,7 +652,7 @@ def _node_extract(state: WorkflowState) -> WorkflowState:
                 max_pages = int(os.getenv("PDF_FORCED_OCR_MAX_PAGES", "3").strip() or "3")
             except ValueError:
                 max_pages = 3
-            retry_text, retry_fmt = extract_pdf_text_with_forced_ocr(raw, name, max_pages=max(1, min(max_pages, 3)))
+            retry_text, retry_fmt = extract_pdf_text_with_forced_chinese_ocr(raw, name, max_pages=max(1, min(max_pages, 3)))
             if retry_text and retry_text != text:
                 candidate = first_input.model_copy(deep=True)
                 _apply_extraction_pass(candidate, retry_text)
