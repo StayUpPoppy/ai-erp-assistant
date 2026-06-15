@@ -298,7 +298,7 @@ def test_workflow_forced_ocr_retry_recovers_low_quality_first_pass(monkeypatch):
         lambda _raw, _name="": ("Purchase Order\nOrder No.: POGSVC2600205\n", "pdf_text"),
     )
     monkeypatch.setattr(
-        "app.workflow.extract_pdf_text_with_forced_ocr",
+        "app.workflow.extract_pdf_text_with_forced_chinese_ocr",
         lambda _raw, _name="", max_pages=3: (
             "Global-set Valve Components Jiangsu Co., LTD Address: Yao Lane Paragraph,122 Highway,"
             "Picheng Town Danyang City,Jiangsu Province (212300)\n"
@@ -330,6 +330,61 @@ def test_workflow_forced_ocr_retry_recovers_low_quality_first_pass(monkeypatch):
     assert any("forced_ocr_retry attempted applied=1" in event.message for event in result.audit_events)
 
 
+def test_workflow_chinese_ocr_retry_prefers_real_chinese_party_fields(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setenv("LLM_EXTRACT_ENABLED", "false")
+    monkeypatch.setattr("app.workflow.StateGraph", None)
+    monkeypatch.setattr("app.workflow.END", None)
+    monkeypatch.setattr("app.workflow.get_object_bytes", lambda _key: b"%PDF fake")
+    monkeypatch.setattr(
+        "app.workflow.extract_text_from_bytes",
+        lambda _raw, _name="": (
+            "Purchase Order\n"
+            "Buyer: Global-set Valve Components Jiangsu Co., LTD\n"
+            "Delivery Address: Yao Lane Paragraph,122 Highway,Picheng Town Danyang City,Jiangsu Province (212300)\n"
+            "Order No.: POGSVC2600205\n"
+            "Vendor Code: 010054\n"
+            "Issue Date: 2026/3/6\n"
+            "Currency CNY\n"
+            "Item | Part No | Drawing No | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+            "1 | SOGEYC2600 | sooson00s | 13.5x27.3 X-750 | 5000 | 4.9 | 24500 | 2026/3/27\n",
+            "pdf_text+ocr_first_page",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.workflow.extract_pdf_text_with_forced_chinese_ocr",
+        lambda _raw, _name="", max_pages=3: (
+            "Purchase Order\n"
+            "Global-set Valve Components Jiangsu Co., LTD\n"
+            "格鲁赛特阀门配件江苏有限公司\n"
+            "Delivery Address:\n"
+            "Yao Lane Paragraph,122 Highway,Picheng Town Danyang City,Jiangsu Province (212300)\n"
+            "江苏省丹阳市埤城镇122省道尧巷段（212300）\n"
+            "Order No.: POGSVC2600205\n"
+            "Vendor Code: 010054\n"
+            "Issue Date: 2026/3/6\n"
+            "Currency CNY\n"
+            "Item | Part No | Drawing No | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+            "1 | SOGEYC2600 | sooson00s | 13.5x27.3 X-750 | 5000 | 4.9 | 24500 | 2026/3/27\n",
+            "pdf_text+ocr_paddle_ch_pages_2",
+        ),
+    )
+    ing = _new_ingestion()
+    ing.source_file_object_key = "__local__/uploads/org-test/2099-01-01/POGSVC2600205.pdf"
+    ing.source_file_name = "POGSVC2600205.pdf"
+
+    result = run_ingestion_processing_workflow(ingestion=ing, erp=MockErpClient(), append_event=_append_event)
+
+    assert result.status == IngestionStatus.VALIDATED
+    assert result.parse_format_label == "pdf_text+ocr_paddle_ch_pages_2"
+    assert result.preview_data is not None
+    assert result.preview_data.order.customerName == "格鲁赛特阀门配件江苏有限公司"
+    assert result.preview_data.order.deliveryAddr == "江苏省丹阳市埤城镇122省道尧巷段（212300）"
+    assert result.preview_data.details[0].materialCode == "SOGEYC2600"
+    assert result.preview_data.details[0].qty == 5000
+    assert any("reason=missing_or_non_chinese_party_fields" in event.message for event in result.audit_events)
+
+
 def test_workflow_forced_ocr_retry_keeps_first_pass_when_not_better(monkeypatch):
     monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
     monkeypatch.setenv("LLM_EXTRACT_ENABLED", "false")
@@ -341,7 +396,7 @@ def test_workflow_forced_ocr_retry_keeps_first_pass_when_not_better(monkeypatch)
         lambda _raw, _name="": ("Purchase Order\nOrder No.: POGSVCEMPTY\n", "pdf_text"),
     )
     monkeypatch.setattr(
-        "app.workflow.extract_pdf_text_with_forced_ocr",
+        "app.workflow.extract_pdf_text_with_forced_chinese_ocr",
         lambda _raw, _name="", max_pages=3: ("Purchase Order\nOrder No.: POGSVCEMPTY\n", "pdf_text+forced_ocr_empty"),
     )
     ing = _new_ingestion()

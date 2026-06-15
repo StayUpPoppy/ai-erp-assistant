@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.document_extract import (
     classify_doc_type_from_name,
     classify_doc_type_from_text,
+    extract_pdf_text_with_forced_chinese_ocr,
     extract_pdf_text_with_forced_ocr,
     extract_text_from_bytes,
     heuristic_fill_fields,
@@ -318,6 +319,30 @@ def test_pdf_forced_ocr_runs_even_when_text_layer_is_dense(monkeypatch):
     assert "POGSVC2600205" in text
     assert fmt == "pdf_text+forced_ocr_pages_3"
     assert called["max_pages"] == 3
+
+
+def test_pdf_forced_chinese_ocr_uses_chinese_engine_overrides(monkeypatch):
+    raw = b"%PDF-1.4 dense text layer"
+    dense = "Purchase Order\n"
+    captured = {}
+
+    monkeypatch.setattr("app.document_extract._extract_pdf_text_layer", lambda raw_bytes, fn="": (dense, "pypdf"))
+
+    def _forced_ocr(raw_bytes, fn="", max_pages_override=None, ocr_kwargs=None):
+        captured["max_pages"] = max_pages_override
+        captured["ocr_kwargs"] = ocr_kwargs
+        return "格鲁赛特阀门配件江苏有限公司\n江苏省丹阳市埤城镇122省道尧巷段（212300）", 2
+
+    monkeypatch.setattr("app.document_extract._ocr_pdf_pages_supplement", _forced_ocr)
+
+    text, fmt = extract_pdf_text_with_forced_chinese_ocr(raw, "dense.pdf", max_pages=2)
+
+    assert "格鲁赛特阀门配件江苏有限公司" in text
+    assert fmt == "pdf_text+ocr_paddle_ch_pages_2"
+    assert captured["max_pages"] == 2
+    assert captured["ocr_kwargs"]["engine_override"] == "paddle"
+    assert captured["ocr_kwargs"]["paddle_lang_override"] == "ch"
+    assert captured["ocr_kwargs"]["tesseract_lang_override"] == "chi_sim+eng"
 
 
 def test_truncate_for_api():

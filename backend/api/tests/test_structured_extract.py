@@ -226,6 +226,39 @@ def test_extract_datynk_po_header_fields_without_llm():
     assert got.get("taxPrice") == "2.50"
 
 
+def test_extract_prefers_real_chinese_customer_and_delivery_address():
+    text = (
+        "Purchase Order\n"
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "格鲁赛特阀门配件江苏有限公司\n"
+        "Delivery Address:\n"
+        "Yao Lane Paragraph,122 Highway,Picheng Town Danyang City,Jiangsu Province (212300)\n"
+        "江苏省丹阳市埤城镇122省道尧巷段（212300）\n"
+        "Order No.: POGSVC2600205\n"
+        "Material Code: SOGEYC2600\n"
+        "Qty: 5000\n"
+    )
+
+    got = extract_structured_fields(text, "PO")
+
+    assert got["customerName"] == "格鲁赛特阀门配件江苏有限公司"
+    assert got["deliveryAddr"] == "江苏省丹阳市埤城镇122省道尧巷段（212300）"
+
+
+def test_extract_keeps_english_when_no_real_chinese_text_exists():
+    text = (
+        "Purchase Order\n"
+        "Buyer: Global-set Valve Components Jiangsu Co., LTD\n"
+        "Delivery Address: Yao Lane Paragraph,122 Highway,Picheng Town Danyang City,Jiangsu Province (212300)\n"
+        "Order No.: POGSVC2600205\n"
+    )
+
+    got = extract_structured_fields(text, "PO")
+
+    assert got["customerName"] == "Global-set Valve Components Jiangsu Co., LTD"
+    assert got["deliveryAddr"].startswith("Yao Lane Paragraph")
+
+
 def test_extract_sap_srm_po_layout_without_llm():
     text = (
         "订单号 4501825923\n"
