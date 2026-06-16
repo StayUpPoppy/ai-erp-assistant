@@ -370,22 +370,7 @@ def _grouped_material_code_continuations_from_detail_lines(detail_lines: List[st
     return valid_groups[0] if len(valid_groups) == 1 else []
 
 
-def _apply_ordered_material_code_continuations(rows: List[Dict[str, str]], detail_lines: List[str]) -> None:
-    continuations = _grouped_material_code_continuations_from_detail_lines(detail_lines)
-    if not continuations:
-        return
-    targets = [
-        row
-        for row in rows
-        if _looks_like_material_code_prefix(row.get("inventory_code", "")) and not _material_code_suffix(row.get("inventory_code", ""))
-    ]
-    if len(targets) < 2 or len(continuations) != len(targets):
-        return
-    for row, suffix in zip(targets, continuations):
-        row["inventory_code"] = f"{row['inventory_code']}{suffix}"
-
-
-def _global_set_header_cells(detail_lines: List[str]) -> List[str]:
+def _legacy_global_set_header_cells(detail_lines: List[str]) -> List[str]:
     for line in detail_lines:
         cells = _split_wrapped_code_cells(line)
         if _is_detail_row_start(cells):
@@ -394,43 +379,6 @@ def _global_set_header_cells(detail_lines: List[str]) -> List[str]:
         if ("item" in lower or "sn" in lower) and any(keyword in lower for keyword in ("qty", "quantity", "数量")):
             return cells
     return []
-
-
-def _global_set_column_index(header_cells: List[str], *patterns: str) -> int:
-    for idx, cell in enumerate(header_cells):
-        lower = cell.lower()
-        if any(re.search(pattern, lower, re.IGNORECASE) for pattern in patterns):
-            return idx
-    return -1
-
-
-def _looks_like_global_set_code_cell(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{6,}", (value or "").strip()))
-
-
-def _looks_like_global_set_order_no_cell(value: str) -> bool:
-    text = (value or "").strip()
-    return bool(re.fullmatch(r"[A-Z][A-Z0-9_-]{5,}", text, re.IGNORECASE)) and not text.isdigit()
-
-
-def _global_set_material_index(
-    cells: List[str],
-    header_cells: List[str],
-    code_idx: int,
-    has_explicit_code_column: bool,
-) -> int:
-    if has_explicit_code_column and code_idx < len(cells):
-        return code_idx
-    header_cell_2 = header_cells[2].lower() if len(header_cells) > 2 else ""
-    if re.search(r"drawing|图号|圖號", header_cell_2, re.IGNORECASE):
-        return 1
-    if (
-        len(cells) > 3
-        and _looks_like_global_set_order_no_cell(cells[1])
-        and _looks_like_global_set_code_cell(cells[2])
-    ):
-        return 2
-    return 1
 
 
 def _split_product_spec_and_ph(value: str) -> tuple[str, str]:
@@ -731,8 +679,6 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
         rows.append(item)
 
     if rows:
-        if not has_explicit_code_column:
-            _apply_ordered_material_code_continuations(rows, detail_lines)
         default_delivery = out.get("delivery_date")
         if default_delivery:
             for row in rows:
