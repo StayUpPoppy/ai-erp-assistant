@@ -267,15 +267,27 @@ def _append_wrapped_detail_cells(current_cells: List[str], continuation_cells: L
 def _merge_wrapped_detail_lines(lines: List[str]) -> List[str]:
     merged: List[str] = []
     current_cells: List[str] | None = None
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            continue
+    normalized_lines = [raw_line.strip() for raw_line in lines if raw_line.strip()]
+    for idx, line in enumerate(normalized_lines):
         cells = _split_wrapped_code_cells(line)
         if _is_detail_row_start(cells):
             if current_cells:
                 merged.append(" | ".join(current_cells))
             current_cells = cells
+            continue
+        next_cells = _split_wrapped_code_cells(normalized_lines[idx + 1]) if idx + 1 < len(normalized_lines) else []
+        is_grouped_suffix_column = (
+            current_cells is not None
+            and _detail_row_has_numeric_tail(current_cells)
+            and len(cells) == 1
+            and _looks_like_material_code_continuation(cells[0])
+            and len(next_cells) == 1
+            and _looks_like_material_code_continuation(next_cells[0])
+        )
+        if is_grouped_suffix_column:
+            merged.append(" | ".join(current_cells))
+            current_cells = None
+            merged.append(line)
             continue
         if current_cells and _looks_like_detail_continuation(cells, current_cells, line):
             current_cells = _append_wrapped_detail_cells(current_cells, cells)
@@ -287,6 +299,90 @@ def _merge_wrapped_detail_lines(lines: List[str]) -> List[str]:
     if current_cells:
         merged.append(" | ".join(current_cells))
     return merged
+
+
+def _material_code_suffix(value: str) -> str:
+    text = (value or "").strip()
+    m = re.search(r"(\d{2,}[_-][A-Za-z0-9]+)$", text)
+    return m.group(1) if m else ""
+
+
+def _material_code_continuation_token(value: str) -> str:
+    match = re.fullmatch(r"\s*(\d{2,})\s*([_-])\s*([A-Za-z0-9]+)\s*", value or "")
+    return f"{match.group(1)}{match.group(2)}{match.group(3)}" if match else ""
+
+
+def _same_material_code_continuation_shape(values: List[str]) -> bool:
+    shapes: set[tuple[int, str]] = set()
+    for value in values:
+        match = re.fullmatch(r"(\d{2,})([_-])([A-Za-z0-9]+)", value or "")
+        if not match:
+            return False
+        shapes.add((len(match.group(1)), match.group(2)))
+    return len(shapes) == 1
+
+
+def _is_detail_table_header_line(cells: List[str]) -> bool:
+    lower = " ".join(cells).lower()
+    return (
+        ("item" in lower or "sn" in lower)
+        and any(keyword in lower for keyword in ("part", "material", "code"))
+        and any(keyword in lower for keyword in ("qty", "quantity"))
+    )
+
+
+def _is_detail_table_end_line(cells: List[str]) -> bool:
+    lower = " ".join(cells).lower()
+    return bool(re.search(r"\b(?:total|subtotal|remark|note|payment|delivery)\b", lower))
+
+
+def _grouped_material_code_continuations_from_detail_lines(detail_lines: List[str]) -> List[str]:
+    in_table = False
+    saw_row = False
+    current_group: List[str] = []
+    groups: List[List[str]] = []
+
+    for line in detail_lines:
+        cells = _split_wrapped_code_cells(line)
+        if not in_table:
+            if _is_detail_table_header_line(cells):
+                in_table = True
+            continue
+        if _is_detail_table_end_line(cells):
+            break
+        if _is_detail_row_start(cells):
+            saw_row = True
+            if current_group:
+                groups.append(current_group)
+                current_group = []
+            continue
+        token = _material_code_continuation_token(cells[0]) if saw_row and len(cells) == 1 else ""
+        if token:
+            current_group.append(token)
+            continue
+        if current_group:
+            groups.append(current_group)
+            current_group = []
+
+    if current_group:
+        groups.append(current_group)
+    valid_groups = [group for group in groups if len(group) >= 2 and _same_material_code_continuation_shape(group)]
+    return valid_groups[0] if len(valid_groups) == 1 else []
+
+
+def _apply_ordered_material_code_continuations(rows: List[Dict[str, str]], detail_lines: List[str]) -> None:
+    continuations = _grouped_material_code_continuations_from_detail_lines(detail_lines)
+    if not continuations:
+        return
+    targets = [
+        row
+        for row in rows
+        if _looks_like_material_code_prefix(row.get("inventory_code", "")) and not _material_code_suffix(row.get("inventory_code", ""))
+    ]
+    if len(targets) < 2 or len(continuations) != len(targets):
+        return
+    for row, suffix in zip(targets, continuations):
+        row["inventory_code"] = f"{row['inventory_code']}{suffix}"
 
 
 _CJK_RE = re.compile(r"[一-龥]")
@@ -503,6 +599,7 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
         rows.append(item)
 
     if rows:
+        _apply_ordered_material_code_continuations(rows, detail_lines)
         default_delivery = out.get("delivery_date")
         if default_delivery:
             for row in rows:

@@ -435,6 +435,27 @@ def _should_keep_rule_preview(rule_preview: OrderPreviewData | None, llm_preview
     return rule_score[0] > 0 and llm_score < rule_score
 
 
+def _looks_like_wrapped_material_code_completion(short_code: str, full_code: str) -> bool:
+    short = (short_code or "").strip()
+    full = (full_code or "").strip()
+    if not short or not full or len(full) <= len(short):
+        return False
+    if not full.lower().startswith(short.lower()):
+        return False
+    suffix = full[len(short) :]
+    return bool(re.fullmatch(r"\d{2,}[_-][A-Za-z0-9]+", suffix))
+
+
+def _preserve_rule_material_code_completions(
+    rule_preview: OrderPreviewData | None, llm_preview: OrderPreviewData
+) -> None:
+    if not rule_preview:
+        return
+    for rule_detail, llm_detail in zip(rule_preview.details or [], llm_preview.details or []):
+        if _looks_like_wrapped_material_code_completion(llm_detail.materialCode, rule_detail.materialCode):
+            llm_detail.materialCode = rule_detail.materialCode
+
+
 def _purchase_order_to_preview(order: PurchaseOrder, org_hint: str) -> OrderPreviewData:
     details: list[OrderPreviewDetail] = []
     for item in order.items:
@@ -522,6 +543,7 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
             parsed = parsed["purchase_order"]
         purchase_order = PurchaseOrder.model_validate(parsed)
         preview = _purchase_order_to_preview(purchase_order, ingestion.org_id)
+        _preserve_rule_material_code_completions(rule_preview, preview)
     except Exception as exc:
         logger.warning("llm_preview_failed ingestion_id=%s err=%s", ingestion.ingestion_id, exc)
         ingestion.issues.append(
