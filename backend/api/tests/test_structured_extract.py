@@ -370,6 +370,26 @@ def test_extract_global_set_wrapped_material_codes_in_pipe_rows():
     assert rows[0]["quantity"] == "5000"
 
 
+def test_extract_global_set_uses_numeric_code_column_even_when_header_is_incomplete():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "SN | Order No | No | Spec | Qty | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGEYC2600 | 020800003 | 13.5x27.3 x-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+        "2 | SOGSVC2600 | 020800004 | 11.5x23.5 X-750 | 5000 | 3 | 15000 | 2026/3/27\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert [row["inventory_code"] for row in rows] == ["020800003", "020800004"]
+    assert rows[0].get("customerMaterialNo", "") == ""
+    assert rows[0].get("name", "") == ""
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
+
+
 def test_extract_global_set_standalone_wrapped_material_code_continuation():
     text = (
         "Global-set Valve Components Jiangsu Co., LTD\n"

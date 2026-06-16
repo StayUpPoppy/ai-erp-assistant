@@ -404,13 +404,42 @@ def _global_set_column_index(header_cells: List[str], *patterns: str) -> int:
     return -1
 
 
+def _looks_like_global_set_code_cell(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{6,}", (value or "").strip()))
+
+
+def _looks_like_global_set_order_no_cell(value: str) -> bool:
+    text = (value or "").strip()
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9_-]{5,}", text, re.IGNORECASE)) and not text.isdigit()
+
+
+def _global_set_material_index(
+    cells: List[str],
+    header_cells: List[str],
+    code_idx: int,
+    has_explicit_code_column: bool,
+) -> int:
+    if has_explicit_code_column and code_idx < len(cells):
+        return code_idx
+    header_cell_2 = header_cells[2].lower() if len(header_cells) > 2 else ""
+    if re.search(r"drawing|图号|圖號", header_cell_2, re.IGNORECASE):
+        return 1
+    if (
+        len(cells) > 3
+        and _looks_like_global_set_order_no_cell(cells[1])
+        and _looks_like_global_set_code_cell(cells[2])
+    ):
+        return 2
+    return 1
+
+
 def _split_product_spec_and_ph(value: str) -> tuple[str, str]:
     text = _clean_english_po_cell(value)
-    match = re.search(r"\s+([A-Z]{1,6}-[A-Z0-9-]+)\s*$", text)
+    match = re.search(r"\s+([A-Z]{1,6}\s*-\s*[A-Z0-9-]+)\s*$", text, re.IGNORECASE)
     if not match:
         return text, ""
     spec = text[: match.start()].strip()
-    ph = match.group(1).strip()
+    ph = re.sub(r"\s*-\s*", "-", match.group(1).strip()).upper()
     return (spec or text), ph if spec else ""
 
 
@@ -605,7 +634,7 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
             if delivery:
                 break
 
-        material_idx = code_idx if has_explicit_code_column and code_idx < len(cells) else 1
+        material_idx = _global_set_material_index(cells, header_cells, code_idx, has_explicit_code_column)
         item: Dict[str, str] = {"line_no": cells[0], "inventory_code": cells[material_idx]}
         if name_idx >= 0 and name_idx < len(cells) and name_idx != material_idx:
             item["name"] = cells[name_idx]
