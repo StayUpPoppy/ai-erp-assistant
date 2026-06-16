@@ -334,11 +334,69 @@ def test_extract_global_set_pipe_po_layout():
     assert got["deliveryAddr"].startswith("Yao Lane Paragraph")
     assert len(rows) == 3
     assert rows[0]["inventory_code"] == "SOGEYC2600"
-    assert rows[0]["productSpec"] == "13.5x27.3 X-750"
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
     assert rows[0]["quantity"] == "5000"
     assert rows[0]["unit_price_excl_tax"] == "4.9"
     assert rows[0]["line_amount_excl_tax"] == "24500"
     assert rows[0]["delivery_date"] == "2026-03-27"
+
+
+def test_extract_global_set_uses_code_column_as_material_code():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "Item | Part No | Code | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGEYC2600 | 020800003 | 13.5x27.3 x-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+        "2 | SOGSVC2600 | 020800004 | 11.5x23.5 X-750 | 5000 | 3 | 15000 | 2026/3/27\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert [row["inventory_code"] for row in rows] == ["020800003", "020800004"]
+    assert rows[0].get("name", "") == ""
+    assert rows[0].get("customerMaterialNo", "") == ""
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
+    assert rows[0]["quantity"] == "5000"
+
+
+def test_extract_global_set_uses_numeric_code_column_when_header_is_incomplete():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "SN | Order No | No | Spec | Qty | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGEYC2600 | 020800003 | 13.5x27.3 x-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+        "2 | SOGSVC2600 | 020800004 | 11.5x23.5 X-750 | 5000 | 3 | 15000 | 2026/3/27\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert [row["inventory_code"] for row in rows] == ["020800003", "020800004"]
+    assert rows[0].get("name", "") == ""
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
+
+
+def test_extract_global_set_keeps_old_material_column_when_third_column_is_drawing_no():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "Item | Part No | Drawing No | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGEYC2600 | 020800003 | 13.5x27.3 x-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert rows[0]["inventory_code"] == "SOGEYC2600"
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
 
 
 def test_extract_inv_mixed_noise_invoice_token():

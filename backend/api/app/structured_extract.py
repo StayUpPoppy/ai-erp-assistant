@@ -299,6 +299,67 @@ def _extract_preferred_chinese_po_header_fields(text: str) -> Dict[str, str]:
     return out
 
 
+def _global_set_split_cells(line: str) -> List[str]:
+    if "|" in line:
+        return [_clean_english_po_cell(part) for part in line.split("|") if _clean_english_po_cell(part)]
+    cells = [_clean_english_po_cell(part) for part in re.split(r"\s{2,}", line.strip()) if _clean_english_po_cell(part)]
+    if len(cells) < 2:
+        cells = [_clean_english_po_cell(part) for part in re.split(r"\s+", line.strip()) if _clean_english_po_cell(part)]
+    return cells
+
+
+def _global_set_header_cells(lines: List[str]) -> List[str]:
+    for line in lines:
+        cells = _global_set_split_cells(line)
+        if cells and re.fullmatch(r"\d{1,3}", cells[0]):
+            break
+        lower = " ".join(cells).lower()
+        if ("item" in lower or "sn" in lower) and any(token in lower for token in ("qty", "quantity", "数量")):
+            return cells
+    return []
+
+
+def _global_set_column_index(header_cells: List[str], *patterns: str) -> int:
+    for idx, cell in enumerate(header_cells):
+        if any(re.search(pattern, cell, re.IGNORECASE) for pattern in patterns):
+            return idx
+    return -1
+
+
+def _looks_like_global_set_order_no_cell(value: str) -> bool:
+    text = (value or "").strip()
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9_-]{5,}", text, re.IGNORECASE)) and not text.isdigit()
+
+
+def _looks_like_global_set_numeric_code(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{6,}", (value or "").strip()))
+
+
+def _global_set_material_index(cells: List[str], header_cells: List[str], code_idx: int) -> int:
+    if code_idx >= 2 and code_idx < len(cells):
+        return code_idx
+    third_header = header_cells[2] if len(header_cells) > 2 else ""
+    if re.search(r"drawing|图号|圖號", third_header, re.IGNORECASE):
+        return 1
+    if (
+        len(cells) > 3
+        and _looks_like_global_set_order_no_cell(cells[1])
+        and _looks_like_global_set_numeric_code(cells[2])
+    ):
+        return 2
+    return 1
+
+
+def _split_global_set_spec_and_ph(value: str) -> tuple[str, str]:
+    text = _clean_english_po_cell(value)
+    match = re.search(r"\s+([A-Z]{1,6}\s*-\s*[A-Z0-9-]+)\s*$", text, re.IGNORECASE)
+    if not match:
+        return text, ""
+    spec = text[: match.start()].strip()
+    ph = re.sub(r"\s*-\s*", "-", match.group(1).strip()).upper()
+    return (spec or text), ph if spec else ""
+
+
 def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
     out: Dict[str, str] = {}
     t = text or ""
@@ -350,15 +411,16 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
         out["currency"] = "CNY"
 
     rows: List[Dict[str, str]] = []
-    for raw_line in t.replace("｜", "|").replace("¦", "|").splitlines():
+    detail_lines = t.replace("｜", "|").replace("¦", "|").splitlines()
+    header_cells = _global_set_header_cells(detail_lines)
+    code_idx = _global_set_column_index(header_cells, r"\bcode\b", r"编码")
+    name_idx = _global_set_column_index(header_cells, r"\bname\b", r"description", r"物料名称", r"名称")
+    spec_idx = _global_set_column_index(header_cells, r"spec", r"规格")
+    for raw_line in detail_lines:
         line = raw_line.strip()
         if not line:
             continue
-        if "|" in line:
-            cells = [_clean_english_po_cell(part) for part in line.split("|")]
-            cells = [cell for cell in cells if cell]
-        else:
-            cells = [_clean_english_po_cell(part) for part in re.split(r"\s{2,}", line)]
+        cells = _global_set_split_cells(line)
         if len(cells) < 5 or not re.fullmatch(r"\d{1,3}", cells[0]):
             continue
         header_like = " ".join(cells).lower()
@@ -376,11 +438,18 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
             if delivery:
                 break
 
-        item: Dict[str, str] = {"line_no": cells[0], "inventory_code": cells[1]}
-        if len(cells) > 2:
-            item["name"] = cells[2]
-        if len(cells) > 3:
-            item["productSpec"] = cells[3]
+        material_idx = _global_set_material_index(cells, header_cells, code_idx)
+        item: Dict[str, str] = {"line_no": cells[0], "inventory_code": cells[material_idx]}
+        if name_idx >= 0 and name_idx < len(cells) and name_idx != material_idx:
+            item["name"] = cells[name_idx]
+        fallback_spec_idx = 3 if len(cells) > 3 else -1
+        effective_spec_idx = spec_idx if spec_idx >= 0 and spec_idx < len(cells) else fallback_spec_idx
+        if effective_spec_idx >= 0 and effective_spec_idx != material_idx:
+            spec, ph = _split_global_set_spec_and_ph(cells[effective_spec_idx])
+            if spec:
+                item["productSpec"] = spec
+            if ph:
+                item["ph"] = ph
         if numeric_cells:
             item["quantity"] = numeric_cells[0]
         tail_numbers = numeric_cells[1:]

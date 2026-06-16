@@ -325,9 +325,47 @@ def test_workflow_forced_ocr_retry_recovers_low_quality_first_pass(monkeypatch):
     assert result.preview_data.order.customerPoNo == "POGSVC2600205"
     assert result.preview_data.order.orderDate == "2026-03-06"
     assert result.preview_data.details[0].materialCode == "SOGEYC2600"
+    assert result.preview_data.details[0].productSpec == "13.5x27.3"
+    assert result.preview_data.details[0].ph == "X-750"
     assert result.preview_data.details[0].qty == 5000
     assert result.resolved_fields["material_code"] == "SOGEYC2600"
     assert any("forced_ocr_retry attempted applied=1" in event.message for event in result.audit_events)
+
+
+def test_workflow_global_set_code_column_maps_to_material_code(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setenv("LLM_EXTRACT_ENABLED", "false")
+    monkeypatch.setattr("app.workflow.StateGraph", None)
+    monkeypatch.setattr("app.workflow.END", None)
+    monkeypatch.setattr("app.workflow.get_object_bytes", lambda _key: b"plain text bytes")
+    monkeypatch.setattr(
+        "app.workflow.extract_text_from_bytes",
+        lambda _raw, _name="": (
+            "Purchase Order\n"
+            "Global-set Valve Components Jiangsu Co., LTD\n"
+            "Order No.: POGSVC2600205\n"
+            "Vendor Code: 010054\n"
+            "Issue Date: 2026/3/6\n"
+            "Currency CNY\n"
+            "Item | Part No | Code | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+            "1 | SOGEYC2600 | 020800003 | 13.5x27.3 x-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+            "2 | SOGSVC2600 | 020800004 | 11.5x23.5 X-750 | 5000 | 3 | 15000 | 2026/3/27\n",
+            "plain_text(utf-8)",
+        ),
+    )
+    ing = _new_ingestion()
+    ing.source_file_name = "POGSVC2600205.txt"
+
+    result = run_ingestion_processing_workflow(ingestion=ing, erp=MockErpClient(), append_event=_append_event)
+
+    assert result.status == IngestionStatus.VALIDATED
+    assert result.preview_data is not None
+    assert [detail.materialCode for detail in result.preview_data.details[:2]] == ["020800003", "020800004"]
+    assert result.preview_data.details[0].customerMaterialNo == ""
+    assert result.preview_data.details[0].productSpec == "13.5x27.3"
+    assert result.preview_data.details[0].ph == "X-750"
+    assert result.preview_data.details[0].qty == 5000
+    assert result.resolved_fields["material_code"] == "020800003"
 
 
 def test_workflow_chinese_ocr_retry_prefers_real_chinese_party_fields(monkeypatch):
