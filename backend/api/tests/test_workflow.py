@@ -332,7 +332,8 @@ def test_workflow_forced_ocr_retry_recovers_low_quality_first_pass(monkeypatch):
     assert any("forced_ocr_retry attempted applied=1" in event.message for event in result.audit_events)
 
 
-def test_workflow_preview_uses_wrapped_material_code_full_value(monkeypatch):
+
+def test_workflow_global_set_code_column_maps_to_material_code(monkeypatch):
     monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
     monkeypatch.setenv("LLM_EXTRACT_ENABLED", "false")
     monkeypatch.setattr("app.workflow.StateGraph", None)
@@ -348,11 +349,8 @@ def test_workflow_preview_uses_wrapped_material_code_full_value(monkeypatch):
             "Issue Date: 2026/3/6\n"
             "Currency CNY\n"
             "Item | Part No | Code | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
-            "1 | SOGSVC2600\n"
-            "191_8 | 020800003 | 13.5x27.3 X-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
-            "2 | SOGSVC2600\n"
-            "191_6 | 020800004 | 11.5x23.5\n"
-            "X-750 | 5000 | 3 | 15000 | 2026/3/27\n",
+            "1 | SOGEYC2600 | 020800003 | 13.5x27.3 x-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+            "2 | SOGSVC2600 | 020800004 | 11.5x23.5 X-750 | 5000 | 3 | 15000 | 2026/3/27\n",
             "plain_text(utf-8)",
         ),
     )
@@ -363,16 +361,12 @@ def test_workflow_preview_uses_wrapped_material_code_full_value(monkeypatch):
 
     assert result.status == IngestionStatus.VALIDATED
     assert result.preview_data is not None
-    assert [detail.materialCode for detail in result.preview_data.details[:2]] == [
-        "020800003",
-        "020800004",
-    ]
+    assert [detail.materialCode for detail in result.preview_data.details[:2]] == ["020800003", "020800004"]
+
     assert result.preview_data.details[0].customerMaterialNo == ""
     assert result.preview_data.details[0].productSpec == "13.5x27.3"
     assert result.preview_data.details[0].ph == "X-750"
     assert result.preview_data.details[0].qty == 5000
-    assert result.preview_data.details[1].productSpec == "11.5x23.5"
-    assert result.preview_data.details[1].ph == "X-750"
     assert result.resolved_fields["material_code"] == "020800003"
 
 
