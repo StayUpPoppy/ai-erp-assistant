@@ -326,8 +326,8 @@ def _is_detail_table_header_line(cells: List[str]) -> bool:
     lower = " ".join(cells).lower()
     return (
         ("item" in lower or "sn" in lower)
-        and any(keyword in lower for keyword in ("part", "material", "code"))
-        and any(keyword in lower for keyword in ("qty", "quantity"))
+        and any(keyword in lower for keyword in ("part", "material", "code", "编码", "物料"))
+        and any(keyword in lower for keyword in ("qty", "quantity", "数量"))
     )
 
 
@@ -383,6 +383,35 @@ def _apply_ordered_material_code_continuations(rows: List[Dict[str, str]], detai
         return
     for row, suffix in zip(targets, continuations):
         row["inventory_code"] = f"{row['inventory_code']}{suffix}"
+
+
+def _global_set_header_cells(detail_lines: List[str]) -> List[str]:
+    for line in detail_lines:
+        cells = _split_wrapped_code_cells(line)
+        if _is_detail_row_start(cells):
+            break
+        lower = " ".join(cells).lower()
+        if ("item" in lower or "sn" in lower) and any(keyword in lower for keyword in ("qty", "quantity", "数量")):
+            return cells
+    return []
+
+
+def _global_set_column_index(header_cells: List[str], *patterns: str) -> int:
+    for idx, cell in enumerate(header_cells):
+        lower = cell.lower()
+        if any(re.search(pattern, lower, re.IGNORECASE) for pattern in patterns):
+            return idx
+    return -1
+
+
+def _split_product_spec_and_ph(value: str) -> tuple[str, str]:
+    text = _clean_english_po_cell(value)
+    match = re.search(r"\s+([A-Z]{1,6}-[A-Z0-9-]+)\s*$", text)
+    if not match:
+        return text, ""
+    spec = text[: match.start()].strip()
+    ph = match.group(1).strip()
+    return (spec or text), ph if spec else ""
 
 
 _CJK_RE = re.compile(r"[一-龥]")
@@ -545,6 +574,11 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
 
     rows: List[Dict[str, str]] = []
     detail_lines = _merge_wrapped_detail_lines(t.replace("｜", "|").replace("¦", "|").splitlines())
+    header_cells = _global_set_header_cells(detail_lines)
+    code_idx = _global_set_column_index(header_cells, r"\bcode\b", r"编码")
+    name_idx = _global_set_column_index(header_cells, r"\bname\b", r"description", r"物料名称", r"名称")
+    spec_idx = _global_set_column_index(header_cells, r"spec", r"规格")
+    has_explicit_code_column = code_idx >= 2
     for raw_line in detail_lines:
         line = raw_line.strip()
         if not line:
@@ -571,11 +605,18 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
             if delivery:
                 break
 
-        item: Dict[str, str] = {"line_no": cells[0], "inventory_code": cells[1]}
-        if len(cells) > 2:
-            item["name"] = cells[2]
-        if len(cells) > 3:
-            item["productSpec"] = cells[3]
+        material_idx = code_idx if has_explicit_code_column and code_idx < len(cells) else 1
+        item: Dict[str, str] = {"line_no": cells[0], "inventory_code": cells[material_idx]}
+        if name_idx >= 0 and name_idx < len(cells) and name_idx != material_idx:
+            item["name"] = cells[name_idx]
+        fallback_spec_idx = 3 if len(cells) > 3 else -1
+        effective_spec_idx = spec_idx if spec_idx >= 0 and spec_idx < len(cells) else fallback_spec_idx
+        if effective_spec_idx >= 0 and effective_spec_idx != material_idx:
+            spec, ph = _split_product_spec_and_ph(cells[effective_spec_idx])
+            if spec:
+                item["productSpec"] = spec
+            if ph:
+                item["ph"] = ph
         if numeric_cells:
             item["quantity"] = numeric_cells[0]
         tail_numbers = numeric_cells[1:]
@@ -599,7 +640,8 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
         rows.append(item)
 
     if rows:
-        _apply_ordered_material_code_continuations(rows, detail_lines)
+        if not has_explicit_code_column:
+            _apply_ordered_material_code_continuations(rows, detail_lines)
         default_delivery = out.get("delivery_date")
         if default_delivery:
             for row in rows:

@@ -325,6 +325,8 @@ def test_workflow_forced_ocr_retry_recovers_low_quality_first_pass(monkeypatch):
     assert result.preview_data.order.customerPoNo == "POGSVC2600205"
     assert result.preview_data.order.orderDate == "2026-03-06"
     assert result.preview_data.details[0].materialCode == "SOGEYC2600"
+    assert result.preview_data.details[0].productSpec == "13.5x27.3"
+    assert result.preview_data.details[0].ph == "X-750"
     assert result.preview_data.details[0].qty == 5000
     assert result.resolved_fields["material_code"] == "SOGEYC2600"
     assert any("forced_ocr_retry attempted applied=1" in event.message for event in result.audit_events)
@@ -362,12 +364,16 @@ def test_workflow_preview_uses_wrapped_material_code_full_value(monkeypatch):
     assert result.status == IngestionStatus.VALIDATED
     assert result.preview_data is not None
     assert [detail.materialCode for detail in result.preview_data.details[:2]] == [
-        "SOGSVC2600191_8",
-        "SOGSVC2600191_6",
+        "020800003",
+        "020800004",
     ]
+    assert result.preview_data.details[0].customerMaterialNo == ""
+    assert result.preview_data.details[0].productSpec == "13.5x27.3"
+    assert result.preview_data.details[0].ph == "X-750"
     assert result.preview_data.details[0].qty == 5000
-    assert result.preview_data.details[1].productSpec == "11.5x23.5 X-750"
-    assert result.resolved_fields["material_code"] == "SOGSVC2600191_8"
+    assert result.preview_data.details[1].productSpec == "11.5x23.5"
+    assert result.preview_data.details[1].ph == "X-750"
+    assert result.resolved_fields["material_code"] == "020800003"
 
 
 def test_workflow_chinese_ocr_retry_prefers_real_chinese_party_fields(monkeypatch):

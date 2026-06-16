@@ -334,7 +334,8 @@ def test_extract_global_set_pipe_po_layout():
     assert got["deliveryAddr"].startswith("Yao Lane Paragraph")
     assert len(rows) == 3
     assert rows[0]["inventory_code"] == "SOGEYC2600"
-    assert rows[0]["productSpec"] == "13.5x27.3 X-750"
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
     assert rows[0]["quantity"] == "5000"
     assert rows[0]["unit_price_excl_tax"] == "4.9"
     assert rows[0]["line_amount_excl_tax"] == "24500"
@@ -359,11 +360,13 @@ def test_extract_global_set_wrapped_material_codes_in_pipe_rows():
 
     rows = json.loads(got["line_items_json"])
     assert [row["inventory_code"] for row in rows] == [
-        "SOGSVC2600191_8",
-        "SOGSVC2600191_6",
-        "SOGSVC2600191_5",
+        "020800003",
+        "020800004",
+        "020800006",
     ]
-    assert rows[0]["name"] == "020800003"
+    assert rows[0].get("name", "") == ""
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
     assert rows[0]["quantity"] == "5000"
 
 
@@ -382,8 +385,26 @@ def test_extract_global_set_standalone_wrapped_material_code_continuation():
     import json
 
     rows = json.loads(got["line_items_json"])
-    assert rows[0]["inventory_code"] == "SOGSVC2600191_8"
-    assert rows[1]["inventory_code"] == "SOGSVC2600"
+    assert rows[0]["inventory_code"] == "020800003"
+    assert rows[1]["inventory_code"] == "020800004"
+
+
+def test_extract_global_set_fallback_material_column_can_apply_grouped_suffixes_without_code_column():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "Item | Material No | Drawing No | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+        "1 | ABC2600 | 020800003 | 13.5x27.3 X-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+        "2 | DEF2600 | 020800004 | 11.5x23.5 X-750 | 5000 | 3 | 15000 | 2026/3/27\n"
+        "191_8\n"
+        "191_6\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert [row["inventory_code"] for row in rows] == ["ABC2600191_8", "DEF2600191_6"]
 
 
 def test_extract_global_set_ordered_material_code_continuations_when_ocr_groups_suffixes():
@@ -404,9 +425,9 @@ def test_extract_global_set_ordered_material_code_continuations_when_ocr_groups_
 
     rows = json.loads(got["line_items_json"])
     assert [row["inventory_code"] for row in rows] == [
-        "ABC2600191_8",
-        "DEF2600191_6",
-        "GHI2600191_5",
+        "020800003",
+        "020800004",
+        "020800006",
     ]
     assert [row["quantity"] for row in rows] == ["5000", "5000", "5000"]
 
@@ -427,7 +448,7 @@ def test_extract_global_set_does_not_apply_grouped_suffixes_after_table_end():
     import json
 
     rows = json.loads(got["line_items_json"])
-    assert [row["inventory_code"] for row in rows] == ["ABC2600", "DEF2600"]
+    assert [row["inventory_code"] for row in rows] == ["020800003", "020800004"]
 
 
 def test_extract_global_set_does_not_apply_grouped_suffixes_when_count_mismatches():
@@ -446,7 +467,7 @@ def test_extract_global_set_does_not_apply_grouped_suffixes_when_count_mismatche
     import json
 
     rows = json.loads(got["line_items_json"])
-    assert [row["inventory_code"] for row in rows] == ["ABC2600", "DEF2600", "GHI2600"]
+    assert [row["inventory_code"] for row in rows] == ["020800003", "020800004", "020800006"]
 
 
 def test_extract_global_set_wrapped_spec_continuation():
@@ -463,11 +484,12 @@ def test_extract_global_set_wrapped_spec_continuation():
     import json
 
     rows = json.loads(got["line_items_json"])
-    assert rows[0]["inventory_code"] == "SOGSVC2600"
-    assert rows[0]["name"] == "020800003"
-    assert rows[0]["productSpec"] == "13.5x27.3 X-750"
+    assert rows[0]["inventory_code"] == "020800003"
+    assert rows[0].get("name", "") == ""
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
     assert rows[0]["quantity"] == "5000"
-    assert rows[1]["inventory_code"] == "SOGSVC2601"
+    assert rows[1]["inventory_code"] == "020800004"
 
 
 def test_extract_global_set_wrapped_name_or_drawing_continuation():
@@ -484,10 +506,12 @@ def test_extract_global_set_wrapped_name_or_drawing_continuation():
     import json
 
     rows = json.loads(got["line_items_json"])
-    assert rows[0]["name"] == "0208 00003"
-    assert rows[0]["productSpec"] == "13.5x27.3 X-750"
+    assert rows[0]["inventory_code"] == "0208 00003"
+    assert rows[0].get("name", "") == ""
+    assert rows[0]["productSpec"] == "13.5x27.3"
+    assert rows[0]["ph"] == "X-750"
     assert rows[0]["quantity"] == "5000"
-    assert rows[1]["name"] == "020800004"
+    assert rows[1]["inventory_code"] == "020800004"
 
 
 def test_extract_inv_mixed_noise_invoice_token():

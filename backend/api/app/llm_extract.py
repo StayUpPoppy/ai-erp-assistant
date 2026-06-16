@@ -446,13 +446,21 @@ def _looks_like_wrapped_material_code_completion(short_code: str, full_code: str
     return bool(re.fullmatch(r"\d{2,}[_-][A-Za-z0-9]+", suffix))
 
 
+def _looks_like_numeric_material_code(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{6,}", (value or "").strip()))
+
+
 def _preserve_rule_material_code_completions(
     rule_preview: OrderPreviewData | None, llm_preview: OrderPreviewData
 ) -> None:
     if not rule_preview:
         return
     for rule_detail, llm_detail in zip(rule_preview.details or [], llm_preview.details or []):
-        if _looks_like_wrapped_material_code_completion(llm_detail.materialCode, rule_detail.materialCode):
+        rule_code = rule_detail.materialCode
+        llm_code = llm_detail.materialCode
+        if _looks_like_numeric_material_code(rule_code) and not _looks_like_numeric_material_code(llm_code):
+            llm_detail.materialCode = rule_code
+        elif _looks_like_wrapped_material_code_completion(llm_code, rule_code):
             llm_detail.materialCode = rule_detail.materialCode
 
 

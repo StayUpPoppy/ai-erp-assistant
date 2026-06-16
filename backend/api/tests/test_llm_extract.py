@@ -332,7 +332,7 @@ def test_try_apply_llm_preview_preserves_rule_completed_wrapped_material_code(mo
         {
             "customerPoNo": "POGSVC2600205",
             "line_items_json": (
-                '[{"inventory_code":"SOGEYC2600191_8","name":"020800003","productSpec":"13.5x27.3 X-750",'
+                '[{"inventory_code":"020800003","productSpec":"13.5x27.3","ph":"X-750",'
                 '"quantity":"5000","unit_price_excl_tax":"4.9","line_amount_excl_tax":"24500"}]'
             ),
         }
@@ -344,16 +344,18 @@ def test_try_apply_llm_preview_preserves_rule_completed_wrapped_material_code(mo
         lambda *_args, **_kwargs: (
             '{"purchase_order":{"order_number":"POGSVC2600205","purchaser_name":"Global-set",'
             '"order_date":"2026-03-06","delivery_address":"Yao Lane",'
-            '"items":[{"material_code":"SOGEYC2600","material_name":"020800003",'
-            '"specification":"13.5x27.3 X-750","quantity":5000,'
+            '"items":[{"material_code":"SOGEYC2600","material_name":"",'
+            '"specification":"13.5x27.3","material_texture":"X-750","quantity":5000,'
             '"unit_price_without_tax":4.9,"total_amount_without_tax":24500,'
             '"delivery_date":"2026-03-27"}]}}'
         ),
     )
 
-    applied = try_apply_llm_preview(ingestion, "Purchase Order POGSVC2600205 SOGEYC2600 191_8")
+    applied = try_apply_llm_preview(ingestion, "Purchase Order POGSVC2600205 SOGEYC2600 020800003")
 
     assert applied is True
     assert ingestion.preview_data is not None
-    assert ingestion.preview_data.details[0].materialCode == "SOGEYC2600191_8"
-    assert "SOGEYC2600191_8" in ingestion.resolved_fields["line_items_json"]
+    assert ingestion.preview_data.details[0].materialCode == "020800003"
+    assert ingestion.preview_data.details[0].customerMaterialNo == ""
+    assert ingestion.preview_data.details[0].ph == "X-750"
+    assert "020800003" in ingestion.resolved_fields["line_items_json"]
