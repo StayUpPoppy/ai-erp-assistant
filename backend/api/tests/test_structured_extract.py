@@ -341,6 +341,92 @@ def test_extract_global_set_pipe_po_layout():
     assert rows[0]["delivery_date"] == "2026-03-27"
 
 
+def test_extract_global_set_wrapped_material_codes_in_pipe_rows():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "Item | Part No | Code | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGSVC2600\n"
+        "191_8 | 020800003 | 13.5x27.3 X-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+        "2 | SOGSVC2600\n"
+        "191_6 | 020800004 | 11.5x23.5 X-750 | 5000 | 3 | 15000 | 2026/3/27\n"
+        "3 | SOGSVC2600\n"
+        "191_5 | 020800006 | 7x18.3 X-750 | 5000 | 1 | 5000 | 2026/3/27\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert [row["inventory_code"] for row in rows] == [
+        "SOGSVC2600191_8",
+        "SOGSVC2600191_6",
+        "SOGSVC2600191_5",
+    ]
+    assert rows[0]["name"] == "020800003"
+    assert rows[0]["quantity"] == "5000"
+
+
+def test_extract_global_set_standalone_wrapped_material_code_continuation():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "Item | Part No | Code | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGSVC2600 | 020800003 | 13.5x27.3 X-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+        "191_8\n"
+        "2 | SOGSVC2600 | 020800004 | 11.5x23.5 X-750 | 5000 | 3 | 15000 | 2026/3/27\n"
+        "not-a-code-continuation\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert rows[0]["inventory_code"] == "SOGSVC2600191_8"
+    assert rows[1]["inventory_code"] == "SOGSVC2600"
+
+
+def test_extract_global_set_wrapped_spec_continuation():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "Item | Part No | Code | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGSVC2600 | 020800003 | 13.5x27.3\n"
+        "X-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+        "2 | SOGSVC2601 | 020800004 | 11.5x23.5 X-750 | 2000 | 3 | 6000 | 2026/3/27\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert rows[0]["inventory_code"] == "SOGSVC2600"
+    assert rows[0]["name"] == "020800003"
+    assert rows[0]["productSpec"] == "13.5x27.3 X-750"
+    assert rows[0]["quantity"] == "5000"
+    assert rows[1]["inventory_code"] == "SOGSVC2601"
+
+
+def test_extract_global_set_wrapped_name_or_drawing_continuation():
+    text = (
+        "Global-set Valve Components Jiangsu Co., LTD\n"
+        "Order No.: POGSVC2600205\n"
+        "Issue Date: 2026/3/6\n"
+        "Item | Part No | Code | Specification | Quantity | Unit Price | Amount | Delivery Date\n"
+        "1 | SOGSVC2600 | 0208\n"
+        "00003 | 13.5x27.3 X-750 | 5000 | 4.9 | 24500 | 2026/3/27\n"
+        "2 | SOGSVC2601 | 020800004 | 11.5x23.5 X-750 | 2000 | 3 | 6000 | 2026/3/27\n"
+    )
+    got = extract_po_cn_layout_entities(text)
+    import json
+
+    rows = json.loads(got["line_items_json"])
+    assert rows[0]["name"] == "0208 00003"
+    assert rows[0]["productSpec"] == "13.5x27.3 X-750"
+    assert rows[0]["quantity"] == "5000"
+    assert rows[1]["name"] == "020800004"
+
+
 def test_extract_inv_mixed_noise_invoice_token():
     text = (
         "Export packing list noise\n"

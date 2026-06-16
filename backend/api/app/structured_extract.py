@@ -191,6 +191,104 @@ def _format_decimal(value: float) -> str:
     return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
+def _split_wrapped_code_cells(line: str) -> List[str]:
+    if "|" in line:
+        return [_clean_english_po_cell(part) for part in line.split("|") if _clean_english_po_cell(part)]
+    cells = [_clean_english_po_cell(part) for part in re.split(r"\s{2,}", line.strip()) if _clean_english_po_cell(part)]
+    if len(cells) < 2:
+        cells = [_clean_english_po_cell(part) for part in re.split(r"\s+", line.strip()) if _clean_english_po_cell(part)]
+    return cells
+
+
+def _looks_like_material_code_prefix(value: str) -> bool:
+    text = (value or "").strip()
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9]{5,}\d", text, re.IGNORECASE)) and not text.isdigit()
+
+
+def _looks_like_material_code_continuation(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{2,}(?:[_-][A-Za-z0-9]+)+", (value or "").strip()))
+
+
+def _is_detail_row_start(cells: List[str]) -> bool:
+    return len(cells) >= 2 and bool(re.fullmatch(r"\d{1,3}", cells[0]))
+
+
+def _is_numeric_or_date_cell(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    if _norm_noisy_slash_date(text):
+        return True
+    return bool(re.fullmatch(r"-?\d+(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?", text))
+
+
+def _detail_row_has_numeric_tail(cells: List[str]) -> bool:
+    return len(cells) >= 5 and any(_numbers_in(cell) or _norm_noisy_slash_date(cell) for cell in cells[4:])
+
+
+def _looks_like_detail_continuation(cells: List[str], current_cells: List[str], raw_line: str) -> bool:
+    if not cells or _is_detail_row_start(cells):
+        return False
+    lower = " ".join(cells).lower()
+    if re.search(r"\b(?:payment|delivery)\s+terms\b|^\s*(?:total|remark|note)\b", lower):
+        return False
+    if (
+        _looks_like_material_code_continuation(cells[0])
+        and len(current_cells) >= 2
+        and _looks_like_material_code_prefix(current_cells[1])
+    ):
+        return True
+    if not _detail_row_has_numeric_tail(current_cells):
+        return True
+    return "|" in raw_line and len(cells) > 1
+
+
+def _append_wrapped_detail_cells(current_cells: List[str], continuation_cells: List[str]) -> List[str]:
+    merged = list(current_cells)
+    rest = list(continuation_cells)
+    if (
+        rest
+        and len(merged) >= 2
+        and _looks_like_material_code_prefix(merged[1])
+        and _looks_like_material_code_continuation(rest[0])
+    ):
+        merged[1] = f"{merged[1]}{rest.pop(0)}"
+
+    if rest and 3 <= len(merged) <= 4 and (
+        not _is_numeric_or_date_cell(rest[0])
+        or (len(merged) == 3 and len(rest) > 1 and not _is_numeric_or_date_cell(rest[1]))
+    ):
+        merged[-1] = f"{merged[-1]} {rest.pop(0)}".strip()
+
+    merged.extend(rest)
+    return merged
+
+
+def _merge_wrapped_detail_lines(lines: List[str]) -> List[str]:
+    merged: List[str] = []
+    current_cells: List[str] | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        cells = _split_wrapped_code_cells(line)
+        if _is_detail_row_start(cells):
+            if current_cells:
+                merged.append(" | ".join(current_cells))
+            current_cells = cells
+            continue
+        if current_cells and _looks_like_detail_continuation(cells, current_cells, line):
+            current_cells = _append_wrapped_detail_cells(current_cells, cells)
+            continue
+        if current_cells:
+            merged.append(" | ".join(current_cells))
+            current_cells = None
+        merged.append(line)
+    if current_cells:
+        merged.append(" | ".join(current_cells))
+    return merged
+
+
 _CJK_RE = re.compile(r"[一-龥]")
 _CHINESE_COMPANY_RE = re.compile(
     r"([一-龥A-Za-z0-9（）()·\-]{2,80}?(?:有限责任公司|股份有限公司|有限公司|公司|工厂|厂))"
@@ -350,7 +448,8 @@ def _extract_global_set_pipe_po_entities(text: str) -> Dict[str, str]:
         out["currency"] = "CNY"
 
     rows: List[Dict[str, str]] = []
-    for raw_line in t.replace("｜", "|").replace("¦", "|").splitlines():
+    detail_lines = _merge_wrapped_detail_lines(t.replace("｜", "|").replace("¦", "|").splitlines())
+    for raw_line in detail_lines:
         line = raw_line.strip()
         if not line:
             continue
