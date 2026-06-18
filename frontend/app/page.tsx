@@ -3764,10 +3764,10 @@ export default function HomePage() {
                     setStagedUploadFile(file);
                   }}
                 />
-                <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:px-6 lg:px-8">
-                  <div className="pointer-events-auto mx-auto w-full max-w-[58rem]">
-                    <div className="min-h-[8.5rem] rounded-2xl border border-blue-200 bg-white px-5 py-4 shadow-[0_12px_34px_rgba(15,23,42,0.12)] transition-colors focus-within:border-blue-300 focus-within:ring-2 focus-within:ring-blue-100">
-                      <div className="min-w-0 pr-1">
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-[calc(20px+env(safe-area-inset-bottom))] sm:px-6 lg:px-8">
+                  <div className="pointer-events-auto mx-auto w-full max-w-[960px]">
+                    <div className="relative min-h-[126px] w-full max-w-[960px] rounded-[28px] border-[1px] border-blue-200 bg-white px-6 pb-4 pt-[22px] shadow-[0_12px_34px_rgba(15,23,42,0.12)] transition-colors focus-within:border-blue-300 focus-within:ring-2 focus-within:ring-blue-100">
+                      <div className="min-w-0 pr-16">
                         <div
                           className="truncate text-sm font-semibold text-slate-800 sm:text-base"
                           title={stagedUploadFile?.name ?? "选择 PDF 文件或拖拽到窗口上传"}
@@ -3779,14 +3779,14 @@ export default function HomePage() {
                         </div>
                       </div>
 
-                      <div className="mt-5 flex items-center justify-between gap-4">
+                      <div>
                         <button
                           type="button"
                           disabled={isUploading}
                           onClick={() => fileInputRef.current?.click()}
-                          className="inline-flex h-10 items-center gap-2 rounded-lg px-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="absolute bottom-4 left-6 inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-lg px-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50 sm:h-[30px] sm:w-[86px] sm:gap-1.5 sm:rounded-[6px] sm:px-[7px] sm:py-1 sm:text-xs"
                         >
-                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                          <svg className="h-4 w-4 sm:h-3.5 sm:w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
                             <path d="M12 5v14M5 12h14" strokeLinecap="round" />
                           </svg>
                           <span>选择文件</span>
@@ -3798,7 +3798,7 @@ export default function HomePage() {
                           title={stagedUploadFile ? "上传已选择的文件" : "请先选择文件"}
                           disabled={!stagedUploadFile || isUploading}
                           onClick={() => void onSubmitStagedUpload()}
-                          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white shadow-[0_8px_22px_rgba(37,99,235,0.3)] transition hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
+                          className="absolute bottom-4 right-6 flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white shadow-[0_8px_22px_rgba(37,99,235,0.3)] transition hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
                         >
                           {isUploading ? (
                             <ProgressSpinner className="h-5 w-5" />
