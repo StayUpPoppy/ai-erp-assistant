@@ -3774,7 +3774,7 @@ export default function HomePage() {
                         >
                           {stagedUploadFile?.name ?? "选择 PDF 文件或拖拽到窗口上传"}
                         </div>
-                        <div className="mt-1 truncate text-xs text-slate-400 sm:text-sm">
+                        <div className="mt-1 truncate text-xs text-slate-400 sm:text-sm sm:leading-4">
                           支持拖拽上传，单个文件建议不超过 29MB
                         </div>
                       </div>
@@ -3784,7 +3784,7 @@ export default function HomePage() {
                           type="button"
                           disabled={isUploading}
                           onClick={() => fileInputRef.current?.click()}
-                          className="absolute bottom-[14px] left-5 inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-lg px-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50 sm:h-[30px] sm:w-[86px] sm:gap-1.5 sm:rounded-[6px] sm:px-[7px] sm:py-1 sm:text-xs"
+                          className="absolute bottom-[6px] left-5 inline-flex h-10 items-center gap-2 whitespace-nowrap rounded-lg px-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50 sm:h-[30px] sm:w-[86px] sm:gap-1.5 sm:rounded-[6px] sm:px-[7px] sm:py-1 sm:text-xs"
                         >
                           <svg className="h-4 w-4 sm:h-3.5 sm:w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
                             <path d="M12 5v14M5 12h14" strokeLinecap="round" />
