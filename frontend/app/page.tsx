@@ -3082,33 +3082,10 @@ export default function HomePage() {
   );
 
   return (
-    <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-[#f5f6f8] text-slate-900">
-      <header className="z-30 flex h-14 shrink-0 items-center gap-2 border-b border-slate-200 bg-[#f5f6f8] px-4 md:h-[3.75rem] md:gap-3 md:px-6">
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2 md:gap-2.5">
-          <label className="hidden items-center gap-1.5 text-xs text-slate-500">
-            <span className="shrink-0">组织</span>
-            <input
-              value={orgId}
-              readOnly
-              aria-readonly="true"
-              className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
-            />
-          </label>
-          <label className="hidden items-center gap-1.5 text-xs text-slate-500">
-            <span className="shrink-0">用户</span>
-            <input
-              value={userName}
-              readOnly
-              aria-readonly="true"
-              className="h-9 w-[5rem] cursor-not-allowed rounded-md border border-slate-200 bg-slate-100 px-2 text-sm text-slate-600 outline-none md:w-28"
-            />
-          </label>
-        </div>
-      </header>
-
-      <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row overflow-hidden px-4 pb-4 md:px-6">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-          <div className="shrink-0 border-b border-slate-100 bg-white px-5 py-3 lg:px-7">
+    <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-white text-slate-900">
+      <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white">
+          <div className="shrink-0 bg-white px-5 py-3 lg:px-7">
             <div className="flex items-center justify-end">
               <button
                 type="button"
@@ -3157,7 +3134,12 @@ export default function HomePage() {
               ref={chatScrollRef}
               className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-white"
             >
-              <div className="flex min-h-full w-full flex-col gap-4 px-5 py-4 lg:px-7">
+              <div
+                className={[
+                  "flex min-h-full w-full flex-col gap-4 px-5 pt-4 lg:px-7",
+                  workspaceMode === "pdf_to_erp" ? "pb-28 sm:pb-32" : "pb-4",
+                ].join(" ")}
+              >
                 <div className="flex min-h-full w-full flex-col gap-3">
                   {workspaceMode !== "pdf_to_erp" ? (
                     <div className="flex items-center justify-between border-b border-slate-100 pb-3">
@@ -3750,41 +3732,45 @@ export default function HomePage() {
               </div>
             </div>
 
-            <div className="shrink-0 border-t border-slate-200/90 bg-white px-5 pb-[env(safe-area-inset-bottom)] shadow-[0_-6px_24px_rgba(15,23,42,0.06)] lg:px-8">
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="sr-only"
-                accept={uploadAcceptAttr}
-                onChange={(e) => {
-                  void handleFiles(e.target.files);
-                  e.target.value = "";
-                }}
-              />
-              {workspaceMode === "pdf_to_erp" ? (
-                <div className="flex w-full max-w-none flex-col gap-2 py-3">
-                  <button
-                    type="button"
-                    disabled={isUploading}
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex min-h-[3.5rem] w-full items-center gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-left text-sm text-slate-700 transition hover:border-blue-300 hover:bg-blue-50/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-white text-blue-700 ring-1 ring-slate-200">
-                      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-                        <path d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5" strokeLinecap="round" />
-                        <path d="M12 4v12m0-12 4 4m-4-4-4 4" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium text-slate-900">
-                        {isUploading ? "正在上传并创建任务..." : "选择 PDF 文件或拖拽到窗口上传"}
+            {workspaceMode === "pdf_to_erp" ? (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="sr-only"
+                  accept={uploadAcceptAttr}
+                  onChange={(e) => {
+                    void handleFiles(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:px-6 lg:px-8">
+                  <div className="pointer-events-auto mx-auto w-full max-w-[58rem]">
+                    <button
+                      type="button"
+                      disabled={isUploading}
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex min-h-[4.5rem] w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-slate-700 shadow-[0_10px_30px_rgba(15,23,42,0.12)] transition hover:border-blue-300 hover:bg-blue-50/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-700 ring-1 ring-blue-100">
+                        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                          <path d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5" strokeLinecap="round" />
+                          <path d="M12 4v12m0-12 4 4m-4-4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
                       </span>
-                      <span className="mt-0.5 block truncate text-xs text-slate-400">支持 PDF，单个文件建议不超过 29MB</span>
-                    </span>
-                  </button>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium text-slate-900">
+                          {isUploading ? "正在上传并创建任务..." : "选择 PDF 文件或拖拽到窗口上传"}
+                        </span>
+                        <span className="mt-0.5 block truncate text-xs text-slate-400">支持 PDF，单个文件建议不超过 29MB</span>
+                      </span>
+                    </button>
+                  </div>
                 </div>
-              ) : (
+              </>
+            ) : (
+              <div className="shrink-0 border-t border-slate-200/90 bg-white px-5 pb-[env(safe-area-inset-bottom)] shadow-[0_-6px_24px_rgba(15,23,42,0.06)] lg:px-8">
                 <div className="flex w-full max-w-none flex-col gap-2 py-3">
                   <div className="flex items-end gap-3">
                     <textarea
@@ -3812,8 +3798,8 @@ export default function HomePage() {
                   </div>
                   <div className="px-1 text-xs text-slate-400">Enter 发送，Shift + Enter 换行</div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
