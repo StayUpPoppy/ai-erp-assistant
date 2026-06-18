@@ -3082,8 +3082,8 @@ export default function HomePage() {
   );
 
   return (
-    <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-white text-slate-900">
-      <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row overflow-hidden">
+    <div className="flex h-svh max-h-svh flex-col overflow-hidden bg-[#f5f6f8] text-slate-900">
+      <div ref={chatPanelRef} id="chat-intent-panel" className="flex min-h-0 flex-1 flex-row overflow-hidden pl-4 md:pl-6">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white">
           <div className="shrink-0 bg-white px-5 py-3 lg:px-7">
             <div className="flex items-center justify-end">
