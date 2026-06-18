@@ -666,6 +666,8 @@ export default function HomePage() {
   const [isDragging, setIsDragging] = useState(false);
   /** 上传请求进行中（含网络传输与服务端读文件算哈希时间） */
   const [isUploading, setIsUploading] = useState(false);
+  /** 点击文件选择器后暂存，等待用户点击右侧上传按钮确认 */
+  const [stagedUploadFile, setStagedUploadFile] = useState<File | null>(null);
 
   /** 补全表单：键与后端 `required_field_keys` 对齐 */
   const [resolveFields, setResolveFields] = useState<Record<string, string>>({});
@@ -1335,6 +1337,7 @@ export default function HomePage() {
     pendingReprocessUploadsRef.current = {};
     setChatInput("");
     setChatMessages([]);
+    setStagedUploadFile(null);
     resetCurrentTaskState();
     const sid = createAssistantSessionId();
     const meta = createSessionMeta(sid);
@@ -2003,11 +2006,11 @@ export default function HomePage() {
   );
 
   const handleFiles = useCallback(
-    async (files: FileList | null) => {
-      if (!files || files.length === 0) return;
+    async (files: FileList | readonly File[] | null): Promise<boolean> => {
+      if (!files || files.length === 0) return false;
       if (workspaceMode !== "pdf_to_erp") {
         appendChat("system", "当前是普通对话 / ERP 查询模式。请先切换到「PDF 转 ERP」再上传 PDF。");
-        return;
+        return false;
       }
       const list = Array.from(files).slice(0, 8);
 
@@ -2113,6 +2116,7 @@ export default function HomePage() {
       } finally {
         setIsUploading(false);
       }
+      return uploadSuccessCount > 0;
     },
     [
       appendChat,
@@ -2126,6 +2130,15 @@ export default function HomePage() {
       workspaceMode,
     ],
   );
+
+  const onSubmitStagedUpload = useCallback(async () => {
+    if (!stagedUploadFile || isUploading) return;
+    const file = stagedUploadFile;
+    const uploaded = await handleFiles([file]);
+    if (uploaded) {
+      setStagedUploadFile((current) => (current === file ? null : current));
+    }
+  }, [handleFiles, isUploading, stagedUploadFile]);
 
   const onDrop = useCallback(
     async (e: React.DragEvent) => {
@@ -3137,7 +3150,7 @@ export default function HomePage() {
               <div
                 className={[
                   "flex min-h-full w-full flex-col gap-4 px-5 pt-4 lg:px-7",
-                  workspaceMode === "pdf_to_erp" ? "pb-28 sm:pb-32" : "pb-4",
+                  workspaceMode === "pdf_to_erp" ? "pb-40 sm:pb-44" : "pb-4",
                 ].join(" ")}
               >
                 <div className="flex min-h-full w-full flex-col gap-3">
@@ -3737,35 +3750,66 @@ export default function HomePage() {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  multiple
                   className="sr-only"
                   accept={uploadAcceptAttr}
                   onChange={(e) => {
-                    void handleFiles(e.target.files);
+                    const file = e.target.files?.[0] ?? null;
                     e.target.value = "";
+                    if (!file) return;
+                    const precheck = precheckUploadFile(file);
+                    if (!precheck.ok) {
+                      appendChat("system", `${file.name}：${precheck.message}`);
+                      return;
+                    }
+                    setStagedUploadFile(file);
                   }}
                 />
                 <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:px-6 lg:px-8">
                   <div className="pointer-events-auto mx-auto w-full max-w-[58rem]">
-                    <button
-                      type="button"
-                      disabled={isUploading}
-                      onClick={() => fileInputRef.current?.click()}
-                      className="flex min-h-[4.5rem] w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-slate-700 shadow-[0_10px_30px_rgba(15,23,42,0.12)] transition hover:border-blue-300 hover:bg-blue-50/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-700 ring-1 ring-blue-100">
-                        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-                          <path d="M4 16.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1.5" strokeLinecap="round" />
-                          <path d="M12 4v12m0-12 4 4m-4-4-4 4" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate font-medium text-slate-900">
-                          {isUploading ? "正在上传并创建任务..." : "选择 PDF 文件或拖拽到窗口上传"}
-                        </span>
-                        <span className="mt-0.5 block truncate text-xs text-slate-400">支持 PDF，单个文件建议不超过 29MB</span>
-                      </span>
-                    </button>
+                    <div className="min-h-[8.5rem] rounded-2xl border border-blue-200 bg-white px-5 py-4 shadow-[0_12px_34px_rgba(15,23,42,0.12)] transition-colors focus-within:border-blue-300 focus-within:ring-2 focus-within:ring-blue-100">
+                      <div className="min-w-0 pr-1">
+                        <div
+                          className="truncate text-sm font-semibold text-slate-800 sm:text-base"
+                          title={stagedUploadFile?.name ?? "选择 PDF 文件或拖拽到窗口上传"}
+                        >
+                          {stagedUploadFile?.name ?? "选择 PDF 文件或拖拽到窗口上传"}
+                        </div>
+                        <div className="mt-1 truncate text-xs text-slate-400 sm:text-sm">
+                          支持拖拽上传，单个文件建议不超过 29MB
+                        </div>
+                      </div>
+
+                      <div className="mt-5 flex items-center justify-between gap-4">
+                        <button
+                          type="button"
+                          disabled={isUploading}
+                          onClick={() => fileInputRef.current?.click()}
+                          className="inline-flex h-10 items-center gap-2 rounded-lg px-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                            <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+                          </svg>
+                          <span>选择文件</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          aria-label="上传已选择的文件"
+                          title={stagedUploadFile ? "上传已选择的文件" : "请先选择文件"}
+                          disabled={!stagedUploadFile || isUploading}
+                          onClick={() => void onSubmitStagedUpload()}
+                          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white shadow-[0_8px_22px_rgba(37,99,235,0.3)] transition hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
+                        >
+                          {isUploading ? (
+                            <ProgressSpinner className="h-5 w-5" />
+                          ) : (
+                            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                              <path d="M12 19V5m0 0-5 5m5-5 5 5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </>
