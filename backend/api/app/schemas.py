@@ -55,6 +55,11 @@ class HealthResponse(BaseModel):
     ocr_engine: Optional[str] = None
     ocr_http_url_configured: bool = False
     ocr_engine_auto_fallback: bool = True
+    rapidocr_importable: bool = False
+    rapidocr_initializable: bool = False
+    rapidocr_init_status: str = ""
+    rapidocr_version: str = ""
+    rapidocr_intra_op_threads: int = 2
     paddleocr_importable: bool = False
     paddleocr_initializable: bool = False
     paddleocr_init_status: str = ""
@@ -67,6 +72,8 @@ class HealthResponse(BaseModel):
     aliyun_ocr_configured: bool = False
     mineru_enabled: bool = False
     mineru_api_base: str = ""
+    mineru_mode: str = "precise_v4"
+    mineru_token_configured: bool = False
     mineru_model: str = ""
     erp_client_mode: str = "mock"
     erp_sale_order_page_enabled: bool = False

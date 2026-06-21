@@ -27,7 +27,7 @@ COPY backend/api/requirements.txt backend/api/requirements-ocr-paddle.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements.txt
 
-ARG INSTALL_PADDLEOCR=true
+ARG INSTALL_PADDLEOCR=false
 ARG PADDLEPADDLE_VERSION=3.2.0
 ARG PADDLEPADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cpu/
 RUN if [ "$INSTALL_PADDLEOCR" = "true" ]; then \

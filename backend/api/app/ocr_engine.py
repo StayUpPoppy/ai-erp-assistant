@@ -18,6 +18,9 @@ import shutil
 import ssl
 import subprocess
 import tempfile
+import threading
+from dataclasses import dataclass, field
+from importlib import metadata
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -28,6 +31,24 @@ logger = logging.getLogger("ai_erp_api")
 _paddle_ocr_lock = None
 _paddle_ocr_instance: Any = None
 _paddle_ocr_sig: Optional[Tuple[str, bool]] = None
+_rapid_ocr_instance: Any = None
+_rapid_ocr_threads: Optional[int] = None
+_rapid_ocr_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class OCRTextBlock:
+    text: str
+    confidence: Optional[float] = None
+    box: tuple[tuple[float, float], ...] = ()
+
+
+@dataclass
+class OCRResult:
+    text: str = ""
+    format_label: str = "empty"
+    blocks: list[OCRTextBlock] = field(default_factory=list)
+    confidence: Optional[float] = None
 
 
 def _paddle_lock():
@@ -45,6 +66,7 @@ OCR_FATAL_OCR_FORMATS = frozenset(
     {
         "tesseract_not_found",
         "paddleocr_not_installed",
+        "rapidocr_not_installed",
         "ocr_http_not_configured",
         "aliyun_not_configured",
         "pillow_not_installed",
@@ -52,6 +74,104 @@ OCR_FATAL_OCR_FORMATS = frozenset(
         "pytesseract_import_failed",
     },
 )
+
+
+def _rapid_threads() -> int:
+    raw = (os.getenv("RAPIDOCR_INTRA_OP_NUM_THREADS") or "2").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 2
+    return max(1, min(value, max(1, os.cpu_count() or 1)))
+
+
+def _get_rapid_ocr_singleton():
+    global _rapid_ocr_instance, _rapid_ocr_threads
+    from rapidocr import RapidOCR  # type: ignore[import-not-found]
+
+    threads = _rapid_threads()
+    with _rapid_ocr_lock:
+        if _rapid_ocr_instance is not None and _rapid_ocr_threads == threads:
+            return _rapid_ocr_instance
+        params = {
+            "EngineConfig.onnxruntime.intra_op_num_threads": threads,
+            "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+        }
+        _rapid_ocr_instance = RapidOCR(params=params)
+        _rapid_ocr_threads = threads
+        logger.info("ocr_rapid_engine_initialized intra_threads=%s inter_threads=1", threads)
+        return _rapid_ocr_instance
+
+
+def _rapid_box(value: Any) -> tuple[tuple[float, float], ...]:
+    points: list[tuple[float, float]] = []
+    try:
+        for point in value:
+            if len(point) >= 2:
+                points.append((float(point[0]), float(point[1])))
+    except (TypeError, ValueError):
+        return ()
+    return tuple(points)
+
+
+def _ocr_rapid(raw: bytes, file_name: str) -> OCRResult:
+    try:
+        from rapidocr import RapidOCR  # noqa: F401
+    except ImportError:
+        logger.warning("ocr_rapid_not_installed file_name=%s", file_name)
+        return OCRResult(format_label="rapidocr_not_installed")
+
+    try:
+        engine = _get_rapid_ocr_singleton()
+        output = engine(raw)
+    except Exception as exc:
+        logger.exception("ocr_rapid_run_failed file_name=%s err=%s", file_name, exc)
+        return OCRResult(format_label="ocr_rapid_error")
+
+    raw_texts = getattr(output, "txts", None)
+    raw_scores = getattr(output, "scores", None)
+    raw_boxes = getattr(output, "boxes", None)
+    texts = list(raw_texts) if raw_texts is not None else []
+    scores = list(raw_scores) if raw_scores is not None else []
+    boxes = list(raw_boxes) if raw_boxes is not None else []
+    blocks: list[OCRTextBlock] = []
+    for index, raw_text in enumerate(texts):
+        text = str(raw_text or "").strip()
+        if not text:
+            continue
+        score: Optional[float] = None
+        if index < len(scores):
+            try:
+                score = float(scores[index])
+            except (TypeError, ValueError):
+                score = None
+        box = _rapid_box(boxes[index]) if index < len(boxes) else ()
+        blocks.append(OCRTextBlock(text=text, confidence=score, box=box))
+
+    blocks.sort(
+        key=lambda block: (
+            min((point[1] for point in block.box), default=0.0),
+            min((point[0] for point in block.box), default=0.0),
+        )
+    )
+    text = _normalize_ocr_text("\n".join(block.text for block in blocks))
+    weighted_score = 0.0
+    weighted_chars = 0
+    for block in blocks:
+        if block.confidence is None:
+            continue
+        weight = max(1, len(block.text.strip()))
+        weighted_score += block.confidence * weight
+        weighted_chars += weight
+    confidence = weighted_score / weighted_chars if weighted_chars else None
+    if not text:
+        logger.info("ocr_rapid_empty file_name=%s", file_name)
+    return OCRResult(
+        text=text,
+        format_label="ocr_rapid(ch_en)",
+        blocks=blocks,
+        confidence=confidence,
+    )
 
 
 def _normalize_ocr_text(text: str) -> str:
@@ -370,6 +490,14 @@ def ocr_image_bytes(
             return t2, f"{reason}+fallback({f2})"
         return t2, f2
 
+    if engine == "rapid":
+        rapid = _ocr_rapid(raw, file_name)
+        if rapid.text:
+            return rapid.text, rapid.format_label
+        if not auto_fb:
+            return rapid.text, rapid.format_label
+        return _try_tesseract(f"{rapid.format_label}_empty")
+
     if engine == "http":
         if not (os.getenv("OCR_HTTP_URL") or "").strip():
             logger.warning("ocr_engine_http_selected_but_missing_url")
@@ -414,6 +542,42 @@ def ocr_image_bytes(
     return _ocr_tesseract(raw, file_name, lang_override=tesseract_lang_override)
 
 
+def ocr_image_bytes_detailed(
+    raw: bytes,
+    file_name: str = "",
+    *,
+    engine_override: str | None = None,
+    auto_fallback_override: bool | None = None,
+) -> OCRResult:
+    """OCR with optional coordinates and confidence while preserving legacy engines."""
+    if not raw:
+        return OCRResult()
+    engine = (engine_override or os.getenv("OCR_ENGINE") or "rapid").strip().lower() or "rapid"
+    if engine == "rapid":
+        result = _ocr_rapid(raw, file_name)
+        auto_fb = (
+            auto_fallback_override
+            if auto_fallback_override is not None
+            else (os.getenv("OCR_ENGINE_AUTO_FALLBACK") or "true").strip().lower() not in {"0", "false", "no", "off"}
+        )
+        if result.text or not auto_fb:
+            return result
+        text, fmt = ocr_image_bytes(
+            raw,
+            file_name,
+            engine_override="tesseract",
+            auto_fallback_override=False,
+        )
+        return OCRResult(text=text, format_label=f"{result.format_label}_empty+fallback({fmt})" if text else fmt)
+    text, fmt = ocr_image_bytes(
+        raw,
+        file_name,
+        engine_override=engine,
+        auto_fallback_override=auto_fallback_override,
+    )
+    return OCRResult(text=text, format_label=fmt)
+
+
 def _tesseract_available_languages(tesseract_cmd: str | None) -> list[str]:
     if not tesseract_cmd:
         return []
@@ -452,6 +616,28 @@ def build_ocr_health_payload() -> dict[str, object]:
         "no",
         "off",
     }
+
+    try:
+        import importlib.util
+
+        out["rapidocr_importable"] = importlib.util.find_spec("rapidocr") is not None
+    except Exception:
+        out["rapidocr_importable"] = False
+    try:
+        out["rapidocr_version"] = metadata.version("rapidocr") if out["rapidocr_importable"] else ""
+    except metadata.PackageNotFoundError:
+        out["rapidocr_version"] = ""
+    out["rapidocr_intra_op_threads"] = _rapid_threads()
+    out["rapidocr_initializable"] = False
+    out["rapidocr_init_status"] = "not_checked" if out["rapidocr_importable"] else "not_installed"
+    if out["rapidocr_importable"] and os.getenv("OCR_HEALTH_INIT_RAPID", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            _get_rapid_ocr_singleton()
+            out["rapidocr_initializable"] = True
+            out["rapidocr_init_status"] = "ok"
+        except Exception as exc:
+            out["rapidocr_init_status"] = f"failed:{type(exc).__name__}"
+            logger.warning("ocr_health_rapid_init_failed err=%s", exc)
 
     try:
         import importlib.util
@@ -500,8 +686,14 @@ def build_ocr_health_payload() -> dict[str, object]:
     languages = _tesseract_available_languages(path)
     out["tesseract_languages"] = languages
     out["tesseract_has_chi_sim"] = "chi_sim" in languages
+    rapid_init_status = str(out.get("rapidocr_init_status") or "")
+    rapid_ready = bool(
+        out.get("rapidocr_importable")
+        and (rapid_init_status == "not_checked" or out.get("rapidocr_initializable"))
+    )
     out["ocr_chinese_ready"] = bool(
-        (engine == "paddle" and out.get("paddleocr_importable") and str(out.get("paddle_ocr_lang") or "").lower().startswith("ch"))
+        (engine == "rapid" and rapid_ready)
+        or (engine == "paddle" and out.get("paddleocr_importable") and str(out.get("paddle_ocr_lang") or "").lower().startswith("ch"))
         or out["tesseract_has_chi_sim"]
         or (engine in {"http", "aliyun"} and (out.get("ocr_http_url_configured") or out.get("aliyun_ocr_configured")))
     )

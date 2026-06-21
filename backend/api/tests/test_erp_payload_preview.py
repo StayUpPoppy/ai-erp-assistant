@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.erp_payload_preview import build_datynk_sale_order_payload
-from app.order_preview import apply_customer_material_mapping, build_order_preview_data, normalize_customer_material_code
+from app.order_preview import apply_customer_material_mapping, build_order_preview_data, normalize_customer_material_code, preview_issues
 from app.schemas import IngestionResponse, IngestionStatus, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader
 
 
@@ -146,3 +146,28 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
 
 def test_normalize_customer_material_code_handles_full_width_and_separators() -> None:
     assert normalize_customer_material_code(" Ｎ-１００. ") == "N100"
+
+
+def test_preview_issues_validate_tax_and_amount_relations() -> None:
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(customerName="Acme"),
+        details=[
+            OrderPreviewDetail(
+                materialCode="M001",
+                qty=2,
+                price=10,
+                taxPrice=12,
+                amount=25,
+                allAmount=30,
+                tax=13,
+                taxAmount=1,
+            )
+        ],
+    )
+
+    paths = {issue.path for issue in preview_issues(preview)}
+
+    assert "details[0].amount" in paths
+    assert "details[0].allAmount" in paths
+    assert "details[0].taxAmount" in paths
+    assert "details[0].taxPrice" in paths

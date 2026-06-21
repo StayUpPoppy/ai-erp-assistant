@@ -550,82 +550,32 @@ def extract_text_from_bytes(raw: bytes, file_name: str = "") -> Tuple[str, str]:
         return _extract_text_from_xlsx(raw, file_name)
 
     if ext == "pdf":
-        started = perf_counter()
-        text, engine = _extract_pdf_text_layer(raw, file_name)
-        if engine == "no_engine":
-            # 与 _extract_pdf_text_layer 一致：pypdf 与 pymupdf 均不可用（多为解释器/venv 未装依赖，而非仅缺 pypdf）
-            return "", "pdf_no_text_engine"
-        if engine == "pdf_error":
-            return "", "pdf_error"
+        from app.pdf_pipeline import parse_pdf_document
 
-        def _pdf_format_base() -> str:
-            return "pdf_text" if engine == "pypdf" else "pdf_text_pymupdf"
-
-        try:
-            threshold = int(os.getenv("PDF_SPARSE_TEXT_THRESHOLD", "48").strip() or "48")
-        except ValueError:
-            threshold = 48
-        threshold = max(8, min(threshold, 5000))
-
-        ocr_enabled = os.getenv("PDF_FIRST_PAGE_OCR", "true").strip().lower() not in {"0", "false", "no", "off"}
-        if len(text) < threshold and ocr_enabled and (engine == "pypdf" or not text):
-            logger.info(
-                "document_extract_pdf_sparse_text chars=%s threshold=%s file_name=%s engine=%s try_pdf_page_ocr",
-                len(text),
-                threshold,
-                file_name,
-                engine,
-            )
-            mineru_enabled = os.getenv("MINERU_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-            if mineru_enabled:
-                mineru_text, mineru_fmt = _mineru_pdf_supplement(raw, file_name)
-                if mineru_text:
-                    merged = _normalize_text(text + "\n" + mineru_text)
-                    base = _pdf_format_base()
-                    logger.info(
-                        "document_extract_pdf_done file_name=%s format=%s+%s chars=%s threshold=%s ocr_used=mineru elapsed_ms=%s",
-                        file_name,
-                        base,
-                        mineru_fmt,
-                        len(merged),
-                        threshold,
-                        int((perf_counter() - started) * 1000),
-                    )
-                    return merged, f"{base}+{mineru_fmt}"
-                logger.warning(
-                    "document_extract_pdf_mineru_empty_or_failed file_name=%s fmt=%s fallback=page_ocr",
-                    file_name,
-                    mineru_fmt,
-                )
-            extra, pages_done = _ocr_pdf_pages_supplement(raw, file_name)
-            if extra:
-                merged = _normalize_text(text + "\n" + extra)
-                base = _pdf_format_base()
-                suffix = "ocr_first_page" if pages_done <= 1 else f"ocr_pages_{pages_done}"
-                logger.info(
-                    "document_extract_pdf_done file_name=%s format=%s+%s chars=%s threshold=%s ocr_used=true elapsed_ms=%s",
-                    file_name,
-                    base,
-                    suffix,
-                    len(merged),
-                    threshold,
-                    int((perf_counter() - started) * 1000),
-                )
-                return merged, f"{base}+{suffix}"
-        logger.info(
-            "document_extract_pdf_done file_name=%s format=%s chars=%s threshold=%s ocr_used=false elapsed_ms=%s",
-            file_name,
-            _pdf_format_base(),
-            len(text),
-            threshold,
-            int((perf_counter() - started) * 1000),
-        )
-        return text, _pdf_format_base()
+        result = parse_pdf_document(raw, file_name or "document.pdf")
+        return result.text, result.format_label
 
     if ext in _IMAGE_OCR_EXTENSIONS:
         return extract_text_from_image(raw, file_name)
 
     return "", f"unsupported_ext:{ext or 'none'}"
+
+
+def extract_document_from_bytes(raw: bytes, file_name: str = ""):
+    """Return rich PDF parse metadata while preserving tuple extraction for other files."""
+    from app.pdf_pipeline import DocumentParseResult, parse_pdf_document
+
+    if not raw:
+        return DocumentParseResult()
+    if guess_extension(file_name) == "pdf":
+        return parse_pdf_document(raw, file_name or "document.pdf")
+    text, fmt = extract_text_from_bytes(raw, file_name)
+    return DocumentParseResult(
+        text=text,
+        format_label=fmt,
+        route="non_pdf",
+        quality_score=1.0 if text else 0.0,
+    )
 
 
 def _normalize_text(text: str) -> str:

@@ -25,7 +25,7 @@ QUEUE_NAME = os.getenv("QUEUE_NAME", "ingestion_jobs")
 API_BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:8020")
 WORKER_PROCESS_MAX_RETRIES = int(os.getenv("WORKER_PROCESS_MAX_RETRIES", "2"))
 WORKER_PROCESS_RETRY_BACKOFF_SEC = float(os.getenv("WORKER_PROCESS_RETRY_BACKOFF_SEC", "1.0"))
-WORKER_PROCESS_TIMEOUT_SECONDS = float(os.getenv("WORKER_PROCESS_TIMEOUT_SECONDS", "120"))
+WORKER_PROCESS_TIMEOUT_SECONDS = float(os.getenv("WORKER_PROCESS_TIMEOUT_SECONDS", "600"))
 logger = logging.getLogger("ai_erp_worker")
 
 

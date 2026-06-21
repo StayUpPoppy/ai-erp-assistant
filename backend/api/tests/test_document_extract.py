@@ -12,6 +12,7 @@ from app.document_extract import (
     classify_doc_type_from_text,
     extract_pdf_text_with_forced_chinese_ocr,
     extract_pdf_text_with_forced_ocr,
+    extract_document_from_bytes,
     extract_text_from_bytes,
     heuristic_fill_fields,
     heuristic_vendor_code,
@@ -188,116 +189,145 @@ def test_extract_png_routes_to_ocr(monkeypatch):
     assert "ocr_tesseract" in fmt or "ocr_image" in fmt
 
 
-def test_pdf_sparse_merges_first_page_ocr(monkeypatch):
-    pytest.importorskip("pypdf")
-    from io import BytesIO
-
-    from pypdf import PdfWriter
-
-    buf = BytesIO()
-    w = PdfWriter()
-    w.add_blank_page(width=200, height=200)
-    w.write(buf)
-    raw = buf.getvalue()
-
-    monkeypatch.setattr(
-        "app.document_extract._ocr_pdf_pages_supplement",
-        lambda raw_bytes, fn="": ("mocked ocr V888", 2),
-    )
-
-    text, fmt = extract_text_from_bytes(raw, "scan.pdf")
-    assert "V888" in text
-    assert fmt == "pdf_text+ocr_pages_2"
+def _blank_pdf(page_count: int = 1) -> bytes:
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    try:
+        for _ in range(page_count):
+            doc.new_page(width=300, height=300)
+        return doc.tobytes()
+    finally:
+        doc.close()
 
 
-def test_pdf_sparse_uses_mineru_before_page_ocr(monkeypatch):
-    pytest.importorskip("pypdf")
-    from io import BytesIO
+def test_pdf_scanned_page_uses_rapidocr_at_250_dpi(monkeypatch):
+    from app.pdf_pipeline import TextBlock
 
-    from pypdf import PdfWriter
+    captured = {}
 
-    buf = BytesIO()
-    w = PdfWriter()
-    w.add_blank_page(width=200, height=200)
-    w.write(buf)
-    raw = buf.getvalue()
-    called = {"page_ocr": False}
+    def fake_ocr(_page, page_number, _file_name, dpi):
+        captured["dpi"] = dpi
+        return (
+            "Purchase Order\nOrder No: PO-888\nM001 | 2 | 10.00",
+            [TextBlock(page_number, "PO-888", (10, 10, 80, 30), "rapidocr", 0.95)],
+            0.95,
+            "ocr_rapid(ch_en)",
+        )
+
+    monkeypatch.setenv("MINERU_ENABLED", "false")
+    monkeypatch.setattr("app.pdf_pipeline._ocr_page", fake_ocr)
+    result = extract_document_from_bytes(_blank_pdf(), "scan.pdf")
+
+    assert captured["dpi"] == 250
+    assert result.route == "rapidocr"
+    assert result.format_label == "pdf_rapidocr_250dpi"
+    assert result.pages[0].ocr_confidence == 0.95
+    assert result.pages[0].blocks[0].bbox == (10, 10, 80, 30)
+    assert "PO-888" in result.text
+
+
+def test_pdf_native_page_skips_ocr(monkeypatch):
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=500, height=500)
+        page.insert_text((50, 80), "Purchase Order PO-9999 VendorLine CNY 2026-05-08")
+        raw = doc.tobytes()
+    finally:
+        doc.close()
+
+    monkeypatch.setenv("MINERU_ENABLED", "false")
+    monkeypatch.setattr("app.pdf_pipeline._ocr_page", lambda *_args, **_kwargs: pytest.fail("OCR must not run"))
+    result = extract_document_from_bytes(raw, "native.pdf")
+
+    assert result.route == "native"
+    assert result.format_label == "pdf_native_pymupdf"
+    assert "PO-9999" in result.text
+
+
+def test_pdf_mixed_pages_keep_page_order(monkeypatch):
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=500, height=500)
+        page.insert_text((50, 80), "Purchase Order PO-NATIVE VendorLine CNY 2026-05-08")
+        doc.new_page(width=500, height=500)
+        raw = doc.tobytes()
+    finally:
+        doc.close()
+
+    def fake_ocr(_page, page_number, _file_name, _dpi):
+        return (f"scan page {page_number} M002 | 3 | 20", [], 0.91, "ocr_rapid(ch_en)")
+
+    monkeypatch.setenv("MINERU_ENABLED", "false")
+    monkeypatch.setattr("app.pdf_pipeline._ocr_page", fake_ocr)
+    result = extract_document_from_bytes(raw, "mixed.pdf")
+
+    assert result.route == "hybrid"
+    assert [page.source for page in result.pages] == ["native", "rapidocr"]
+    assert result.text.index("[PAGE 1]") < result.text.index("[PAGE 2]")
+
+
+def test_pdf_low_confidence_calls_mineru_once(monkeypatch):
+    calls = {"mineru": 0}
 
     monkeypatch.setenv("MINERU_ENABLED", "true")
     monkeypatch.setattr(
-        "app.document_extract._mineru_pdf_supplement",
-        lambda raw_bytes, fn="": ("mineru markdown M999", "mineru_markdown"),
+        "app.pdf_pipeline._ocr_page",
+        lambda *_args: ("Purchase Order PO-1", [], 0.50, "ocr_rapid(ch_en)"),
     )
 
-    def _page_ocr(raw_bytes, fn=""):
-        called["page_ocr"] = True
-        return "should not run", 1
+    def fake_mineru(_raw, _file_name):
+        calls["mineru"] += 1
+        return "Purchase Order PO-1\n| Material | Qty | Price |\n|---|---|---|\n| M001 | 2 | 10 |", "mineru_v4_vlm_markdown"
 
-    monkeypatch.setattr("app.document_extract._ocr_pdf_pages_supplement", _page_ocr)
+    monkeypatch.setattr("app.mineru_client.parse_pdf_bytes_with_mineru", fake_mineru)
+    result = extract_document_from_bytes(_blank_pdf(), "low.pdf")
 
-    text, fmt = extract_text_from_bytes(raw, "scan.pdf")
-    assert "M999" in text
-    assert fmt == "pdf_text+mineru_markdown"
-    assert called["page_ocr"] is False
+    assert calls["mineru"] == 1
+    assert result.mineru_used is True
+    assert result.route == "mineru_v4"
+    assert "M001" in result.text
 
 
-def test_pdf_sparse_falls_back_to_page_ocr_when_mineru_empty(monkeypatch):
-    pytest.importorskip("pypdf")
-    from io import BytesIO
-
-    from pypdf import PdfWriter
-
-    buf = BytesIO()
-    w = PdfWriter()
-    w.add_blank_page(width=200, height=200)
-    w.write(buf)
-    raw = buf.getvalue()
+def test_pdf_mineru_failure_keeps_local_result(monkeypatch):
+    from app.mineru_client import MineruClientError
 
     monkeypatch.setenv("MINERU_ENABLED", "true")
-    monkeypatch.setattr("app.document_extract._mineru_pdf_supplement", lambda raw_bytes, fn="": ("", "mineru_error"))
-    monkeypatch.setattr("app.document_extract._ocr_pdf_pages_supplement", lambda raw_bytes, fn="": ("paddle text", 1))
-
-    text, fmt = extract_text_from_bytes(raw, "scan.pdf")
-    assert "paddle text" in text
-    assert fmt == "pdf_text+ocr_first_page"
-
-
-def test_pdf_sparse_single_page_ocr_label(monkeypatch):
-    pytest.importorskip("pypdf")
-    from io import BytesIO
-
-    from pypdf import PdfWriter
-
-    buf = BytesIO()
-    w = PdfWriter()
-    w.add_blank_page(width=200, height=200)
-    w.write(buf)
-    raw = buf.getvalue()
     monkeypatch.setattr(
-        "app.document_extract._ocr_pdf_pages_supplement",
-        lambda raw_bytes, fn="": ("only", 1),
+        "app.pdf_pipeline._ocr_page",
+        lambda *_args: ("Purchase Order PO-LOCAL", [], 0.50, "ocr_rapid(ch_en)"),
     )
-    _, fmt = extract_text_from_bytes(raw, "one.pdf")
-    assert fmt == "pdf_text+ocr_first_page"
+    monkeypatch.setattr(
+        "app.mineru_client.parse_pdf_bytes_with_mineru",
+        lambda *_args: (_ for _ in ()).throw(MineruClientError("timeout")),
+    )
+    result = extract_document_from_bytes(_blank_pdf(), "fallback.pdf")
+
+    assert result.mineru_used is False
+    assert "PO-LOCAL" in result.text
+    assert any(warning.startswith("mineru_failed") for warning in result.warnings)
 
 
-def test_pdf_dense_text_layer_skips_ocr(monkeypatch):
-    raw = b"%PDF-1.4 dense text layer"
-    dense = "purchase order " * 20
-    called = {"ocr": False}
+def test_pdf_table_extraction_keeps_coordinates():
+    from app.pdf_pipeline import _extract_tables
 
-    monkeypatch.setattr("app.document_extract._extract_pdf_text_layer", lambda raw_bytes, fn="": (dense, "pypdf"))
+    class FakeTable:
+        bbox = (20, 100, 280, 220)
 
-    def _fail_if_ocr(raw_bytes, fn=""):
-        called["ocr"] = True
-        return "should not run", 1
+        @staticmethod
+        def extract():
+            return [["Material", "Qty", "Price"], ["M001", "2", "10"]]
 
-    monkeypatch.setattr("app.document_extract._ocr_pdf_pages_supplement", _fail_if_ocr)
+    class FakePage:
+        @staticmethod
+        def find_tables():
+            return type("Finder", (), {"tables": [FakeTable()]})()
 
-    text, fmt = extract_text_from_bytes(raw, "dense.pdf")
-    assert text == dense
-    assert fmt == "pdf_text"
-    assert called["ocr"] is False
+    tables = _extract_tables(FakePage(), 1)
+
+    assert tables[0].bbox == (20.0, 100.0, 280.0, 220.0)
+    assert tables[0].rows[1] == ("M001", "2", "10")
 
 
 def test_pdf_forced_ocr_runs_even_when_text_layer_is_dense(monkeypatch):

@@ -27,8 +27,7 @@ except Exception:  # pragma: no cover
 from app.document_extract import (
     classify_doc_type_from_name,
     classify_doc_type_from_text,
-    extract_pdf_text_with_forced_chinese_ocr,
-    extract_text_from_bytes,
+    extract_document_from_bytes,
     heuristic_fill_fields,
     heuristic_vendor_code,
     mapping_search_snippet,
@@ -98,8 +97,9 @@ class WorkflowState(TypedDict):
     mapping_metrics: Dict[str, int]
     # 解析后的全文（仅内存传递，不落库；预览见 ingestion.extract_preview）
     document_text: str
-    forced_ocr_retry_done: bool
     first_parse_format: str
+    parse_warnings: List[str]
+    document_parse: object | None
 
 
 class NodeExecutionError(Exception):
@@ -390,38 +390,6 @@ def _is_pdf_bytes(raw: bytes | None) -> bool:
     return bool(raw and raw.lstrip()[:4] == b"%PDF")
 
 
-def _preview_needs_chinese_party_retry(preview: OrderPreviewData | None) -> bool:
-    if preview is None:
-        return True
-    order = preview.order
-    customer = (order.customerName or "").strip()
-    delivery_addr = (order.deliveryAddr or "").strip()
-    return not customer or not delivery_addr or not _has_chinese_text(customer) or not _has_chinese_text(delivery_addr)
-
-
-def _should_retry_with_forced_pdf_ocr(
-    ing: IngestionResponse,
-    text: str,
-    preview: OrderPreviewData | None,
-    raw: bytes | None,
-) -> Tuple[bool, str, Dict[str, int]]:
-    if not _is_pdf_bytes(raw):
-        return False, "not_pdf_bytes", {}
-    if not _has_strong_purchase_order_signal(ing, text):
-        return False, "no_strong_purchase_order_signal", {}
-    if preview is None:
-        return True, "missing_preview", {"header_signals": 0, "valid_detail_rows": 0, "detail_signals": 0}
-    valid, reason, metrics = _validate_order_preview(preview)
-    if _preview_needs_chinese_party_retry(preview):
-        metrics["chinese_party_signals"] = sum(
-            1 for value in (preview.order.customerName, preview.order.deliveryAddr) if _has_chinese_text(value)
-        )
-        return True, "missing_or_non_chinese_party_fields", metrics
-    if valid:
-        return False, "preview_already_valid", metrics
-    return True, reason, metrics
-
-
 def _should_continue_on_incomplete_purchase_order_preview(ing: IngestionResponse, text: str) -> bool:
     name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
     return classify_doc_type_from_name(name) == "PO" or classify_doc_type_from_text(text) == "PO"
@@ -534,10 +502,15 @@ def _node_parse(state: WorkflowState) -> WorkflowState:
             )
             return {"chars": 0, "skipped": 1}
 
-        text, fmt = extract_text_from_bytes(raw, name)
+        parsed = state.get("document_parse")
+        if parsed is None:
+            parsed = extract_document_from_bytes(raw, name)
+            state["document_parse"] = parsed
+        text, fmt = parsed.text, parsed.format_label
         elapsed_ms = int((perf_counter() - started) * 1000)
         state["document_text"] = text
         state["first_parse_format"] = fmt
+        state["parse_warnings"] = list(parsed.warnings)
         ing.parsed_char_count = len(text)
         ing.extract_preview = truncate_for_api(text) if text else None
         ing.parse_format_label = fmt
@@ -553,7 +526,9 @@ def _node_parse(state: WorkflowState) -> WorkflowState:
         state["append_event"](
             ing,
             IngestionStatus.PARSED,
-            f"parse outcome={outcome} format={fmt} chars={len(text)} elapsed_ms={elapsed_ms} head={head!r}",
+            f"parse outcome={outcome} format={fmt} route={parsed.route} chars={len(text)} "
+            f"quality={parsed.quality_score:.3f} fallback_reason={parsed.fallback_reason or 'none'} "
+            f"mineru_used={int(parsed.mineru_used)} elapsed_ms={elapsed_ms} head={head!r}",
         )
         return {"chars": len(text), "format": fmt, "elapsed_ms": elapsed_ms}
 
@@ -612,94 +587,22 @@ def _apply_extraction_pass(ing: IngestionResponse, text: str) -> Dict[str, int]:
     return {"missing": len(ing.missing_fields), "llm_preview": int(llm_applied)}
 
 
-def _copy_extraction_state(dst: IngestionResponse, src: IngestionResponse) -> None:
-    for attr in (
-        "doc_type_hint",
-        "required_resolve_keys",
-        "missing_fields",
-        "resolved_fields",
-        "preview_data",
-        "editable_fields",
-        "issues",
-        "error_code",
-        "error_details",
-    ):
-        setattr(dst, attr, getattr(src, attr))
-
-
 def _node_extract(state: WorkflowState) -> WorkflowState:
     def _extract_impl() -> Dict[str, int]:
         ing = state["ingestion"]
         text = state["document_text"] or ""
-        first_input = ing.model_copy(deep=True)
         metrics = _apply_extraction_pass(ing, text)
-        first_preview = _preview_for_scoring(ing)
-        first_score = _preview_completeness_score(first_preview)
-        raw = get_object_bytes(ing.source_file_object_key)
-        should_retry, retry_reason, first_preview_metrics = _should_retry_with_forced_pdf_ocr(
-            ing,
-            text,
-            first_preview,
-            raw,
-        )
-        forced_ocr_applied = 0
-        retry_score = first_score
-        retry_fmt = ""
-        if should_retry and not state.get("forced_ocr_retry_done", False) and raw:
-            state["forced_ocr_retry_done"] = True
-            name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
-            try:
-                max_pages = int(os.getenv("PDF_FORCED_OCR_MAX_PAGES", "3").strip() or "3")
-            except ValueError:
-                max_pages = 3
-            retry_text, retry_fmt = extract_pdf_text_with_forced_chinese_ocr(raw, name, max_pages=max(1, min(max_pages, 3)))
-            if retry_text and retry_text != text:
-                candidate = first_input.model_copy(deep=True)
-                _apply_extraction_pass(candidate, retry_text)
-                retry_preview = _preview_for_scoring(candidate)
-                retry_score = _preview_completeness_score(retry_preview)
-                if retry_score > first_score:
-                    _copy_extraction_state(ing, candidate)
-                    state["document_text"] = retry_text
-                    ing.parsed_char_count = len(retry_text)
-                    ing.extract_preview = truncate_for_api(retry_text) if retry_text else None
-                    ing.parse_format_label = retry_fmt
-                    metrics = {
-                        "missing": len(ing.missing_fields),
-                        "llm_preview": int(candidate.preview_data is not None),
-                    }
-                    forced_ocr_applied = 1
-                else:
-                    ing.issues.append(
-                        PreviewIssue(path="parse", level="warning", message="强制 OCR 二次解析结果未优于首轮，已保留首轮结果。")
-                    )
-            state["append_event"](
-                ing,
-                IngestionStatus.EXTRACTED,
-                f"forced_ocr_retry attempted applied={forced_ocr_applied} reason={retry_reason} "
-                f"first_format={state.get('first_parse_format') or ''} retry_format={retry_fmt or 'none'} "
-                f"chars_before={len(text)} chars_after={len(state['document_text'] or '')} "
-                f"first_score={first_score} retry_score={retry_score} first_metrics={first_preview_metrics}",
-            )
         state["append_event"](
             ing,
             IngestionStatus.EXTRACTED,
             f"structured fields extracted missing_count={len(ing.missing_fields)} doc_type_hint="
             f"{ing.doc_type_hint.value if ing.doc_type_hint else 'none'} llm_preview={metrics.get('llm_preview', 0)} "
-            f"preview_score={_preview_completeness_score(_preview_for_scoring(ing))}",
+            f"preview_score={_preview_completeness_score(_preview_for_scoring(ing))} llm_passes=1",
         )
-        metrics["forced_ocr_retry"] = forced_ocr_applied
         return metrics
 
-    _run_node_with_retry(
-        state=state,
-        node_name="extract",
-        fn=_extract_impl,
-        default_max_retries=1,
-        default_backoff_ms=100,
-    )
+    _run_node(state["ingestion"], "extract", _extract_impl)
     return state
-
 
 def _run_node_with_retry(
     state: WorkflowState,
@@ -843,6 +746,44 @@ def _node_map(state: WorkflowState) -> WorkflowState:
 
 
 def _node_build_preview(state: WorkflowState) -> WorkflowState:
+    def _append_parse_warnings(ing: IngestionResponse) -> None:
+        existing = {(issue.path, issue.message) for issue in ing.issues}
+        for warning in state.get("parse_warnings", []):
+            if warning.startswith("mineru_failed"):
+                message = "MinerU 兜底解析失败，当前预览来自本地解析，请人工核对。"
+            elif warning.startswith("mineru_empty"):
+                message = "MinerU 未返回有效正文，当前预览来自本地解析，请人工核对。"
+            else:
+                message = f"PDF 解析提示：{warning}"
+            if ("parse", message) not in existing:
+                ing.issues.append(PreviewIssue(path="parse", level="warning", message=message))
+                existing.add(("parse", message))
+
+    def _append_total_amount_issue(ing: IngestionResponse, preview: OrderPreviewData) -> None:
+        raw_total = (ing.resolved_fields.get("total_order_amount") or "").strip().replace(",", "")
+        try:
+            expected_total = float(raw_total)
+        except (TypeError, ValueError):
+            return
+        if expected_total == 0 or not preview.details:
+            return
+        totals: list[float] = []
+        if all(detail.allAmount is not None for detail in preview.details):
+            totals.append(sum(float(detail.allAmount or 0) for detail in preview.details))
+        if all(detail.amount is not None for detail in preview.details):
+            totals.append(sum(float(detail.amount or 0) for detail in preview.details))
+        if not totals:
+            return
+        tolerance = max(0.10, abs(expected_total) * 0.005)
+        if all(abs(value - expected_total) > tolerance for value in totals):
+            ing.issues.append(
+                PreviewIssue(
+                    path="order.total_order_amount",
+                    level="warning",
+                    message="订单总金额与明细金额合计不一致，请人工核对。",
+                )
+            )
+
     def _preview_impl() -> Dict[str, int]:
         ing = state["ingestion"]
         existing_preview = ing.preview_data
@@ -872,6 +813,7 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
         if not preview_valid:
             if _should_continue_on_incomplete_purchase_order_preview(ing, state["document_text"] or ""):
                 apply_preview_to_ingestion(ing, preview)
+                _append_parse_warnings(ing)
                 ing.error_code = None
                 ing.error_details = {}
                 state["append_event"](
@@ -900,7 +842,29 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             )
         customer_material_metrics: Dict[str, int] = {}
         customer_name = (preview.order.customerName or "").strip()
+        customer_issues: List[PreviewIssue] = []
         if customer_name:
+            try:
+                customer_rows = state["erp"].search_customers(ing.org_id, customer_name, 1, 20)
+                normalized_customer = re.sub(r"\s+", "", customer_name).casefold()
+                exact_customer = any(
+                    re.sub(r"\s+", "", str(row.get("customerName") or row.get("name") or "")).casefold()
+                    == normalized_customer
+                    for row in customer_rows
+                )
+                if not exact_customer:
+                    customer_issues.append(
+                        PreviewIssue(
+                            path="order.customerName",
+                            level="warning",
+                            message=f"客户名称 {customer_name} 未精确匹配 ERP 客户主数据，请人工核对。",
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("customer_master_validation_failed ingestion_id=%s err=%s", ing.ingestion_id, exc)
+                customer_issues.append(
+                    PreviewIssue(path="order.customerName", level="warning", message="ERP 客户主数据校验失败，请人工核对。")
+                )
             try:
                 rows = state["erp"].get_customer_material_details_by_customer(customer_name)
             except Exception as exc:
@@ -917,11 +881,23 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
                 preview, customer_material_metrics, mapping_issues = apply_customer_material_mapping(preview, rows)
             else:
                 customer_material_metrics = {"mapping_rows": 0, "matched": 0, "exact": 0, "normalized": 0, "unmatched": 0}
-                mapping_issues = []
+                mapping_issues = [
+                    PreviewIssue(
+                        path=f"details[{index}].materialCode",
+                        level="warning",
+                        message=f"物料编码 {detail.materialCode} 未取得 ERP 客户物料映射，请人工核对。",
+                    )
+                    for index, detail in enumerate(preview.details)
+                    if (detail.materialCode or detail.customerMaterialNo).strip()
+                ]
         else:
             customer_material_metrics = {"mapping_rows": 0, "matched": 0, "exact": 0, "normalized": 0, "unmatched": 0}
             mapping_issues = []
         apply_preview_to_ingestion(ing, preview)
+        _append_parse_warnings(ing)
+        _append_total_amount_issue(ing, preview)
+        if customer_issues:
+            ing.issues.extend(customer_issues)
         if mapping_issues:
             ing.issues.extend(mapping_issues)
         state["append_event"](
@@ -1081,8 +1057,9 @@ def run_ingestion_processing_workflow(
         "append_event": append_event,
         "mapping_metrics": {},
         "document_text": "",
-        "forced_ocr_retry_done": False,
         "first_parse_format": "",
+        "parse_warnings": [],
+        "document_parse": None,
     }
     try:
         if StateGraph is not None and END is not None:

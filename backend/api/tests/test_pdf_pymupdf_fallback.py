@@ -36,4 +36,4 @@ def test_pdf_extract_uses_pymupdf_when_pypdf_import_fails(monkeypatch: pytest.Mo
 
     text, fmt = extract_text_from_bytes(raw, "订单.pdf")
     assert "PO-9999" in text
-    assert fmt == "pdf_text_pymupdf"
+    assert fmt == "pdf_native_pymupdf"

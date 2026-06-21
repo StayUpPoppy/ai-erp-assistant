@@ -41,7 +41,7 @@ services:
       context: ../..
       dockerfile: deploy/ecs-panel/Dockerfile.api
       args:
-        INSTALL_PADDLEOCR: ${INSTALL_PADDLEOCR:-true}
+        INSTALL_PADDLEOCR: ${INSTALL_PADDLEOCR:-false}
         DEBIAN_MIRROR: ${DEBIAN_MIRROR:-https://mirrors.aliyun.com/debian}
         PADDLEPADDLE_VERSION: ${PADDLEPADDLE_VERSION:-3.2.0}
         PADDLEPADDLE_INDEX_URL: ${PADDLEPADDLE_INDEX_URL:-https://www.paddlepaddle.org.cn/packages/stable/cpu/}
@@ -68,7 +68,7 @@ services:
       context: ../..
       dockerfile: deploy/ecs-panel/Dockerfile.api
       args:
-        INSTALL_PADDLEOCR: ${INSTALL_PADDLEOCR:-true}
+        INSTALL_PADDLEOCR: ${INSTALL_PADDLEOCR:-false}
         DEBIAN_MIRROR: ${DEBIAN_MIRROR:-https://mirrors.aliyun.com/debian}
         PADDLEPADDLE_VERSION: ${PADDLEPADDLE_VERSION:-3.2.0}
         PADDLEPADDLE_INDEX_URL: ${PADDLEPADDLE_INDEX_URL:-https://www.paddlepaddle.org.cn/packages/stable/cpu/}

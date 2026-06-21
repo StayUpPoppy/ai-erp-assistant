@@ -145,6 +145,9 @@ def build_order_preview_data(ingestion: IngestionResponse) -> OrderPreviewData |
 
 
 def preview_issues(preview: OrderPreviewData) -> List[PreviewIssue]:
+    def inconsistent(actual: float, expected: float) -> bool:
+        return abs(actual - expected) > max(0.05, abs(expected) * 0.005)
+
     issues: List[PreviewIssue] = []
     if not preview.details:
         issues.append(PreviewIssue(path="details", level="error", message="未识别到订单明细，请至少补充一行明细"))
@@ -154,12 +157,43 @@ def preview_issues(preview: OrderPreviewData) -> List[PreviewIssue]:
             issues.append(PreviewIssue(path=f"details[{idx}].qty", level="warning", message="数量必须大于 0"))
         if detail.amount is not None and detail.price is not None and detail.qty is not None:
             expected = round(detail.price * detail.qty, 6)
-            if abs(expected - detail.amount) > 0.01:
+            if inconsistent(detail.amount, expected):
                 issues.append(
                     PreviewIssue(
                         path=f"details[{idx}].amount",
-                        level="info",
-                        message="不含税金额与单价*数量不完全一致，建议人工核对",
+                        level="warning",
+                        message="不含税金额与数量×不含税单价不一致，请人工核对",
+                    )
+                )
+        if detail.allAmount is not None and detail.taxPrice is not None and detail.qty is not None:
+            expected = round(detail.taxPrice * detail.qty, 6)
+            if inconsistent(detail.allAmount, expected):
+                issues.append(
+                    PreviewIssue(
+                        path=f"details[{idx}].allAmount",
+                        level="warning",
+                        message="含税金额与数量×含税单价不一致，请人工核对",
+                    )
+                )
+        if detail.amount is not None and detail.taxAmount is not None and detail.allAmount is not None:
+            expected = round(detail.amount + detail.taxAmount, 6)
+            if inconsistent(detail.allAmount, expected):
+                issues.append(
+                    PreviewIssue(
+                        path=f"details[{idx}].taxAmount",
+                        level="warning",
+                        message="不含税金额＋税额与含税金额不一致，请人工核对",
+                    )
+                )
+        if detail.price is not None and detail.taxPrice is not None and detail.tax is not None:
+            tax_rate = detail.tax / 100 if abs(detail.tax) > 1 else detail.tax
+            expected = round(detail.price * (1 + tax_rate), 6)
+            if inconsistent(detail.taxPrice, expected):
+                issues.append(
+                    PreviewIssue(
+                        path=f"details[{idx}].taxPrice",
+                        level="warning",
+                        message="含税单价与不含税单价及税率不一致，请人工核对",
                     )
                 )
     return issues
