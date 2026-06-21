@@ -1,13 +1,17 @@
 import hashlib
+import hmac
 import json
 import logging
-from urllib.parse import unquote
+import mimetypes
+import os
+from datetime import datetime, timezone
+from urllib.parse import quote, unquote
 from threading import Thread
 
 from typing import Any, Dict, Iterator, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from app.erp_client import ErpClientError, clear_last_upstream_meta, erp_adapter_health_payload, erp_client
 from app.erp_payload_preview import build_datynk_sale_order_payload
@@ -58,7 +62,14 @@ from app.schemas import (
 )
 from app.tools.pdf_to_erp import pdf_to_erp_tool
 from app.queue_client import enqueue_ingestion_job, get_ingestion_fallback_mode, queue_health_payload, remove_ingestion_job
-from app.storage_client import save_binary_file
+from app.storage_client import (
+    ObjectNotFoundError,
+    ObjectStorageUnavailableError,
+    iter_object_bytes,
+    save_binary_file,
+    stat_object,
+    storage_health_payload,
+)
 from app.store import (
     append_ingestion_event,
     confirm_preview_for_ingestion,
@@ -101,6 +112,10 @@ def service_index() -> Dict[str, Any]:
             "ingestion_resolve": {"method": "POST", "path": "/ingestions/{ingestion_id}/resolve"},
             "ingestion_confirm_preview": {"method": "POST", "path": "/ingestions/{ingestion_id}/confirm-preview"},
             "ingestion_create_draft": {"method": "POST", "path": "/ingestions/{ingestion_id}/create-draft"},
+            "erp_source_file": {
+                "method": "GET",
+                "path": "/integrations/erp/ingestions/{ingestion_id}/source-file",
+            },
         },
     }
 
@@ -222,6 +237,7 @@ def health() -> HealthResponse:
         extraction_profile_json_count=prof_n,
         **tess,
         **mineru_health_payload(),
+        **storage_health_payload(),
         **queue_health_payload(),
         **erp_adapter_health_payload(),
         **erp_qa_reports_health_payload(),
@@ -246,6 +262,16 @@ def _form_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _source_content_type(file_name: str, declared_type: Optional[str], raw: bytes) -> str:
+    if raw.startswith(b"%PDF-"):
+        return "application/pdf"
+    declared = (declared_type or "").strip().lower()
+    if declared and declared != "application/octet-stream":
+        return declared
+    guessed, _ = mimetypes.guess_type(file_name)
+    return guessed or "application/octet-stream"
+
+
 async def _create_ingestion_from_upload_file(
     *,
     request: Request,
@@ -267,7 +293,24 @@ async def _create_ingestion_from_upload_file(
 
     file_hash = hashlib.sha256(raw).hexdigest()
     file_name = file.filename or "upload.bin"
-    object_key = save_binary_file(raw=raw, file_name=file_name, file_hash=file_hash, org_id=org_id)
+    content_type = _source_content_type(file_name, file.content_type, raw)
+    uploaded_at = datetime.now(timezone.utc).isoformat()
+    try:
+        object_key = save_binary_file(
+            raw=raw,
+            file_name=file_name,
+            file_hash=file_hash,
+            org_id=org_id,
+            content_type=content_type,
+        )
+    except ObjectStorageUnavailableError as exc:
+        logger.error(
+            "upload_object_storage_unavailable request_id=%s org_id=%s hash_prefix=%s",
+            getattr(request.state, "request_id", "n/a"),
+            org_id,
+            file_hash[:12],
+        )
+        raise HTTPException(status_code=503, detail="OBJECT_STORAGE_UNAVAILABLE") from exc
 
     prof = (extraction_profile_id or "").strip() or None
     payload = UploadRequest(
@@ -276,12 +319,24 @@ async def _create_ingestion_from_upload_file(
         user_id=user_id,
         org_id=org_id,
         source_file_object_key=object_key,
+        source_file_size=len(raw),
+        source_file_content_type=content_type,
+        source_file_uploaded_at=uploaded_at,
         extraction_profile_id=prof,
         force_reprocess=_form_bool(force_reprocess),
     )
 
     payload = _apply_current_user_to_upload(payload, request)
-    ingestion = create_upload(payload)
+    try:
+        ingestion = create_upload(payload)
+    except Exception:
+        logger.exception(
+            "upload_database_persist_failed_orphan_candidate request_id=%s object_key=%s hash_prefix=%s",
+            getattr(request.state, "request_id", "n/a"),
+            object_key or "none",
+            file_hash[:12],
+        )
+        raise
     should_dispatch = ingestion.status == IngestionStatus.UPLOADED
     enqueued = enqueue_ingestion_job(ingestion.ingestion_id) if should_dispatch else False
     request_id = getattr(request.state, "request_id", "n/a")
@@ -392,6 +447,84 @@ def _assert_ingestion_owner(ingestion: IngestionResponse, request: Request) -> N
         current_user.userName,
     )
     raise HTTPException(status_code=403, detail="FORBIDDEN_INGESTION_OWNER")
+
+
+def _assert_source_file_api_token(request: Request) -> None:
+    expected = os.getenv("SOURCE_FILE_API_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="SOURCE_FILE_API_DISABLED")
+    authorization = request.headers.get("authorization", "")
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not provided or not hmac.compare_digest(provided.strip(), expected):
+        raise HTTPException(
+            status_code=401,
+            detail="INVALID_SOURCE_FILE_API_TOKEN",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def _parse_source_file_range(value: str, size: int) -> Optional[tuple[int, int]]:
+    if not value:
+        return None
+    unit, separator, raw_range = value.strip().partition("=")
+    if unit.lower() != "bytes" or not separator or "," in raw_range:
+        raise ValueError("invalid byte range")
+    start_raw, dash, end_raw = raw_range.strip().partition("-")
+    if not dash or (not start_raw and not end_raw) or size <= 0:
+        raise ValueError("invalid byte range")
+    try:
+        if not start_raw:
+            suffix_length = int(end_raw)
+            if suffix_length <= 0:
+                raise ValueError("invalid suffix range")
+            start = max(size - suffix_length, 0)
+            end = size - 1
+        else:
+            start = int(start_raw)
+            end = int(end_raw) if end_raw else size - 1
+            if start < 0 or start >= size or end < start:
+                raise ValueError("range outside object")
+            end = min(end, size - 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid byte range") from exc
+    return start, end
+
+
+def _source_file_headers(ingestion: IngestionResponse, *, size: int, content_type: str, etag: str) -> Dict[str, str]:
+    original_name = (ingestion.source_file_name or "source-file.pdf").replace("\r", "").replace("\n", "")
+    ascii_name = "source-file.pdf" if content_type == "application/pdf" else "source-file.bin"
+    encoded_name = quote(original_name, safe="")
+    normalized_etag = (etag or ingestion.file_hash or "").strip().strip('"')
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded_name}',
+        "Content-Length": str(size),
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if normalized_etag:
+        headers["ETag"] = f'"{normalized_etag}"'
+    return headers
+
+
+def _load_source_file(ingestion_id: str, request: Request) -> tuple[IngestionResponse, Any, str]:
+    _assert_source_file_api_token(request)
+    ingestion = get_ingestion(ingestion_id)
+    if ingestion is None or not ingestion.source_file_object_key:
+        raise HTTPException(status_code=404, detail="SOURCE_FILE_NOT_FOUND")
+    fallback_type = ingestion.source_file_content_type or (
+        "application/pdf" if (ingestion.source_file_name or "").lower().endswith(".pdf") else "application/octet-stream"
+    )
+    try:
+        stat = stat_object(ingestion.source_file_object_key, fallback_content_type=fallback_type)
+    except ObjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="SOURCE_FILE_NOT_FOUND") from exc
+    except ObjectStorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="OBJECT_STORAGE_UNAVAILABLE") from exc
+    content_type = ingestion.source_file_content_type or stat.content_type or fallback_type
+    if content_type == "application/octet-stream" and (ingestion.source_file_name or "").lower().endswith(".pdf"):
+        content_type = "application/pdf"
+    return ingestion, stat, content_type
 
 
 @router.get("/current-user", response_model=CurrentUserResponse)
@@ -858,6 +991,60 @@ def get_ingestion_document_route(
         include_full_text,
     )
     return DocumentParseExport.model_validate(payload)
+
+
+@router.head("/integrations/erp/ingestions/{ingestion_id}/source-file")
+def head_erp_source_file_route(ingestion_id: str, request: Request) -> Response:
+    ingestion, stat, content_type = _load_source_file(ingestion_id, request)
+    headers = _source_file_headers(
+        ingestion,
+        size=stat.size,
+        content_type=content_type,
+        etag=stat.etag,
+    )
+    return Response(status_code=200, media_type=content_type, headers=headers)
+
+
+@router.get("/integrations/erp/ingestions/{ingestion_id}/source-file")
+def get_erp_source_file_route(ingestion_id: str, request: Request) -> StreamingResponse:
+    ingestion, stat, content_type = _load_source_file(ingestion_id, request)
+    try:
+        byte_range = _parse_source_file_range(request.headers.get("range", ""), stat.size)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=416,
+            detail="INVALID_SOURCE_FILE_RANGE",
+            headers={"Content-Range": f"bytes */{stat.size}"},
+        ) from exc
+
+    status_code = 200
+    offset = 0
+    length = stat.size
+    headers = _source_file_headers(
+        ingestion,
+        size=stat.size,
+        content_type=content_type,
+        etag=stat.etag,
+    )
+    if byte_range is not None:
+        start, end = byte_range
+        status_code = 206
+        offset = start
+        length = end - start + 1
+        headers["Content-Range"] = f"bytes {start}-{end}/{stat.size}"
+        headers["Content-Length"] = str(length)
+
+    try:
+        body = iter_object_bytes(
+            ingestion.source_file_object_key or "",
+            offset=offset,
+            length=length,
+        )
+    except ObjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="SOURCE_FILE_NOT_FOUND") from exc
+    except ObjectStorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="OBJECT_STORAGE_UNAVAILABLE") from exc
+    return StreamingResponse(body, status_code=status_code, media_type=content_type, headers=headers)
 
 
 @router.get("/ingestions/{ingestion_id}/erp-payload", response_model=ErpPayloadPreviewResponse)

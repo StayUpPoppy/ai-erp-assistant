@@ -156,6 +156,9 @@ async def test_assistant_files_upload_routes_to_pdf_to_erp(monkeypatch):
     assert res.tool_result is not None
     assert res.tool_result.ingestion is not None
     assert res.tool_result.ingestion.source_file_name == "order.pdf"
+    assert res.tool_result.ingestion.source_file_size == len(b"%PDF-1.4 mock")
+    assert res.tool_result.ingestion.source_file_content_type == "application/pdf"
+    assert res.tool_result.ingestion.source_file_uploaded_at
 
     session = assistant_session_route("s-test", _build_request("/assistant/sessions/s-test"))
     assert session.active_task is not None

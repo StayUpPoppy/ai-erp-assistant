@@ -192,6 +192,7 @@ def test_upload_route_force_reprocess_resets_and_enqueues(monkeypatch):
     reset = get_ingestion(second.ingestion_id)
 
     assert second.ingestion_id == first.ingestion_id
+    assert second.file_id == first.file_id
     assert second.status == IngestionStatus.UPLOADED
     assert reset is not None
     assert reset.status == IngestionStatus.UPLOADED

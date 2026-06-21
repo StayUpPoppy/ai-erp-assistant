@@ -47,6 +47,9 @@ class ErrorCode(str, Enum):
 
 class HealthResponse(BaseModel):
     status: str
+    minio_configured: bool = False
+    object_storage_required: bool = False
+    source_file_api_enabled: bool = False
     tesseract_available: bool = False
     tesseract_resolution: Optional[str] = None
     tesseract_cmd: Optional[str] = None
@@ -128,6 +131,9 @@ class UploadRequest(BaseModel):
     org_id: str
     # 原始文件在对象存储中的 key（可为空：例如未配置 MinIO 时降级运行）。
     source_file_object_key: Optional[str] = None
+    source_file_size: Optional[int] = None
+    source_file_content_type: Optional[str] = None
+    source_file_uploaded_at: Optional[str] = None
     # 解析档案 id（backend/config/extraction_profiles/{id}.json）；为空则按 org_id / default.json 自动解析。
     extraction_profile_id: Optional[str] = None
     force_reprocess: bool = False
@@ -150,6 +156,9 @@ class CreateIngestionRequest(BaseModel):
     source_file_object_key: Optional[str] = None
     # 原始上传文件名（multipart 等）；无对象存储时仍用于扩展名识别与单据类型启发式分类。
     source_file_name: Optional[str] = None
+    source_file_size: Optional[int] = None
+    source_file_content_type: Optional[str] = None
+    source_file_uploaded_at: Optional[str] = None
     doc_type_hint: Optional[DocType] = None
     extraction_profile_id: Optional[str] = None
     force_reprocess: bool = False
@@ -174,6 +183,9 @@ class IngestionResponse(BaseModel):
     org_id: str
     source_file_object_key: Optional[str] = None
     source_file_name: Optional[str] = None
+    source_file_size: Optional[int] = None
+    source_file_content_type: Optional[str] = None
+    source_file_uploaded_at: Optional[str] = None
     extract_version: str
     model_version: str
     prompt_version: str

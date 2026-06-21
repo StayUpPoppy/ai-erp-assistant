@@ -98,16 +98,27 @@ def _merge_upload_payload_into_ingestion(ing: IngestionResponse, payload: Create
     同 file_hash 命中幂等返回时：若本次请求带了新的 object_key（例如先前无 MinIO 未落盘，
     现已写入 __local__/ 或 MinIO），则更新记录，避免永远卡在 parse_skipped_no_bytes。
     """
+    changed = False
     new_key = (payload.source_file_object_key or "").strip()
-    if not new_key:
-        return False
     old_key = (ing.source_file_object_key or "").strip()
-    if old_key == new_key:
-        return False
-    ing.source_file_object_key = payload.source_file_object_key
+    if new_key and old_key != new_key:
+        ing.source_file_object_key = payload.source_file_object_key
+        changed = True
     if payload.source_file_name and str(payload.source_file_name).strip():
-        ing.source_file_name = str(payload.source_file_name).strip()
-    return True
+        value = str(payload.source_file_name).strip()
+        if ing.source_file_name != value:
+            ing.source_file_name = value
+            changed = True
+    if payload.source_file_size is not None and ing.source_file_size != payload.source_file_size:
+        ing.source_file_size = payload.source_file_size
+        changed = True
+    if payload.source_file_content_type and ing.source_file_content_type != payload.source_file_content_type:
+        ing.source_file_content_type = payload.source_file_content_type
+        changed = True
+    if payload.source_file_uploaded_at and ing.source_file_uploaded_at != payload.source_file_uploaded_at:
+        ing.source_file_uploaded_at = payload.source_file_uploaded_at
+        changed = True
+    return changed
 
 
 def _append_event(ingestion: IngestionResponse, status: IngestionStatus, message: str) -> None:
@@ -176,6 +187,9 @@ def _new_ingestion_model(payload: CreateIngestionRequest, ingestion_id: str) -> 
         org_id=payload.org_id,
         source_file_object_key=payload.source_file_object_key,
         source_file_name=payload.source_file_name,
+        source_file_size=payload.source_file_size,
+        source_file_content_type=payload.source_file_content_type,
+        source_file_uploaded_at=payload.source_file_uploaded_at,
         extract_version=payload.extract_version,
         model_version=payload.model_version,
         prompt_version=payload.prompt_version,
@@ -190,7 +204,8 @@ def _new_ingestion_model(payload: CreateIngestionRequest, ingestion_id: str) -> 
 
 
 def _reset_ingestion_for_reprocess(ingestion: IngestionResponse, payload: CreateIngestionRequest) -> IngestionResponse:
-    fresh = _new_ingestion_model(payload, ingestion.ingestion_id)
+    stable_payload = payload.model_copy(update={"file_id": ingestion.file_id})
+    fresh = _new_ingestion_model(stable_payload, ingestion.ingestion_id)
     _append_event(fresh, IngestionStatus.UPLOADED, "file reprocess requested by user")
     return fresh
 
@@ -346,6 +361,9 @@ def create_upload(payload: UploadRequest) -> IngestionResponse:
         org_id=payload.org_id,
         source_file_object_key=payload.source_file_object_key,
         source_file_name=payload.file_name,
+        source_file_size=payload.source_file_size,
+        source_file_content_type=payload.source_file_content_type,
+        source_file_uploaded_at=payload.source_file_uploaded_at,
         extraction_profile_id=payload.extraction_profile_id,
         force_reprocess=payload.force_reprocess,
         extract_version=payload.extract_version,

@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from app.storage_client import LOCAL_OBJECT_KEY_PREFIX, get_object_bytes, save_binary_file
+from app.storage_client import (
+    LOCAL_OBJECT_KEY_PREFIX,
+    ObjectStorageUnavailableError,
+    get_object_bytes,
+    iter_object_bytes,
+    save_binary_file,
+    stat_object,
+)
 
 
 @pytest.fixture
@@ -41,3 +48,18 @@ def test_get_object_bytes_reads_local_fallback(
 
 def test_save_binary_file_empty_returns_none(no_minio_env: None) -> None:
     assert save_binary_file(b"", "empty.bin", "c" * 64, "org") is None
+
+
+def test_required_object_storage_does_not_fallback_to_container_disk(no_minio_env: None, monkeypatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_REQUIRED", "true")
+    with pytest.raises(ObjectStorageUnavailableError):
+        save_binary_file(b"pdf", "order.pdf", "d" * 64, "org")
+
+
+def test_local_object_stat_and_range_iteration(no_minio_env: None, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LOCAL_OBJECT_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("OBJECT_STORAGE_REQUIRED", raising=False)
+    key = save_binary_file(b"0123456789", "doc.pdf", "e" * 64, "org", content_type="application/pdf")
+    assert key is not None
+    assert stat_object(key, fallback_content_type="application/pdf").size == 10
+    assert b"".join(iter_object_bytes(key, offset=2, length=4)) == b"2345"

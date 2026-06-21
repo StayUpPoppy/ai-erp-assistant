@@ -81,6 +81,15 @@ def row_to_ingestion(row: IngestionRow) -> IngestionResponse:
         source_file_name = str(source_file_name)
     else:
         source_file_name = None
+    source_file_size = ctx.get("source_file_size")
+    try:
+        source_file_size = int(source_file_size) if source_file_size is not None else None
+    except (TypeError, ValueError):
+        source_file_size = None
+    source_file_content_type = ctx.get("source_file_content_type")
+    source_file_content_type = str(source_file_content_type) if source_file_content_type else None
+    source_file_uploaded_at = ctx.get("source_file_uploaded_at")
+    source_file_uploaded_at = str(source_file_uploaded_at) if source_file_uploaded_at else None
 
     vendor_candidates = _coerce_candidate_list(ctx.get("vendor_candidates"))
     material_candidates = _coerce_candidate_list(ctx.get("material_candidates"))
@@ -134,6 +143,9 @@ def row_to_ingestion(row: IngestionRow) -> IngestionResponse:
         org_id=row.org_id,
         source_file_object_key=row.source_file_object_key,
         source_file_name=source_file_name,
+        source_file_size=source_file_size,
+        source_file_content_type=source_file_content_type,
+        source_file_uploaded_at=source_file_uploaded_at,
         extract_version=row.extract_version,
         model_version=row.model_version,
         prompt_version=row.prompt_version,
@@ -200,6 +212,18 @@ def apply_ingestion_to_row(row: IngestionRow, ing: IngestionResponse) -> None:
         ctx.pop("source_file_name", None)
     else:
         ctx["source_file_name"] = ing.source_file_name
+    if ing.source_file_size is None:
+        ctx.pop("source_file_size", None)
+    else:
+        ctx["source_file_size"] = int(ing.source_file_size)
+    if ing.source_file_content_type:
+        ctx["source_file_content_type"] = ing.source_file_content_type
+    else:
+        ctx.pop("source_file_content_type", None)
+    if ing.source_file_uploaded_at:
+        ctx["source_file_uploaded_at"] = ing.source_file_uploaded_at
+    else:
+        ctx.pop("source_file_uploaded_at", None)
     if ing.vendor_candidates:
         ctx["vendor_candidates"] = [dict(x) for x in ing.vendor_candidates]
     else:
