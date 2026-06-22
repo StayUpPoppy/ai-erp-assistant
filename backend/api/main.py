@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 
 from app.logging_config import setup_logging
 from app.routes import router
@@ -58,7 +59,13 @@ async def lifespan(app: FastAPI):
 
 
 # 这是 API 进程入口：挂载路由、CORS、请求追踪中间件。
-app = FastAPI(title="AI ERP Assistant API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="AI ERP Assistant API",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+)
 
 # 允许独立前端（Next.js 本地开发）跨域调用 API，否则浏览器会拦截 fetch。
 # 默认覆盖常见本机场景（含非 3000 端口、IPv6）；局域网 IP 或生产域名请设 CORS_ALLOW_ORIGINS。
@@ -97,6 +104,24 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+
+@app.get("/docs", include_in_schema=False)
+def swagger_docs():
+    # Relative URL works both directly (/docs -> /openapi.json) and through the
+    # Next.js proxy (/api/orchestrator/docs -> /api/orchestrator/openapi.json).
+    return get_swagger_ui_html(
+        openapi_url="./openapi.json",
+        title=f"{app.title} - Swagger UI",
+    )
+
+
+@app.get("/redoc", include_in_schema=False)
+def redoc_docs():
+    return get_redoc_html(
+        openapi_url="./openapi.json",
+        title=f"{app.title} - ReDoc",
+    )
 
 
 @app.middleware("http")

@@ -10,8 +10,9 @@ from threading import Thread
 
 from typing import Any, Dict, Iterator, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Security, UploadFile
 from fastapi.responses import Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.erp_client import ErpClientError, clear_last_upstream_meta, erp_adapter_health_payload, erp_client
 from app.erp_payload_preview import build_datynk_sale_order_payload
@@ -84,6 +85,12 @@ from app.store import (
 
 router = APIRouter()
 logger = logging.getLogger("ai_erp_api")
+
+_SOURCE_FILE_BEARER = HTTPBearer(
+    auto_error=False,
+    scheme_name="SourceFileBearer",
+    description="ERP backend source-file service token",
+)
 
 _ERP_USER_INFO_COOKIE_NAMES = ("userInfo", "userinfo")
 _LEGACY_FRONTEND_USER_IDS = {"", "u-demo", "演示用户"}
@@ -449,18 +456,31 @@ def _assert_ingestion_owner(ingestion: IngestionResponse, request: Request) -> N
     raise HTTPException(status_code=403, detail="FORBIDDEN_INGESTION_OWNER")
 
 
-def _assert_source_file_api_token(request: Request) -> None:
+def _assert_source_file_token_value(provided: str) -> None:
     expected = os.getenv("SOURCE_FILE_API_TOKEN", "").strip()
     if not expected:
         raise HTTPException(status_code=503, detail="SOURCE_FILE_API_DISABLED")
-    authorization = request.headers.get("authorization", "")
-    scheme, _, provided = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not provided or not hmac.compare_digest(provided.strip(), expected):
+    if not provided or not hmac.compare_digest(provided.strip(), expected):
         raise HTTPException(
             status_code=401,
             detail="INVALID_SOURCE_FILE_API_TOKEN",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def _assert_source_file_api_token(request: Request) -> None:
+    authorization = request.headers.get("authorization", "")
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        provided = ""
+    _assert_source_file_token_value(provided)
+
+
+def _source_file_api_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_SOURCE_FILE_BEARER),
+) -> None:
+    provided = credentials.credentials if credentials and credentials.scheme.lower() == "bearer" else ""
+    _assert_source_file_token_value(provided)
 
 
 def _parse_source_file_range(value: str, size: int) -> Optional[tuple[int, int]]:
@@ -993,7 +1013,10 @@ def get_ingestion_document_route(
     return DocumentParseExport.model_validate(payload)
 
 
-@router.head("/integrations/erp/ingestions/{ingestion_id}/source-file")
+@router.head(
+    "/integrations/erp/ingestions/{ingestion_id}/source-file",
+    dependencies=[Depends(_source_file_api_auth)],
+)
 def head_erp_source_file_route(ingestion_id: str, request: Request) -> Response:
     ingestion, stat, content_type = _load_source_file(ingestion_id, request)
     headers = _source_file_headers(
@@ -1005,7 +1028,10 @@ def head_erp_source_file_route(ingestion_id: str, request: Request) -> Response:
     return Response(status_code=200, media_type=content_type, headers=headers)
 
 
-@router.get("/integrations/erp/ingestions/{ingestion_id}/source-file")
+@router.get(
+    "/integrations/erp/ingestions/{ingestion_id}/source-file",
+    dependencies=[Depends(_source_file_api_auth)],
+)
 def get_erp_source_file_route(ingestion_id: str, request: Request) -> StreamingResponse:
     ingestion, stat, content_type = _load_source_file(ingestion_id, request)
     try:
