@@ -65,6 +65,9 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
+    # Resolve API calls relative to the served OpenAPI document. This works at
+    # both /openapi.json locally and /api/orchestrator/openapi.json in production.
+    servers=[{"url": ".", "description": "Current API base"}],
 )
 
 # 允许独立前端（Next.js 本地开发）跨域调用 API，否则浏览器会拦截 fetch。
