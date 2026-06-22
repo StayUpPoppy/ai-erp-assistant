@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import http.cookiejar
@@ -8,6 +9,7 @@ import logging
 import os
 import time
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib import error, parse, request
 from uuid import uuid4
@@ -38,6 +40,15 @@ _MASTER_DISPLAY_ALIASES: Dict[str, Dict[str, Tuple[str, ...]]] = {
 
 # 记录最近一次 RealErpClient urllib 响应元数据，供 store 写入 erp_call_log；每次新 HTTP 请求前清空。
 _last_upstream_meta: ContextVar[Optional[Dict[str, Any]]] = ContextVar("erp_last_upstream_meta", default=None)
+
+
+@dataclass(frozen=True)
+class ErpSourceAttachment:
+    """Original source file attached transiently to an ERP create request."""
+
+    file_name: str
+    file_type: str
+    content: bytes
 
 
 def clear_last_upstream_meta() -> None:
@@ -80,7 +91,13 @@ class ErpClientProtocol(Protocol):
     ) -> Tuple[bool, List[str]]:
         ...
 
-    def create_draft(self, doc_type: str, payload: Dict[str, str], idempotency_key: str) -> Tuple[str, str]:
+    def create_draft(
+        self,
+        doc_type: str,
+        payload: Dict[str, str],
+        idempotency_key: str,
+        source_attachment: Optional[ErpSourceAttachment] = None,
+    ) -> Tuple[str, str]:
         ...
 
     def search_sale_orders(
@@ -184,8 +201,19 @@ class CompositeDualErpClient:
     ) -> Tuple[bool, List[str]]:
         return self._transactional.validate_draft(doc_type, payload, required_keys=required_keys)
 
-    def create_draft(self, doc_type: str, payload: Dict[str, str], idempotency_key: str) -> Tuple[str, str]:
-        return self._transactional.create_draft(doc_type, payload, idempotency_key)
+    def create_draft(
+        self,
+        doc_type: str,
+        payload: Dict[str, str],
+        idempotency_key: str,
+        source_attachment: Optional[ErpSourceAttachment] = None,
+    ) -> Tuple[str, str]:
+        return self._transactional.create_draft(
+            doc_type,
+            payload,
+            idempotency_key,
+            source_attachment=source_attachment,
+        )
 
     def save_customer(self, payload: Dict[str, str]) -> Tuple[str, str]:
         return self._transactional.save_customer(payload)
@@ -319,7 +347,14 @@ class MockErpClient:
         missing = [k for k in required if not (payload.get(k) or "").strip()]
         return (len(missing) == 0, missing)
 
-    def create_draft(self, doc_type: str, payload: Dict[str, str], idempotency_key: str) -> Tuple[str, str]:
+    def create_draft(
+        self,
+        doc_type: str,
+        payload: Dict[str, str],
+        idempotency_key: str,
+        source_attachment: Optional[ErpSourceAttachment] = None,
+    ) -> Tuple[str, str]:
+        _ = source_attachment
         draft_no = f"{doc_type}-DRAFT-{uuid4().hex[:8].upper()}"
         draft_url = f"https://mock-erp.local/drafts/{draft_no}"
         return draft_no, draft_url
@@ -362,6 +397,13 @@ class RealErpClient:
         self.base_url = base_url.rstrip("/")
         self.token = token.strip()
         self.timeout_seconds = timeout_seconds
+        try:
+            self.create_timeout_seconds = max(
+                1,
+                int(os.getenv("ERP_CREATE_TIMEOUT_SECONDS", "120").strip()),
+            )
+        except ValueError:
+            self.create_timeout_seconds = 120
         self.auth_mode = os.getenv("ERP_AUTH_MODE", "bearer").strip().lower()
         self.api_key_header = os.getenv("ERP_API_KEY_HEADER", "X-API-Key").strip() or "X-API-Key"
         self.api_key = os.getenv("ERP_API_KEY", "").strip()
@@ -649,16 +691,37 @@ class RealErpClient:
         self._cookie_logged_in = True
         logger.info("erp_cookie_login_ok path=%s", self._cookie_login_path)
 
-    def _open_request(self, req: request.Request):
+    def _open_request(self, req: request.Request, *, timeout_seconds: Optional[int] = None):
+        timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
         if getattr(self, "_cookie_opener", None) is not None:
             self._ensure_cookie_session()
-            return self._cookie_opener.open(req, timeout=self.timeout_seconds)
-        return request.urlopen(req, timeout=self.timeout_seconds)
+            return self._cookie_opener.open(req, timeout=timeout)
+        return request.urlopen(req, timeout=timeout)
 
-    def _request_json(self, method: str, path: str, payload: Optional[Dict] = None) -> Dict:
-        return self._request_json_internal(method, path, payload, allow_refresh=True)
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Dict] = None,
+        *,
+        timeout_seconds: Optional[int] = None,
+    ) -> Dict:
+        return self._request_json_internal(
+            method,
+            path,
+            payload,
+            allow_refresh=True,
+            timeout_seconds=timeout_seconds,
+        )
 
-    def _request_json_internal(self, method: str, path: str, payload: Optional[Dict], allow_refresh: bool) -> Dict:
+    def _request_json_internal(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Dict],
+        allow_refresh: bool,
+        timeout_seconds: Optional[int] = None,
+    ) -> Dict:
         _last_upstream_meta.set(None)
         url = f"{self.base_url}{path}"
         data: Optional[bytes] = None
@@ -666,7 +729,7 @@ class RealErpClient:
             data = json.dumps(payload).encode("utf-8")
         req = request.Request(url=url, method=method, headers=self._headers(method, path, data), data=data)
         try:
-            with self._open_request(req) as resp:
+            with self._open_request(req, timeout_seconds=timeout_seconds) as resp:
                 if callable(getattr(resp, "getcode", None)):
                     code = int(resp.getcode())
                 else:
@@ -717,9 +780,21 @@ class RealErpClient:
             if exc.code == 401 and allow_refresh and self.auth_mode == "cookie_session" and self._cookie_opener is not None:
                 self._cookie_logged_in = False
                 self._ensure_cookie_session()
-                return self._request_json_internal(method, path, payload, allow_refresh=False)
+                return self._request_json_internal(
+                    method,
+                    path,
+                    payload,
+                    allow_refresh=False,
+                    timeout_seconds=timeout_seconds,
+                )
             if exc.code == 401 and allow_refresh and self._try_refresh_access_token():
-                return self._request_json_internal(method, path, payload, allow_refresh=False)
+                return self._request_json_internal(
+                    method,
+                    path,
+                    payload,
+                    allow_refresh=False,
+                    timeout_seconds=timeout_seconds,
+                )
             raise RealErpClient.ErpClientError(code=code, message=message, status_code=exc.code, details=details) from exc
         except error.URLError as exc:
             _last_upstream_meta.set({"http_status": 0, "erp_path": path, "upstream_request_id": ""})
@@ -1130,7 +1205,12 @@ class RealErpClient:
         except (TypeError, ValueError):
             return str(code).strip() == "200"
 
-    def _build_datynk_sale_order_body(self, doc_type: str, payload: Dict[str, str]) -> Dict[str, Any]:
+    def _build_datynk_sale_order_body(
+        self,
+        doc_type: str,
+        payload: Dict[str, str],
+        source_attachment: Optional[ErpSourceAttachment] = None,
+    ) -> Dict[str, Any]:
         """组装 https://.../api/sale-order/save-with-details 所需 JSON（与对端 Postman 示例一致）。"""
         dt = (doc_type or "").strip().upper()
         if dt != "PO":
@@ -1254,7 +1334,16 @@ class RealErpClient:
             "currency": currency,
             "deliveryDate": delivery_date,
         }
-        return {"order": order, "details": details}
+        body: Dict[str, Any] = {"order": order, "details": details}
+        if source_attachment is not None:
+            body["files"] = [
+                {
+                    "fileName": source_attachment.file_name,
+                    "fileType": source_attachment.file_type,
+                    "base64Content": base64.b64encode(source_attachment.content).decode("ascii"),
+                }
+            ]
+        return body
 
     def _parse_datynk_create_response(self, body: Dict[str, Any]) -> Tuple[str, str]:
         if not self._datynk_http_ok(body.get("code")):
@@ -1267,8 +1356,29 @@ class RealErpClient:
                 details={"body": body},
             )
         data = body.get("data")
-        draft_no = str(data).strip() if data is not None else ""
+        draft_no = ""
         draft_url = str(body.get(self.draft_url_field, "") or "").strip()
+        if isinstance(data, dict):
+            order = data.get("order") if isinstance(data.get("order"), dict) else {}
+            draft_no = str(
+                data.get("orderNo")
+                or data.get("draftNo")
+                or data.get(self.draft_no_field)
+                or order.get("orderNo")
+                or order.get("draftNo")
+                or order.get(self.draft_no_field)
+                or ""
+            ).strip()
+            if not draft_url:
+                draft_url = str(
+                    data.get(self.draft_url_field)
+                    or data.get("draftUrl")
+                    or order.get(self.draft_url_field)
+                    or order.get("draftUrl")
+                    or ""
+                ).strip()
+        elif data is not None:
+            draft_no = str(data).strip()
         if self.allow_empty_draft_url and draft_no and not draft_url:
             draft_url = ""
         if not draft_no or (not draft_url and not self.allow_empty_draft_url):
@@ -1280,13 +1390,32 @@ class RealErpClient:
             )
         return draft_no, draft_url
 
-    def create_draft(self, doc_type: str, payload: Dict[str, str], idempotency_key: str) -> Tuple[str, str]:
+    def create_draft(
+        self,
+        doc_type: str,
+        payload: Dict[str, str],
+        idempotency_key: str,
+        source_attachment: Optional[ErpSourceAttachment] = None,
+    ) -> Tuple[str, str]:
         if self.create_body_style == "datynk_sale_order":
             _ = idempotency_key  # 对端当前接口未使用；仍由上层 store 幂等
             mapped = self._map_payload_fields(payload)
-            sale_body = self._build_datynk_sale_order_body(doc_type, mapped)
-            body = self._request_json("POST", self.create_draft_path, sale_body)
+            sale_body = self._build_datynk_sale_order_body(doc_type, mapped, source_attachment)
+            body = self._request_json(
+                "POST",
+                self.create_draft_path,
+                sale_body,
+                timeout_seconds=self.create_timeout_seconds,
+            )
             return self._parse_datynk_create_response(body)
+
+        if source_attachment is not None:
+            raise RealErpClient.ErpClientError(
+                code="ERP_SOURCE_FILE_UNSUPPORTED_BODY_STYLE",
+                message="ERP 原始文件附件仅支持 datynk_sale_order 建单请求格式",
+                status_code=0,
+                details={"create_body_style": self.create_body_style},
+            )
 
         body = self._request_json(
             "POST",

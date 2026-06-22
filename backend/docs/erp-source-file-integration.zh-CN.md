@@ -56,4 +56,4 @@ curl -I \
 
 ERP 后端应先按当前登录用户校验订单权限，再携带服务 Token 请求上述接口，并把响应状态、正文及文件相关响应头转发给浏览器。ERP 前端的“查看源文件”按钮只访问 ERP 自己的后端代理接口，不直接持有服务 Token，也不直接访问 MinIO。
 
-当前 AI ERP 的 `save-with-details` 请求体尚不发送 `ingestion_id`。ERP 字段名确定后，再在建单请求的 `order` 中增加对应字段。
+AI ERP 创建订单时，会把原始 PDF/JPG/PNG 编码为纯 Base64，并通过 `save-with-details` 顶层的 `files` 数组发送给 ERP。每个附件只发送 `fileName`、`fileType`、`base64Content`；ERP 保存后自行生成 `fileUrl`。本接口继续保留，供内部排查或附件链路回退使用，但建单请求不再发送 `sourceIngestionId`。

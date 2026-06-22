@@ -8,7 +8,8 @@ from uuid import uuid4
 
 from app.database import SessionLocal, is_database_enabled
 from app.erp_audit_log import append_erp_call_log, append_erp_call_log_with_upstream
-from app.erp_client import ErpClientError, clear_last_upstream_meta, erp_client
+from app.document_extract import resolved_upload_file_name
+from app.erp_client import ErpClientError, ErpSourceAttachment, clear_last_upstream_meta, erp_client
 from app import ingestion_db
 from app.order_preview import (
     apply_preview_to_ingestion,
@@ -18,6 +19,12 @@ from app.order_preview import (
     preview_to_resolved_fields,
 )
 from app.workflow import run_ingestion_processing_workflow
+from app.storage_client import (
+    ObjectNotFoundError,
+    ObjectStorageUnavailableError,
+    iter_object_bytes,
+    stat_object,
+)
 from app.extraction_profile import (
     effective_required_field_keys,
     get_profile,
@@ -236,8 +243,22 @@ def _map_erp_error_code(err_code: str) -> str:
     return ErrorCode.ERP_UPSTREAM_ERROR.value
 
 
+def _redact_erp_error_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            str(key): "[REDACTED]"
+            if str(key).casefold() == "base64content"
+            else _redact_erp_error_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_erp_error_value(item) for item in value]
+    return value
+
+
 def _build_erp_error_details(exc: ErpClientError) -> Dict[str, object]:
-    raw = exc.details if isinstance(exc.details, dict) else {}
+    raw_value = _redact_erp_error_value(exc.details if isinstance(exc.details, dict) else {})
+    raw = raw_value if isinstance(raw_value, dict) else {}
     field_errors = raw.get("violations", [])
     if not isinstance(field_errors, list):
         field_errors = []
@@ -252,6 +273,8 @@ def _build_erp_error_details(exc: ErpClientError) -> Dict[str, object]:
         category = "master_data"
     elif code in {"PERMISSION_DENIED", "ERP_PERMISSION_DENIED", "FORBIDDEN"}:
         category = "permission"
+    elif code.startswith("ERP_SOURCE_FILE_"):
+        category = "source_file"
     return {
         "category": category,
         "erp_error_code": exc.code,
@@ -261,6 +284,133 @@ def _build_erp_error_details(exc: ErpClientError) -> Dict[str, object]:
         "field_errors": field_errors,
         "raw": raw,
     }
+
+
+_SOURCE_ATTACHMENT_HARD_LIMIT_BYTES = 30 * 1024 * 1024
+
+
+def _source_attachment_enabled() -> bool:
+    return _env_truthy("ERP_SOURCE_ATTACHMENT_ENABLED", False)
+
+
+def _source_attachment_max_bytes() -> int:
+    raw = os.getenv("ERP_SOURCE_ATTACHMENT_MAX_BYTES", str(_SOURCE_ATTACHMENT_HARD_LIMIT_BYTES)).strip()
+    try:
+        configured = int(raw)
+    except ValueError:
+        configured = _SOURCE_ATTACHMENT_HARD_LIMIT_BYTES
+    return max(1, min(configured, _SOURCE_ATTACHMENT_HARD_LIMIT_BYTES))
+
+
+def _source_attachment_file_type(raw: bytes) -> Optional[str]:
+    if b"%PDF-" in raw[:1024]:
+        return "application/pdf"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    return None
+
+
+def _source_file_error(code: str, message: str, **details: object) -> ErpClientError:
+    return ErpClientError(code=code, message=message, status_code=0, details=dict(details))
+
+
+def _build_source_attachment(ingestion: IngestionResponse) -> Optional[ErpSourceAttachment]:
+    """Read and validate the original file without persisting its bytes or Base64 form."""
+    if not _source_attachment_enabled():
+        return None
+
+    object_key = (ingestion.source_file_object_key or "").strip()
+    if not object_key:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_MISSING",
+            "创建 ERP 订单失败：当前订单没有可读取的原始文件，请重新上传后重试。",
+        )
+
+    fallback_type = (ingestion.source_file_content_type or "application/octet-stream").strip()
+    try:
+        stored = stat_object(object_key, fallback_content_type=fallback_type)
+    except ObjectNotFoundError as exc:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_NOT_FOUND",
+            "创建 ERP 订单失败：原始文件已不存在，请重新上传后重试。",
+        ) from exc
+    except ObjectStorageUnavailableError as exc:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_STORAGE_UNAVAILABLE",
+            "创建 ERP 订单失败：原始文件存储暂不可用，请稍后重试。",
+        ) from exc
+
+    max_bytes = _source_attachment_max_bytes()
+    if stored.size <= 0:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_EMPTY",
+            "创建 ERP 订单失败：原始文件为空，请重新上传。",
+            file_size=stored.size,
+        )
+    if stored.size > max_bytes:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_TOO_LARGE",
+            "创建 ERP 订单失败：原始文件超过 30 MB，无法作为 ERP 附件上传。",
+            file_size=stored.size,
+            max_bytes=max_bytes,
+        )
+
+    try:
+        content = b"".join(iter_object_bytes(object_key, length=stored.size))
+    except ObjectNotFoundError as exc:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_NOT_FOUND",
+            "创建 ERP 订单失败：原始文件已不存在，请重新上传后重试。",
+        ) from exc
+    except ObjectStorageUnavailableError as exc:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_STORAGE_UNAVAILABLE",
+            "创建 ERP 订单失败：原始文件存储暂不可用，请稍后重试。",
+        ) from exc
+
+    if len(content) != stored.size:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_INCOMPLETE",
+            "创建 ERP 订单失败：原始文件读取不完整，请稍后重试。",
+            expected_size=stored.size,
+            actual_size=len(content),
+        )
+
+    file_type = _source_attachment_file_type(content)
+    if file_type is None:
+        raise _source_file_error(
+            "ERP_SOURCE_FILE_UNSUPPORTED",
+            "创建 ERP 订单失败：ERP 附件仅支持 PDF、JPG 和 PNG。",
+        )
+
+    original_name = (ingestion.source_file_name or "").strip()
+    if not original_name:
+        original_name = resolved_upload_file_name(object_key, ingestion.source_file_name)
+    file_name = original_name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not file_name:
+        suffix = {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png"}[file_type]
+        file_name = f"source-file{suffix}"
+
+    return ErpSourceAttachment(file_name=file_name, file_type=file_type, content=content)
+
+
+def _create_erp_draft(
+    ingestion: IngestionResponse,
+    doc_type: str,
+    idempotency_key: str,
+) -> tuple[str, str]:
+    payload = dict(ingestion.resolved_fields or {})
+    source_attachment = _build_source_attachment(ingestion)
+    if source_attachment is None:
+        return erp_client.create_draft(doc_type, payload, idempotency_key)
+    return erp_client.create_draft(
+        doc_type,
+        payload,
+        idempotency_key,
+        source_attachment=source_attachment,
+    )
 
 
 def create_ingestion(payload: CreateIngestionRequest) -> IngestionResponse:
@@ -781,7 +931,7 @@ def create_draft_for_ingestion(ingestion_id: str) -> Optional[CreateDraftRespons
                 doc_type = _effective_draft_doc_type(ingestion)
                 idempotency_key = f"{ingestion.org_id}:{ingestion.file_hash}:{doc_type}"
 
-                if ingestion.draft_no and ingestion.draft_url:
+                if ingestion.draft_no:
                     # 幂等重放：数据库中已存在草稿号，不再重复写入 ERP。
                     logger.info("create_draft_idempotent_replay ingestion_id=%s draft_no=%s", ingestion_id, ingestion.draft_no)
                     if ingestion.status != IngestionStatus.DRAFT_CREATED:
@@ -813,7 +963,7 @@ def create_draft_for_ingestion(ingestion_id: str) -> Optional[CreateDraftRespons
 
                 clear_last_upstream_meta()
                 try:
-                    draft_no, draft_url = erp_client.create_draft(doc_type, ingestion.resolved_fields, idempotency_key)
+                    draft_no, draft_url = _create_erp_draft(ingestion, doc_type, idempotency_key)
                 except ErpClientError as exc:
                     _append_erp_call_with_upstream(
                         ingestion,
@@ -895,7 +1045,7 @@ def create_draft_for_ingestion(ingestion_id: str) -> Optional[CreateDraftRespons
         doc_type = _effective_draft_doc_type(ingestion)
         idempotency_key = f"{ingestion.org_id}:{ingestion.file_hash}:{doc_type}"
 
-        if ingestion.draft_no and ingestion.draft_url:
+        if ingestion.draft_no:
             logger.info("create_draft_idempotent_replay ingestion_id=%s draft_no=%s", ingestion_id, ingestion.draft_no)
             if ingestion.status != IngestionStatus.DRAFT_CREATED:
                 _append_event(
@@ -925,7 +1075,7 @@ def create_draft_for_ingestion(ingestion_id: str) -> Optional[CreateDraftRespons
 
         clear_last_upstream_meta()
         try:
-            draft_no, draft_url = erp_client.create_draft(doc_type, ingestion.resolved_fields, idempotency_key)
+            draft_no, draft_url = _create_erp_draft(ingestion, doc_type, idempotency_key)
         except ErpClientError as exc:
             _append_erp_call_with_upstream(
                 ingestion,

@@ -1,3 +1,4 @@
+import base64
 import importlib
 import io
 import json
@@ -496,12 +497,14 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert isinstance(client, erp_client_module.RealErpClient)
     captured: dict[str, object] = {}
 
-    def _fake_request_json(method, path, payload=None):
+    def _fake_request_json(method, path, payload=None, **kwargs):
         captured["path"] = path
         captured["body"] = payload
+        captured["timeout_seconds"] = kwargs.get("timeout_seconds")
         return {"code": 200, "message": "success", "data": "F01SO99"}
 
     monkeypatch.setattr(client, "_request_json", _fake_request_json)
+    raw_pdf = b"%PDF-1.7 attachment-test"
     draft_no, draft_url = client.create_draft(
         "PO",
         {
@@ -515,6 +518,11 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
             "deliveryDate": "2026-05-20",
         },
         "ik-1",
+        source_attachment=erp_client_module.ErpSourceAttachment(
+            file_name="采购订单.pdf",
+            file_type="application/pdf",
+            content=raw_pdf,
+        ),
     )
     assert draft_no == "F01SO99"
     assert draft_url == ""
@@ -525,10 +533,21 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert body["order"]["customerName"] == "北京某公司"
     assert body["order"]["rate"] == 1.0
     assert body["order"]["deliveryDate"] == "2026-05-20"
+    assert "sourceIngestionId" not in body["order"]
     assert "jhq" not in body["order"]
     assert len(body["details"]) == 1
     assert body["details"][0]["materialCode"] == "S01"
     assert body["details"][0]["qty"] == 2.0
+    assert set(body) == {"order", "details", "files"}
+    assert body["files"] == [
+        {
+            "fileName": "采购订单.pdf",
+            "fileType": "application/pdf",
+            "base64Content": base64.b64encode(raw_pdf).decode("ascii"),
+        }
+    ]
+    assert base64.b64decode(body["files"][0]["base64Content"]) == raw_pdf
+    assert captured["timeout_seconds"] == 120
 
 
 def test_datynk_sale_order_uses_default_org(monkeypatch):
@@ -543,7 +562,7 @@ def test_datynk_sale_order_uses_default_org(monkeypatch):
     client = erp_client_module.erp_client
     captured: dict[str, object] = {}
 
-    def _fake_request_json(method, path, payload=None):
+    def _fake_request_json(method, path, payload=None, **_kwargs):
         captured["body"] = payload
         return {"code": 200, "message": "success", "data": "X1"}
 
@@ -559,6 +578,45 @@ def test_datynk_sale_order_uses_default_org(monkeypatch):
         "k",
     )
     assert captured["body"]["order"]["org"] == "默认厂"
+
+
+def test_datynk_sale_order_parses_object_response(monkeypatch):
+    monkeypatch.setenv("ERP_CLIENT_MODE", "real")
+    monkeypatch.setenv("ERP_BASE_URL", "https://erp.example.com")
+    monkeypatch.setenv("ERP_CREATE_BODY_STYLE", "datynk_sale_order")
+    monkeypatch.setenv("ERP_ALLOW_EMPTY_DRAFT_URL", "true")
+    import app.erp_client as erp_client_module
+
+    importlib.reload(erp_client_module)
+    client = erp_client_module.erp_client
+    assert isinstance(client, erp_client_module.RealErpClient)
+    monkeypatch.setattr(
+        client,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "code": 200,
+            "message": "success",
+            "data": {
+                "order": {"orderNo": "F01SO-OBJECT"},
+                "files": [{"fileUrl": "uploads/sale-order/source.pdf"}],
+            },
+        },
+    )
+
+    draft_no, draft_url = client.create_draft(
+        "PO",
+        {
+            "org": "英科1厂",
+            "customerName": "测试客户",
+            "material_code": "M1",
+            "line_qty": "1",
+            "doc_date": "2026-06-22",
+        },
+        "ik-object",
+    )
+
+    assert draft_no == "F01SO-OBJECT"
+    assert draft_url == ""
 
 
 def test_datynk_sale_order_rejects_non_po(monkeypatch):
@@ -587,7 +645,7 @@ def test_datynk_sale_order_upstream_business_error(monkeypatch):
     importlib.reload(erp_client_module)
     client = erp_client_module.erp_client
 
-    def _fake_request_json(method, path, payload=None):
+    def _fake_request_json(method, path, payload=None, **_kwargs):
         return {"code": 400, "message": "bad request"}
 
     monkeypatch.setattr(client, "_request_json", _fake_request_json)
