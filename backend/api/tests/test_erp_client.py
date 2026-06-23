@@ -533,6 +533,7 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert body["order"]["customerName"] == "北京某公司"
     assert body["order"]["rate"] == 1.0
     assert body["order"]["deliveryDate"] == "2026-05-20"
+    assert body["order"]["createUser"] == body["order"]["salesUser"]
     assert "sourceIngestionId" not in body["order"]
     assert "jhq" not in body["order"]
     assert len(body["details"]) == 1

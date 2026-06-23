@@ -1327,6 +1327,7 @@ class RealErpClient:
             "customerName": customer,
             "customerPoNo": customer_po,
             "salesUser": sales_user,
+            "createUser": sales_user,
             "orderDate": doc_date,
             "orderStatus": order_status,
             "deliveryAddr": delivery_addr,

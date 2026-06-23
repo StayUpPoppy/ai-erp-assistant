@@ -117,6 +117,7 @@ def build_datynk_sale_order_payload(
             "customerName": customer,
             "customerPoNo": customer_po,
             "salesUser": sales_user,
+            "createUser": sales_user,
             "orderDate": doc_date,
             "orderStatus": order_status,
             "deliveryAddr": delivery_addr,

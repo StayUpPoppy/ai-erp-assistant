@@ -59,6 +59,7 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
         "customerName",
         "customerPoNo",
         "salesUser",
+        "createUser",
         "orderDate",
         "orderStatus",
         "deliveryAddr",
@@ -67,6 +68,7 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
         "deliveryDate",
     }
     assert "jhq" not in payload["order"]
+    assert payload["order"]["createUser"] == payload["order"]["salesUser"]
     assert payload["order"]["rate"] == 1.0
     assert payload["details"][0]["materialCode"] == "S01P019430"
 
