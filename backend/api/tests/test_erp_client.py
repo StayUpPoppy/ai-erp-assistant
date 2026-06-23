@@ -562,7 +562,7 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert captured["timeout_seconds"] == 120
 
 
-def test_datynk_sale_order_rejects_missing_detail_money_fields(monkeypatch):
+def test_datynk_sale_order_allows_missing_detail_money_fields(monkeypatch):
     monkeypatch.setenv("ERP_CLIENT_MODE", "real")
     monkeypatch.setenv("ERP_BASE_URL", "https://erp.example.com")
     monkeypatch.setenv("ERP_CREATE_BODY_STYLE", "datynk_sale_order")
@@ -571,33 +571,35 @@ def test_datynk_sale_order_rejects_missing_detail_money_fields(monkeypatch):
 
     importlib.reload(erp_client_module)
     client = erp_client_module.erp_client
-    calls = {"count": 0}
+    captured: dict[str, object] = {}
 
-    def _fake_request_json(*_args, **_kwargs):
-        calls["count"] += 1
-        return {"code": 200, "message": "success", "data": "SHOULD-NOT-CREATE"}
+    def _fake_request_json(_method, _path, payload=None, **_kwargs):
+        captured["body"] = payload
+        return {"code": 200, "message": "success", "data": "ALLOW-MISSING-MONEY"}
 
     monkeypatch.setattr(client, "_request_json", _fake_request_json)
 
-    try:
-        client.create_draft(
-            "PO",
-            {
-                "org": "英科1厂",
-                "customerName": "客户甲",
-                "material_code": "M1",
-                "line_qty": "1",
-                "doc_date": "2026-05-01",
-            },
-            "k-missing-money",
-        )
-    except erp_client_module.RealErpClient.ErpClientError as exc:
-        assert exc.code == "ERP_DATYNK_MISSING_DETAIL_FIELDS"
-        assert calls["count"] == 0
-        fields = {item["field"] for item in exc.details["missing_fields"]}
-        assert {"price", "taxPrice", "amount", "allAmount", "tax"} <= fields
-    else:
-        raise AssertionError("expected ErpClientError")
+    draft_no, _draft_url = client.create_draft(
+        "PO",
+        {
+            "org": "英科1厂",
+            "customerName": "客户甲",
+            "material_code": "M1",
+            "line_qty": "1",
+            "doc_date": "2026-05-01",
+        },
+        "k-missing-money",
+    )
+
+    assert draft_no == "ALLOW-MISSING-MONEY"
+    detail = captured["body"]["details"][0]
+    assert detail["materialCode"] == "M1"
+    assert detail["qty"] == 1.0
+    assert detail["price"] == ""
+    assert detail["taxPrice"] == ""
+    assert detail["amount"] == ""
+    assert detail["allAmount"] == ""
+    assert detail["tax"] == ""
 
 
 def test_datynk_sale_order_uses_default_org(monkeypatch):

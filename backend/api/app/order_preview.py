@@ -25,11 +25,6 @@ ORDER_REQUIRED_FIELDS: Tuple[Tuple[str, str], ...] = (
 DETAIL_REQUIRED_FIELDS: Tuple[Tuple[str, str], ...] = (
     ("materialCode", "物料编码"),
     ("qty", "数量"),
-    ("price", "不含税单价"),
-    ("taxPrice", "含税单价"),
-    ("amount", "不含税金额"),
-    ("allAmount", "含税金额"),
-    ("tax", "税率"),
 )
 
 PREVIEW_REQUIRED_RESOLVE_KEYS: List[str] = [
@@ -40,21 +35,11 @@ PREVIEW_REQUIRED_RESOLVE_KEYS: List[str] = [
     "delivery_date",
     "material_code",
     "line_qty",
-    "price",
-    "taxPrice",
-    "amount",
-    "allAmount",
-    "tax",
 ]
 
 DETAIL_MISSING_KEY_BY_FIELD: Dict[str, str] = {
     "materialCode": "material_code",
     "qty": "line_qty",
-    "price": "price",
-    "taxPrice": "taxPrice",
-    "amount": "amount",
-    "allAmount": "allAmount",
-    "tax": "tax",
 }
 
 

@@ -185,7 +185,7 @@ def test_preview_issues_validate_tax_and_amount_relations() -> None:
     assert "details[0].taxPrice" in paths
 
 
-def test_preview_requires_price_amount_and_tax_fields() -> None:
+def test_preview_does_not_require_price_amount_and_tax_fields() -> None:
     preview = OrderPreviewData(
         order=OrderPreviewHeader(
             org="英科1厂",
@@ -198,7 +198,7 @@ def test_preview_requires_price_amount_and_tax_fields() -> None:
     )
     missing = preview_missing_keys(preview)
 
-    assert {"price", "taxPrice", "amount", "allAmount", "tax"} <= set(missing)
+    assert not ({"price", "taxPrice", "amount", "allAmount", "tax"} & set(missing))
 
     ing = IngestionResponse(
         ingestion_id="ing-required-money",
@@ -213,4 +213,4 @@ def test_preview_requires_price_amount_and_tax_fields() -> None:
     )
     apply_preview_to_ingestion(ing, preview)
 
-    assert {"price", "taxPrice", "amount", "allAmount", "tax"} <= set(ing.missing_fields)
+    assert not ({"price", "taxPrice", "amount", "allAmount", "tax"} & set(ing.missing_fields))

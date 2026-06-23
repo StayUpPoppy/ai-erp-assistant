@@ -22,6 +22,15 @@ def _safe_float(raw: str | None, fallback: float) -> float:
         return fallback
 
 
+def _optional_float(raw: str | None) -> float | None:
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return float(str(raw).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def build_datynk_sale_order_payload(
     ingestion: IngestionResponse,
     *,
@@ -74,24 +83,23 @@ def build_datynk_sale_order_payload(
                     "ph": detail.ph,
                     "customerMaterialNo": detail.customerMaterialNo,
                     "qty": detail.qty if detail.qty is not None else qty,
-                    "price": detail.price if detail.price is not None else 1.0,
-                    "taxPrice": detail.taxPrice if detail.taxPrice is not None else 1.13,
-                    "amount": detail.amount if detail.amount is not None else round(qty * 1.0, 10),
-                    "allAmount": detail.allAmount if detail.allAmount is not None else round(qty * 1.13, 10),
-                    "tax": detail.tax if detail.tax is not None else 13,
-                    "taxAmount": detail.taxAmount if detail.taxAmount is not None else round(qty * 0.13, 10),
+                    "price": detail.price,
+                    "taxPrice": detail.taxPrice,
+                    "amount": detail.amount,
+                    "allAmount": detail.allAmount,
+                    "tax": detail.tax,
+                    "taxAmount": detail.taxAmount,
                     "gift": detail.gift,
                     "remark": detail.remark,
                 }
             )
     if not details:
-        price = _safe_float(_pick(fields, "unit_price", "line_price", "price"), 1.0)
-        if price <= 0:
-            price = 1.0
-        tax_pct = _safe_float(_pick(fields, "tax", "tax_rate"), 13.0)
-        amount = round(price * qty, 10)
-        tax_amount = round(amount * (tax_pct / 100.0), 10)
-        all_amount = round(amount + tax_amount, 10)
+        price = _optional_float(_pick(fields, "unit_price", "line_price", "price"))
+        tax_price = _optional_float(_pick(fields, "taxPrice", "tax_price", "unit_price_incl_tax"))
+        amount = _optional_float(_pick(fields, "amount", "line_amount_excl_tax"))
+        all_amount = _optional_float(_pick(fields, "allAmount", "all_amount", "line_amount_incl_tax"))
+        tax_pct = _optional_float(_pick(fields, "tax", "tax_rate"))
+        tax_amount = _optional_float(_pick(fields, "taxAmount", "tax_amount"))
         details.append(
             {
                 "materialCode": material,
@@ -101,10 +109,10 @@ def build_datynk_sale_order_payload(
                 "customerMaterialNo": _pick(fields, "customerMaterialNo", "customer_material_no"),
                 "qty": qty,
                 "price": price,
-                "taxPrice": round(all_amount / qty, 10) if qty else all_amount,
+                "taxPrice": tax_price,
                 "amount": amount,
                 "allAmount": all_amount,
-                "tax": int(tax_pct) if abs(tax_pct - int(tax_pct)) < 1e-9 else tax_pct,
+                "tax": int(tax_pct) if tax_pct is not None and abs(tax_pct - int(tax_pct)) < 1e-9 else tax_pct,
                 "taxAmount": tax_amount,
                 "gift": _pick(fields, "gift", "line_gift").lower() in {"1", "true", "yes", "on"},
                 "remark": _pick(fields, "line_remark", "detail_remark"),
