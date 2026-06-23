@@ -868,28 +868,25 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             try:
                 rows = state["erp"].get_customer_material_details_by_customer(customer_name)
             except Exception as exc:
-                if getattr(exc, "code", None) is None:
-                    raise
                 rows = []
                 logger.warning(
-                    "customer_material_mapping_fetch_failed ingestion_id=%s code=%s status=%s",
+                    "customer_material_mapping_fetch_failed ingestion_id=%s code=%s status=%s err=%s",
                     ing.ingestion_id,
                     getattr(exc, "code", ""),
                     getattr(exc, "status_code", 0),
+                    exc,
                 )
-            if rows:
-                preview, customer_material_metrics, mapping_issues = apply_customer_material_mapping(preview, rows)
-            else:
-                customer_material_metrics = {"mapping_rows": 0, "matched": 0, "exact": 0, "normalized": 0, "unmatched": 0}
                 mapping_issues = [
                     PreviewIssue(
-                        path=f"details[{index}].materialCode",
-                        level="warning",
-                        message=f"物料编码 {detail.materialCode} 未取得 ERP 客户物料映射，请人工核对。",
+                        path="details",
+                        level="error",
+                        message="ERP 客户物料对应表查询失败，请确认客户物料对应表可用后重试。",
                     )
-                    for index, detail in enumerate(preview.details)
-                    if (detail.materialCode or detail.customerMaterialNo).strip()
                 ]
+            else:
+                mapping_issues = []
+            preview, customer_material_metrics, detail_mapping_issues = apply_customer_material_mapping(preview, rows)
+            mapping_issues.extend(detail_mapping_issues)
         else:
             customer_material_metrics = {"mapping_rows": 0, "matched": 0, "exact": 0, "normalized": 0, "unmatched": 0}
             mapping_issues = []

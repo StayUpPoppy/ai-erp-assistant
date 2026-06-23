@@ -25,6 +25,11 @@ ORDER_REQUIRED_FIELDS: Tuple[Tuple[str, str], ...] = (
 DETAIL_REQUIRED_FIELDS: Tuple[Tuple[str, str], ...] = (
     ("materialCode", "物料编码"),
     ("qty", "数量"),
+    ("price", "不含税单价"),
+    ("taxPrice", "含税单价"),
+    ("amount", "不含税金额"),
+    ("allAmount", "含税金额"),
+    ("tax", "税率"),
 )
 
 PREVIEW_REQUIRED_RESOLVE_KEYS: List[str] = [
@@ -35,7 +40,22 @@ PREVIEW_REQUIRED_RESOLVE_KEYS: List[str] = [
     "delivery_date",
     "material_code",
     "line_qty",
+    "price",
+    "taxPrice",
+    "amount",
+    "allAmount",
+    "tax",
 ]
+
+DETAIL_MISSING_KEY_BY_FIELD: Dict[str, str] = {
+    "materialCode": "material_code",
+    "qty": "line_qty",
+    "price": "price",
+    "taxPrice": "taxPrice",
+    "amount": "amount",
+    "allAmount": "allAmount",
+    "tax": "tax",
+}
 
 
 def _pick(fields: Dict[str, str], *keys: str) -> str:
@@ -256,11 +276,21 @@ def apply_customer_material_mapping(
             issues.append(
                 PreviewIssue(
                     path=f"details[{idx}].materialCode",
-                    level="warning",
-                    message=f"客户物料编码 {raw_code} 未匹配到 ERP 内部物料编码，请人工核对",
+                    level="error",
+                    message=(
+                        f"客户物料编码 {raw_code} 未在 ERP 客户物料对应表中找到，"
+                        "请先到客户物料对应表创建客户物料与内部物料的对应关系。"
+                    ),
                 )
             )
-            next_details.append(detail)
+            next_details.append(
+                detail.model_copy(
+                    update={
+                        "customerMaterialNo": raw_code,
+                        "materialCode": "",
+                    }
+                )
+            )
             continue
 
         matched += 1
@@ -325,6 +355,28 @@ def preview_editable_fields(preview: OrderPreviewData) -> List[PreviewEditableFi
     return out
 
 
+def _missing_key_for_editable_path(path: str) -> str:
+    if path == "order.customerName":
+        return "customerName"
+    if path == "order.org":
+        return "org"
+    if path == "order.orderDate":
+        return "doc_date"
+    if path == "order.currency":
+        return "currency"
+    if path == "order.deliveryDate":
+        return "delivery_date"
+
+    match = re.fullmatch(r"details\[(\d+)\]\.([A-Za-z0-9_]+)", path)
+    if match:
+        index = int(match.group(1))
+        field = match.group(2)
+        mapped = DETAIL_MISSING_KEY_BY_FIELD.get(field)
+        if mapped and index == 0:
+            return mapped
+    return path
+
+
 def apply_preview_to_ingestion(ingestion: IngestionResponse, preview: OrderPreviewData | None) -> IngestionResponse:
     ingestion.preview_data = preview
     if preview is None:
@@ -334,16 +386,9 @@ def apply_preview_to_ingestion(ingestion: IngestionResponse, preview: OrderPrevi
     ingestion.editable_fields = preview_editable_fields(preview)
     ingestion.issues = preview_issues(preview)
     ingestion.required_resolve_keys = list(PREVIEW_REQUIRED_RESOLVE_KEYS)
-    ingestion.missing_fields = [
-        "customerName" if f.path == "order.customerName" else
-        "org" if f.path == "order.org" else
-        "doc_date" if f.path == "order.orderDate" else
-        "currency" if f.path == "order.currency" else
-        "delivery_date" if f.path == "order.deliveryDate" else
-        "material_code" if f.path.endswith(".materialCode") else
-        "line_qty" if f.path.endswith(".qty") else f.path
-        for f in ingestion.editable_fields
-    ]
+    ingestion.missing_fields = list(
+        dict.fromkeys(_missing_key_for_editable_path(field.path) for field in ingestion.editable_fields)
+    )
     return ingestion
 
 
@@ -406,8 +451,7 @@ def preview_to_resolved_fields(preview: OrderPreviewData) -> Dict[str, str]:
 
 
 def preview_missing_keys(preview: OrderPreviewData) -> List[str]:
-    resolved = preview_to_resolved_fields(preview)
-    return [key for key in PREVIEW_REQUIRED_RESOLVE_KEYS if not (resolved.get(key) or "").strip()]
+    return list(dict.fromkeys(_missing_key_for_editable_path(field.path) for field in preview_editable_fields(preview)))
 
 
 def merge_non_empty(base: Dict[str, str], patch: Dict[str, str]) -> Dict[str, str]:

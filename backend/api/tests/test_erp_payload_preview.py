@@ -4,7 +4,14 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.erp_payload_preview import build_datynk_sale_order_payload
-from app.order_preview import apply_customer_material_mapping, build_order_preview_data, normalize_customer_material_code, preview_issues
+from app.order_preview import (
+    apply_customer_material_mapping,
+    apply_preview_to_ingestion,
+    build_order_preview_data,
+    normalize_customer_material_code,
+    preview_issues,
+    preview_missing_keys,
+)
 from app.schemas import IngestionResponse, IngestionStatus, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader
 
 
@@ -140,10 +147,13 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
     assert mapped.details[1].materialCode == "S01P019427"
     assert mapped.details[1].productName == "Old B"
     assert mapped.details[1].productSpec == "Spec B"
-    assert mapped.details[2].materialCode == "X999"
+    assert mapped.details[2].customerMaterialNo == "X999"
+    assert mapped.details[2].materialCode == ""
     assert metrics == {"mapping_rows": 2, "matched": 2, "exact": 1, "normalized": 1, "unmatched": 1}
     assert len(issues) == 1
     assert issues[0].path == "details[2].materialCode"
+    assert issues[0].level == "error"
+    assert "客户物料对应表" in issues[0].message
 
 
 def test_normalize_customer_material_code_handles_full_width_and_separators() -> None:
@@ -173,3 +183,34 @@ def test_preview_issues_validate_tax_and_amount_relations() -> None:
     assert "details[0].allAmount" in paths
     assert "details[0].taxAmount" in paths
     assert "details[0].taxPrice" in paths
+
+
+def test_preview_requires_price_amount_and_tax_fields() -> None:
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(
+            org="英科1厂",
+            customerName="Acme",
+            orderDate="2026-06-23",
+            currency="CNY",
+            deliveryDate="2026-06-30",
+        ),
+        details=[OrderPreviewDetail(materialCode="M001", qty=2)],
+    )
+    missing = preview_missing_keys(preview)
+
+    assert {"price", "taxPrice", "amount", "allAmount", "tax"} <= set(missing)
+
+    ing = IngestionResponse(
+        ingestion_id="ing-required-money",
+        file_id="file-required-money",
+        file_hash="hash-required-money",
+        user_id="u1",
+        org_id="英科1厂",
+        extract_version="v0",
+        model_version="m",
+        prompt_version="p",
+        status=IngestionStatus.EXTRACTED,
+    )
+    apply_preview_to_ingestion(ing, preview)
+
+    assert {"price", "taxPrice", "amount", "allAmount", "tax"} <= set(ing.missing_fields)

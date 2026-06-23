@@ -10,6 +10,16 @@ import urllib.error
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+def _datynk_detail_money_fields() -> dict[str, str]:
+    return {
+        "price": "10",
+        "taxPrice": "11.3",
+        "amount": "20",
+        "allAmount": "22.6",
+        "tax": "13",
+    }
+
+
 def test_erp_client_defaults_to_mock(monkeypatch):
     monkeypatch.delenv("ERP_CLIENT_MODE", raising=False)
     monkeypatch.delenv("ERP_BASE_URL", raising=False)
@@ -516,6 +526,7 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
             "currency": "CNY",
             "rate": "1",
             "deliveryDate": "2026-05-20",
+            **_datynk_detail_money_fields(),
         },
         "ik-1",
         source_attachment=erp_client_module.ErpSourceAttachment(
@@ -551,6 +562,44 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert captured["timeout_seconds"] == 120
 
 
+def test_datynk_sale_order_rejects_missing_detail_money_fields(monkeypatch):
+    monkeypatch.setenv("ERP_CLIENT_MODE", "real")
+    monkeypatch.setenv("ERP_BASE_URL", "https://erp.example.com")
+    monkeypatch.setenv("ERP_CREATE_BODY_STYLE", "datynk_sale_order")
+    monkeypatch.setenv("ERP_ALLOW_EMPTY_DRAFT_URL", "true")
+    import app.erp_client as erp_client_module
+
+    importlib.reload(erp_client_module)
+    client = erp_client_module.erp_client
+    calls = {"count": 0}
+
+    def _fake_request_json(*_args, **_kwargs):
+        calls["count"] += 1
+        return {"code": 200, "message": "success", "data": "SHOULD-NOT-CREATE"}
+
+    monkeypatch.setattr(client, "_request_json", _fake_request_json)
+
+    try:
+        client.create_draft(
+            "PO",
+            {
+                "org": "英科1厂",
+                "customerName": "客户甲",
+                "material_code": "M1",
+                "line_qty": "1",
+                "doc_date": "2026-05-01",
+            },
+            "k-missing-money",
+        )
+    except erp_client_module.RealErpClient.ErpClientError as exc:
+        assert exc.code == "ERP_DATYNK_MISSING_DETAIL_FIELDS"
+        assert calls["count"] == 0
+        fields = {item["field"] for item in exc.details["missing_fields"]}
+        assert {"price", "taxPrice", "amount", "allAmount", "tax"} <= fields
+    else:
+        raise AssertionError("expected ErpClientError")
+
+
 def test_datynk_sale_order_uses_default_org(monkeypatch):
     monkeypatch.setenv("ERP_CLIENT_MODE", "real")
     monkeypatch.setenv("ERP_BASE_URL", "https://erp.example.com")
@@ -575,6 +624,7 @@ def test_datynk_sale_order_uses_default_org(monkeypatch):
             "material_code": "M1",
             "line_qty": "1",
             "doc_date": "2026-05-01",
+            **_datynk_detail_money_fields(),
         },
         "k",
     )
@@ -612,6 +662,7 @@ def test_datynk_sale_order_parses_object_response(monkeypatch):
             "material_code": "M1",
             "line_qty": "1",
             "doc_date": "2026-06-22",
+            **_datynk_detail_money_fields(),
         },
         "ik-object",
     )
@@ -659,6 +710,7 @@ def test_datynk_sale_order_upstream_business_error(monkeypatch):
                 "material_code": "m",
                 "line_qty": "1",
                 "doc_date": "2026-05-01",
+                **_datynk_detail_money_fields(),
             },
             "k",
         )

@@ -322,11 +322,14 @@ def test_workflow_uses_final_pdf_parse_without_second_ocr(monkeypatch):
     result = run_ingestion_processing_workflow(ingestion=ing, erp=MockErpClient(), append_event=_append_event)
 
     assert parse_calls["count"] == 1
-    assert result.status == IngestionStatus.VALIDATED
+    assert result.status == IngestionStatus.NEED_USER_INPUT
     assert result.parse_format_label == "pdf_hybrid_pymupdf_rapidocr_250dpi"
     assert result.preview_data is not None
     assert result.preview_data.order.customerPoNo == "POGSVC2600205"
-    assert result.preview_data.details[0].materialCode == "020800003"
+    assert result.preview_data.details[0].customerMaterialNo == "020800003"
+    assert result.preview_data.details[0].materialCode == ""
+    assert "material_code" in result.missing_fields
+    assert any("客户物料对应表" in issue.message for issue in result.issues)
     assert not any("forced_ocr_retry" in event.message for event in result.audit_events)
 
 

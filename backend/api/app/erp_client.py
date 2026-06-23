@@ -1205,6 +1205,43 @@ class RealErpClient:
         except (TypeError, ValueError):
             return str(code).strip() == "200"
 
+    _DATYNK_REQUIRED_DETAIL_FIELDS: Tuple[Tuple[str, str], ...] = (
+        ("materialCode", "物料编码"),
+        ("qty", "数量"),
+        ("price", "不含税单价"),
+        ("taxPrice", "含税单价"),
+        ("amount", "不含税金额"),
+        ("allAmount", "含税金额"),
+        ("tax", "税率"),
+    )
+
+    @staticmethod
+    def _datynk_detail_value_missing(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return False
+        return not str(value).strip()
+
+    @classmethod
+    def _validate_datynk_sale_order_details(cls, details: List[Dict[str, Any]]) -> None:
+        missing: List[Dict[str, Any]] = []
+        for index, detail in enumerate(details):
+            for key, label in cls._DATYNK_REQUIRED_DETAIL_FIELDS:
+                if cls._datynk_detail_value_missing(detail.get(key)):
+                    missing.append({"row": index + 1, "field": key, "label": label})
+        if not missing:
+            return
+        labels = "、".join(f"第 {item['row']} 行{item['label']}" for item in missing[:12])
+        if len(missing) > 12:
+            labels += f" 等 {len(missing)} 项"
+        raise RealErpClient.ErpClientError(
+            code="ERP_DATYNK_MISSING_DETAIL_FIELDS",
+            message=f"创建 ERP 订单失败：订单明细必填字段为空，请补齐 {labels}。",
+            status_code=0,
+            details={"missing_fields": missing},
+        )
+
     def _build_datynk_sale_order_body(
         self,
         doc_type: str,
@@ -1246,10 +1283,8 @@ class RealErpClient:
                 status_code=0,
                 details={},
             )
-        line_qty_raw = self._datynk_pick(payload, "line_qty", "qty") or "1"
-        qty = self._safe_float(line_qty_raw, 1.0)
-        if qty <= 0:
-            qty = 1.0
+        line_qty_raw = self._datynk_pick(payload, "line_qty", "qty")
+        qty = self._safe_float(line_qty_raw, 0.0)
         doc_date = self._datynk_pick(payload, "doc_date", "orderDate", "order_date")
         if not doc_date:
             raise RealErpClient.ErpClientError(
@@ -1265,22 +1300,6 @@ class RealErpClient:
         order_status = self._datynk_pick(payload, "orderStatus", "order_status") or "pending"
         delivery_addr = self._datynk_pick(payload, "deliveryAddr", "delivery_addr", "delivery_address")
         customer_po = self._datynk_pick(payload, "customerPoNo", "customer_po_no")
-
-        price = self._safe_float(
-            self._datynk_pick(payload, "unit_price", "line_price", "price"),
-            1.0,
-        )
-        if price <= 0:
-            price = 1.0
-        tax_pct = self._safe_float(self._datynk_pick(payload, "tax", "tax_rate"), 13.0)
-        amount = round(price * qty, 10)
-        tax_amount = round(amount * (tax_pct / 100.0), 10)
-        all_amount = round(amount + tax_amount, 10)
-        tax_price = round(all_amount / qty, 10) if qty else all_amount
-        if abs(tax_pct - int(tax_pct)) < 1e-9:
-            tax_field: Any = int(tax_pct)
-        else:
-            tax_field = tax_pct
 
         details_override = self._datynk_pick(payload, "datynk_details_json", "details_json")
         if details_override:
@@ -1302,6 +1321,29 @@ class RealErpClient:
                 )
             details: List[Dict[str, Any]] = list(parsed)
         else:
+            price_raw = self._datynk_pick(payload, "unit_price", "line_price", "price")
+            tax_price_raw = self._datynk_pick(payload, "taxPrice", "tax_price", "unit_price_incl_tax")
+            amount_raw = self._datynk_pick(payload, "amount", "line_amount_excl_tax")
+            all_amount_raw = self._datynk_pick(payload, "allAmount", "all_amount", "line_amount_incl_tax")
+            tax_raw = self._datynk_pick(payload, "tax", "tax_rate")
+            price = self._safe_float(price_raw, 0.0)
+            tax_price = self._safe_float(tax_price_raw, 0.0)
+            amount = self._safe_float(amount_raw, 0.0)
+            all_amount = self._safe_float(all_amount_raw, 0.0)
+            tax_pct = self._safe_float(tax_raw, 0.0)
+            if tax_raw.strip() and abs(tax_pct - int(tax_pct)) < 1e-9:
+                tax_field: Any = int(tax_pct)
+            elif tax_raw.strip():
+                tax_field = tax_pct
+            else:
+                tax_field = ""
+            tax_amount_raw = self._datynk_pick(payload, "taxAmount", "tax_amount")
+            if tax_amount_raw.strip():
+                tax_amount: Any = self._safe_float(tax_amount_raw, 0.0)
+            elif amount_raw.strip() and tax_raw.strip():
+                tax_amount = round(amount * (tax_pct / 100.0), 10)
+            else:
+                tax_amount = ""
             gift_raw = self._datynk_pick(payload, "gift", "line_gift").lower()
             gift = gift_raw in ("1", "true", "yes", "on")
             detail: Dict[str, Any] = {
@@ -1310,17 +1352,19 @@ class RealErpClient:
                 "productSpec": self._datynk_pick(payload, "productSpec", "product_spec"),
                 "ph": self._datynk_pick(payload, "ph", "material_ph"),
                 "customerMaterialNo": self._datynk_pick(payload, "customerMaterialNo", "customer_material_no"),
-                "qty": qty,
-                "price": price,
-                "taxPrice": tax_price,
-                "amount": amount,
-                "allAmount": all_amount,
+                "qty": qty if line_qty_raw.strip() else "",
+                "price": price if price_raw.strip() else "",
+                "taxPrice": tax_price if tax_price_raw.strip() else "",
+                "amount": amount if amount_raw.strip() else "",
+                "allAmount": all_amount if all_amount_raw.strip() else "",
                 "tax": tax_field,
                 "taxAmount": tax_amount,
                 "gift": gift,
                 "remark": self._datynk_pick(payload, "line_remark", "detail_remark"),
             }
             details = [detail]
+
+        self._validate_datynk_sale_order_details(details)
 
         order: Dict[str, Any] = {
             "org": org,
