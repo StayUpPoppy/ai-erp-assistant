@@ -78,6 +78,15 @@ class HealthResponse(BaseModel):
     mineru_mode: str = "precise_v4"
     mineru_token_configured: bool = False
     mineru_model: str = ""
+    qwen_vision_extract_enabled: bool = False
+    qwen_vision_force_all: bool = False
+    qwen_vision_model: str = "qwen3.7-plus"
+    qwen_vision_base_url: str = ""
+    qwen_vision_api_key_configured: bool = False
+    qwen_vision_timeout_seconds: float = 180.0
+    qwen_vision_max_pdf_pages: int = 10
+    qwen_vision_render_dpi: int = 180
+    qwen_vision_fallback_to_local: bool = True
     erp_client_mode: str = "mock"
     erp_sale_order_page_enabled: bool = False
     erp_customer_page_enabled: bool = False

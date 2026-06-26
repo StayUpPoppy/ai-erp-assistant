@@ -40,6 +40,13 @@ from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus, 
 from app.extraction_profile import apply_field_aliases, get_profile, refresh_ingestion_required_keys
 from app.llm_extract import try_apply_llm_preview
 from app.order_preview import apply_customer_material_mapping, apply_preview_to_ingestion, build_order_preview_data
+from app.qwen_vision_extract import (
+    qwen_vision_fallback_to_local,
+    qwen_vision_max_pdf_pages,
+    qwen_vision_model_name,
+    should_defer_local_parse_for_qwen,
+    try_apply_qwen_vision_preview,
+)
 from app.structured_extract import (
     extract_po_cn_layout_entities,
     extract_structured_fields,
@@ -100,6 +107,9 @@ class WorkflowState(TypedDict):
     first_parse_format: str
     parse_warnings: List[str]
     document_parse: object | None
+    source_bytes: bytes
+    qwen_vision_attempted: bool
+    qwen_vision_applied: bool
 
 
 class NodeExecutionError(Exception):
@@ -489,6 +499,7 @@ def _node_parse(state: WorkflowState) -> WorkflowState:
         ing = state["ingestion"]
         name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
         raw = get_object_bytes(ing.source_file_object_key)
+        state["source_bytes"] = raw
         if not raw:
             state["document_text"] = ""
             ing.parsed_char_count = 0
@@ -501,6 +512,22 @@ def _node_parse(state: WorkflowState) -> WorkflowState:
                 "(no object bytes: configure MinIO, LOCAL_OBJECT_STORAGE_DIR fallback, or re-upload)",
             )
             return {"chars": 0, "skipped": 1}
+
+        if should_defer_local_parse_for_qwen(raw, name, ing.source_file_content_type):
+            state["document_text"] = f"Qwen vision extraction pending for {name}"
+            state["first_parse_format"] = "qwen_vision_deferred"
+            state["parse_warnings"] = []
+            ing.parsed_char_count = 0
+            ing.extract_preview = None
+            ing.parse_format_label = "qwen_vision_deferred"
+            elapsed_ms = int((perf_counter() - started) * 1000)
+            state["append_event"](
+                ing,
+                IngestionStatus.PARSED,
+                f"parse outcome=deferred_to_qwen_vision format=qwen_vision_deferred "
+                f"chars=0 max_pdf_pages={qwen_vision_max_pdf_pages()} elapsed_ms={elapsed_ms}",
+            )
+            return {"chars": 0, "format": "qwen_vision_deferred", "qwen_vision_deferred": 1, "elapsed_ms": elapsed_ms}
 
         parsed = state.get("document_parse")
         if parsed is None:
@@ -534,6 +561,29 @@ def _node_parse(state: WorkflowState) -> WorkflowState:
 
     _run_node_with_retry(state=state, node_name="parse", fn=_parse_impl, default_max_retries=1, default_backoff_ms=100)
     return state
+
+
+def _run_local_parse_after_qwen_fallback(state: WorkflowState, raw: bytes, name: str, reason: str) -> str:
+    started = perf_counter()
+    ing = state["ingestion"]
+    parsed = extract_document_from_bytes(raw, name)
+    state["document_parse"] = parsed
+    text, fmt = parsed.text, parsed.format_label
+    state["document_text"] = text
+    state["first_parse_format"] = fmt
+    state["parse_warnings"] = list(parsed.warnings) + [f"qwen_vision_failed:{reason}"]
+    ing.parsed_char_count = len(text)
+    ing.extract_preview = truncate_for_api(text) if text else None
+    ing.parse_format_label = fmt
+    elapsed_ms = int((perf_counter() - started) * 1000)
+    state["append_event"](
+        ing,
+        IngestionStatus.PARSED,
+        f"parse outcome=qwen_vision_failed_fallback_local format={fmt} route={parsed.route} chars={len(text)} "
+        f"quality={parsed.quality_score:.3f} fallback_reason={parsed.fallback_reason or 'none'} "
+        f"mineru_used={int(parsed.mineru_used)} elapsed_ms={elapsed_ms}",
+    )
+    return text
 
 
 def _apply_extraction_pass(ing: IngestionResponse, text: str) -> Dict[str, int]:
@@ -590,14 +640,63 @@ def _apply_extraction_pass(ing: IngestionResponse, text: str) -> Dict[str, int]:
 def _node_extract(state: WorkflowState) -> WorkflowState:
     def _extract_impl() -> Dict[str, int]:
         ing = state["ingestion"]
-        text = state["document_text"] or ""
+        name = resolved_upload_file_name(ing.source_file_object_key, ing.source_file_name)
+        raw = state.get("source_bytes") or b""
+        if should_defer_local_parse_for_qwen(raw, name, ing.source_file_content_type):
+            state["qwen_vision_attempted"] = True
+            qwen_result = try_apply_qwen_vision_preview(ing, raw, name, ing.source_file_content_type)
+            if qwen_result.applied:
+                state["qwen_vision_applied"] = True
+                state["document_text"] = qwen_result.summary_text
+                state["first_parse_format"] = "qwen_vision"
+                if qwen_result.truncated:
+                    state["parse_warnings"].append("qwen_vision_pdf_truncated")
+                ing.parsed_char_count = len(qwen_result.summary_text)
+                ing.extract_preview = truncate_for_api(qwen_result.summary_text) if qwen_result.summary_text else None
+                ing.parse_format_label = "qwen_vision"
+                refresh_ingestion_required_keys(ing)
+                state["append_event"](
+                    ing,
+                    IngestionStatus.EXTRACTED,
+                    f"qwen vision structured fields extracted missing_count={len(ing.missing_fields)} "
+                    f"doc_type_hint={ing.doc_type_hint.value if ing.doc_type_hint else 'none'} "
+                    f"pages={qwen_result.pages} images={qwen_result.images} truncated={int(qwen_result.truncated)} "
+                    f"elapsed_ms={qwen_result.elapsed_ms} model={qwen_vision_model_name()} llm_passes=1",
+                )
+                return {
+                    "missing": len(ing.missing_fields),
+                    "qwen_vision": 1,
+                    "llm_preview": 0,
+                    "pages": qwen_result.pages,
+                    "images": qwen_result.images,
+                    "elapsed_ms": qwen_result.elapsed_ms,
+                }
+
+            if not qwen_vision_fallback_to_local():
+                ing.issues.append(
+                    PreviewIssue(
+                        path="qwen_vision",
+                        level="error",
+                        message=f"Qwen视觉抽取失败：{qwen_result.reason}",
+                    )
+                )
+                raise NodeExecutionError(
+                    node_name="extract",
+                    reason=f"qwen_vision_failed {qwen_result.reason}",
+                    failure_type="node",
+                )
+
+            text = _run_local_parse_after_qwen_fallback(state, raw, name, qwen_result.reason)
+        else:
+            text = state["document_text"] or ""
         metrics = _apply_extraction_pass(ing, text)
         state["append_event"](
             ing,
             IngestionStatus.EXTRACTED,
             f"structured fields extracted missing_count={len(ing.missing_fields)} doc_type_hint="
             f"{ing.doc_type_hint.value if ing.doc_type_hint else 'none'} llm_preview={metrics.get('llm_preview', 0)} "
-            f"preview_score={_preview_completeness_score(_preview_for_scoring(ing))} llm_passes=1",
+            f"preview_score={_preview_completeness_score(_preview_for_scoring(ing))} "
+            f"qwen_vision_attempted={int(state.get('qwen_vision_attempted', False))} llm_passes=1",
         )
         return metrics
 
@@ -755,6 +854,10 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
                 message = "MinerU 未返回有效正文，当前预览来自本地解析，请人工核对。"
             else:
                 message = f"PDF 解析提示：{warning}"
+            if warning.startswith("qwen_vision_failed"):
+                message = "Qwen视觉抽取失败，已回退本地解析，请人工核对当前预览。"
+            elif warning.startswith("qwen_vision_pdf_truncated"):
+                message = "Qwen视觉抽取只处理了PDF前几页，请人工核对是否存在遗漏明细。"
             if ("parse", message) not in existing:
                 ing.issues.append(PreviewIssue(path="parse", level="warning", message=message))
                 existing.add(("parse", message))
@@ -1057,6 +1160,9 @@ def run_ingestion_processing_workflow(
         "first_parse_format": "",
         "parse_warnings": [],
         "document_parse": None,
+        "source_bytes": b"",
+        "qwen_vision_attempted": False,
+        "qwen_vision_applied": False,
     }
     try:
         if StateGraph is not None and END is not None:
