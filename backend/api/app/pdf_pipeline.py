@@ -49,7 +49,6 @@ class DocumentParseResult:
     quality_score: float = 0.0
     fallback_reason: str = ""
     timings_ms: dict[str, int] = field(default_factory=dict)
-    mineru_used: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -394,7 +393,7 @@ def _has_usable_detail_rows(result: DocumentParseResult) -> bool:
     return False
 
 
-def mineru_fallback_reason(result: DocumentParseResult) -> str:
+def local_quality_reason(result: DocumentParseResult) -> str:
     min_chars = _env_int("PDF_NATIVE_MIN_CHARS", 48, 8, 5000)
     if _non_space_chars(result.text) < min_chars:
         return "document_text_too_short"
@@ -407,42 +406,22 @@ def mineru_fallback_reason(result: DocumentParseResult) -> str:
 
 
 def parse_pdf_document(raw: bytes, file_name: str = "document.pdf") -> DocumentParseResult:
-    """Run the local fast path, then use MinerU at most once when quality is insufficient."""
+    """Run the local PDF parse path only.
+
+    Cloud fallback has been removed from the production workflow.  We still
+    calculate ``fallback_reason`` as a local quality hint for preview issues
+    and diagnostics, but no external document parser request is made here.
+    """
     result = parse_pdf_local(raw, file_name)
-    reason = mineru_fallback_reason(result)
+    reason = local_quality_reason(result)
     result.fallback_reason = reason
-    enabled = (os.getenv("MINERU_ENABLED") or "false").strip().lower() in {"1", "true", "yes", "on"}
-    if not reason or not enabled:
-        return result
-
-    started = perf_counter()
-    try:
-        from app.mineru_client import MineruClientError, parse_pdf_bytes_with_mineru
-
-        mineru_text, mineru_format = parse_pdf_bytes_with_mineru(raw, file_name)
-        result.timings_ms["mineru"] = int((perf_counter() - started) * 1000)
-        if mineru_text:
-            result.text = _normalize_text(mineru_text)
-            result.format_label = f"{result.format_label}+{mineru_format}"
-            result.route = "mineru_v4"
-            result.mineru_used = True
-            result.quality_score = 1.0
-            logger.info(
-                "pdf_mineru_fallback_applied file_name=%s reason=%s chars=%s elapsed_ms=%s",
-                file_name,
-                reason,
-                len(result.text),
-                result.timings_ms["mineru"],
-            )
-        else:
-            result.warnings.append(f"mineru_empty:{mineru_format}")
-    except MineruClientError as exc:
-        result.timings_ms["mineru"] = int((perf_counter() - started) * 1000)
-        result.warnings.append(f"mineru_failed:{type(exc).__name__}")
-        logger.warning("pdf_mineru_fallback_failed file_name=%s reason=%s err=%s", file_name, reason, exc)
-    except Exception as exc:
-        result.timings_ms["mineru"] = int((perf_counter() - started) * 1000)
-        result.warnings.append(f"mineru_failed:{type(exc).__name__}")
-        logger.exception("pdf_mineru_fallback_unexpected file_name=%s reason=%s", file_name, reason)
-    result.timings_ms["total"] = result.timings_ms.get("total", 0) + result.timings_ms.get("mineru", 0)
+    if reason:
+        logger.info(
+            "pdf_local_parse_quality_hint file_name=%s reason=%s route=%s chars=%s quality=%.3f",
+            file_name,
+            reason,
+            result.route,
+            len(result.text),
+            result.quality_score,
+        )
     return result

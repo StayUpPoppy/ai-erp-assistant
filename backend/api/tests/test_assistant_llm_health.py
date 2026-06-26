@@ -22,3 +22,17 @@ def test_health_reports_llm_router_configuration(monkeypatch):
     assert h.llm_model == "model-for-router-test"
     assert h.llm_base_url == "https://llm.example.test"
     assert h.llm_prompt_version == "prompt-test"
+
+
+def test_health_treats_qwen_vision_key_as_llm_key(monkeypatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setenv("QWEN_VISION_API_KEY", "qwen-key")
+    monkeypatch.setenv("LLM_MODEL", "qwen3.7-plus")
+    monkeypatch.setenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+    h = health()
+
+    assert h.llm_api_key_configured is True
+    assert h.llm_model == "qwen3.7-plus"
+    assert h.llm_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"

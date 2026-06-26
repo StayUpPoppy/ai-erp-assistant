@@ -73,11 +73,6 @@ class HealthResponse(BaseModel):
     tesseract_has_chi_sim: bool = False
     ocr_chinese_ready: bool = False
     aliyun_ocr_configured: bool = False
-    mineru_enabled: bool = False
-    mineru_api_base: str = ""
-    mineru_mode: str = "precise_v4"
-    mineru_token_configured: bool = False
-    mineru_model: str = ""
     qwen_vision_extract_enabled: bool = False
     qwen_vision_force_all: bool = False
     qwen_vision_model: str = "qwen3.7-plus"
@@ -87,6 +82,8 @@ class HealthResponse(BaseModel):
     qwen_vision_max_pdf_pages: int = 10
     qwen_vision_render_dpi: int = 180
     qwen_vision_fallback_to_local: bool = True
+    qwen_vision_include_local_text: bool = True
+    qwen_vision_local_text_max_chars: int = 12000
     erp_client_mode: str = "mock"
     erp_sale_order_page_enabled: bool = False
     erp_customer_page_enabled: bool = False

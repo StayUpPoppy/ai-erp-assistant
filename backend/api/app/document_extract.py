@@ -170,22 +170,6 @@ def _ocr_pdf_pages_supplement(
                 pass
 
 
-def _mineru_pdf_supplement(raw: bytes, file_name: str = "") -> Tuple[str, str]:
-    try:
-        from app.mineru_client import MineruClientError, parse_pdf_bytes_with_mineru
-
-        text, fmt = parse_pdf_bytes_with_mineru(raw, file_name or "document.pdf")
-        if text:
-            return _normalize_text(text), fmt
-        return "", fmt
-    except MineruClientError as exc:
-        logger.warning("document_extract_mineru_failed file_name=%s err=%s", file_name, exc)
-        return "", "mineru_error"
-    except Exception as exc:
-        logger.exception("document_extract_mineru_unexpected file_name=%s err=%s", file_name, exc)
-        return "", "mineru_error"
-
-
 def extract_pdf_text_with_forced_ocr(raw: bytes, file_name: str = "", max_pages: int = 3) -> Tuple[str, str]:
     """Extract a PDF text layer plus forced rendered-page OCR, ignoring sparse-text thresholds."""
     if not raw:

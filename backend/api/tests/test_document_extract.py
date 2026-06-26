@@ -214,7 +214,6 @@ def test_pdf_scanned_page_uses_rapidocr_at_250_dpi(monkeypatch):
             "ocr_rapid(ch_en)",
         )
 
-    monkeypatch.setenv("MINERU_ENABLED", "false")
     monkeypatch.setattr("app.pdf_pipeline._ocr_page", fake_ocr)
     result = extract_document_from_bytes(_blank_pdf(), "scan.pdf")
 
@@ -236,7 +235,6 @@ def test_pdf_native_page_skips_ocr(monkeypatch):
     finally:
         doc.close()
 
-    monkeypatch.setenv("MINERU_ENABLED", "false")
     monkeypatch.setattr("app.pdf_pipeline._ocr_page", lambda *_args, **_kwargs: pytest.fail("OCR must not run"))
     result = extract_document_from_bytes(raw, "native.pdf")
 
@@ -259,7 +257,6 @@ def test_pdf_mixed_pages_keep_page_order(monkeypatch):
     def fake_ocr(_page, page_number, _file_name, _dpi):
         return (f"scan page {page_number} M002 | 3 | 20", [], 0.91, "ocr_rapid(ch_en)")
 
-    monkeypatch.setenv("MINERU_ENABLED", "false")
     monkeypatch.setattr("app.pdf_pipeline._ocr_page", fake_ocr)
     result = extract_document_from_bytes(raw, "mixed.pdf")
 
@@ -268,45 +265,29 @@ def test_pdf_mixed_pages_keep_page_order(monkeypatch):
     assert result.text.index("[PAGE 1]") < result.text.index("[PAGE 2]")
 
 
-def test_pdf_low_confidence_calls_mineru_once(monkeypatch):
-    calls = {"mineru": 0}
-
-    monkeypatch.setenv("MINERU_ENABLED", "true")
-    monkeypatch.setattr(
-        "app.pdf_pipeline._ocr_page",
-        lambda *_args: ("Purchase Order PO-1", [], 0.50, "ocr_rapid(ch_en)"),
-    )
-
-    def fake_mineru(_raw, _file_name):
-        calls["mineru"] += 1
-        return "Purchase Order PO-1\n| Material | Qty | Price |\n|---|---|---|\n| M001 | 2 | 10 |", "mineru_v4_vlm_markdown"
-
-    monkeypatch.setattr("app.mineru_client.parse_pdf_bytes_with_mineru", fake_mineru)
-    result = extract_document_from_bytes(_blank_pdf(), "low.pdf")
-
-    assert calls["mineru"] == 1
-    assert result.mineru_used is True
-    assert result.route == "mineru_v4"
-    assert "M001" in result.text
-
-
-def test_pdf_mineru_failure_keeps_local_result(monkeypatch):
-    from app.mineru_client import MineruClientError
-
-    monkeypatch.setenv("MINERU_ENABLED", "true")
+def test_pdf_low_confidence_keeps_local_result(monkeypatch):
     monkeypatch.setattr(
         "app.pdf_pipeline._ocr_page",
         lambda *_args: ("Purchase Order PO-LOCAL", [], 0.50, "ocr_rapid(ch_en)"),
     )
+
+    result = extract_document_from_bytes(_blank_pdf(), "low.pdf")
+
+    assert result.route == "rapidocr"
+    assert "PO-LOCAL" in result.text
+    assert result.fallback_reason
+
+
+def test_pdf_quality_hint_keeps_local_result_without_external_warning(monkeypatch):
     monkeypatch.setattr(
-        "app.mineru_client.parse_pdf_bytes_with_mineru",
-        lambda *_args: (_ for _ in ()).throw(MineruClientError("timeout")),
+        "app.pdf_pipeline._ocr_page",
+        lambda *_args: ("Purchase Order PO-LOCAL", [], 0.50, "ocr_rapid(ch_en)"),
     )
     result = extract_document_from_bytes(_blank_pdf(), "fallback.pdf")
 
-    assert result.mineru_used is False
     assert "PO-LOCAL" in result.text
-    assert any(warning.startswith("mineru_failed") for warning in result.warnings)
+    assert result.fallback_reason
+    assert result.warnings == []
 
 
 def test_pdf_table_extraction_keeps_coordinates():

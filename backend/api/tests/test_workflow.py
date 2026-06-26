@@ -362,7 +362,7 @@ def test_workflow_calls_llm_extractor_once(monkeypatch):
     assert calls["count"] == 1
 
 
-def test_workflow_qwen_vision_success_skips_local_parse_and_text_llm(monkeypatch):
+def test_workflow_qwen_vision_success_uses_local_context_and_skips_text_llm(monkeypatch):
     from app.order_preview import apply_preview_to_ingestion, preview_to_resolved_fields
 
     monkeypatch.setenv("QWEN_VISION_EXTRACT_ENABLED", "true")
@@ -371,16 +371,21 @@ def test_workflow_qwen_vision_success_skips_local_parse_and_text_llm(monkeypatch
     monkeypatch.setattr("app.workflow.StateGraph", None)
     monkeypatch.setattr("app.workflow.END", None)
     monkeypatch.setattr("app.workflow.get_object_bytes", lambda _key: b"%PDF-1.7 fake")
-    monkeypatch.setattr(
-        "app.workflow.extract_document_from_bytes",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("local parse should be skipped")),
-    )
+    parse_calls = {"count": 0}
+
+    def local_parse(*_args):
+        parse_calls["count"] += 1
+        return _parsed("Purchase Order\nOrder No.: PO-QWEN\n1 | CUST-001 | Spring | 2", "pdf_native_pymupdf")
+
+    monkeypatch.setattr("app.workflow.extract_document_from_bytes", local_parse)
     monkeypatch.setattr(
         "app.workflow.try_apply_llm_preview",
         lambda *_args: (_ for _ in ()).throw(AssertionError("text LLM should be skipped")),
     )
 
-    def fake_qwen(ingestion, _raw, _name, _content_type):
+    def fake_qwen(ingestion, _raw, _name, _content_type, *, local_text="", local_format=""):
+        assert "PO-QWEN" in local_text
+        assert local_format == "pdf_native_pymupdf"
         preview = OrderPreviewData(
             order=OrderPreviewHeader(
                 org=ingestion.org_id,
@@ -396,7 +401,7 @@ def test_workflow_qwen_vision_success_skips_local_parse_and_text_llm(monkeypatch
         apply_preview_to_ingestion(ingestion, preview)
         ingestion.resolved_fields.update({k: v for k, v in preview_to_resolved_fields(preview).items() if str(v).strip()})
         ingestion.model_version = "qwen3.7-plus"
-        ingestion.prompt_version = "qwen-vision-order-preview-v1"
+        ingestion.prompt_version = "qwen-vision-order-preview-v2"
         return QwenVisionApplyResult(
             attempted=True,
             applied=True,
@@ -414,9 +419,10 @@ def test_workflow_qwen_vision_success_skips_local_parse_and_text_llm(monkeypatch
 
     result = run_ingestion_processing_workflow(ingestion=ing, erp=MockErpClient(), append_event=_append_event)
 
+    assert parse_calls["count"] == 1
     assert result.parse_format_label == "qwen_vision"
     assert result.model_version == "qwen3.7-plus"
-    assert result.prompt_version == "qwen-vision-order-preview-v1"
+    assert result.prompt_version == "qwen-vision-order-preview-v2"
     assert result.preview_data is not None
     assert result.preview_data.order.customerPoNo == "PO-QWEN"
     assert any("qwen vision structured fields extracted" in event.message for event in result.audit_events)
@@ -433,7 +439,7 @@ def test_workflow_qwen_vision_failure_falls_back_to_local_parse(monkeypatch):
     monkeypatch.setattr("app.workflow.get_object_bytes", lambda _key: b"%PDF-1.7 fake")
     monkeypatch.setattr(
         "app.workflow.try_apply_qwen_vision_preview",
-        lambda *_args: QwenVisionApplyResult(attempted=True, applied=False, reason="bad_json"),
+        lambda *_args, **_kwargs: QwenVisionApplyResult(attempted=True, applied=False, reason="bad_json"),
     )
     text = (
         "Purchase Order\nBuyer: Acme\nOrder No.: PO-FALLBACK\nIssue Date: 2026-03-06\nCurrency CNY\n"

@@ -21,11 +21,11 @@ def llm_extract_enabled() -> bool:
 
 
 def llm_model_name() -> str:
-    return (os.getenv("LLM_MODEL") or "deepseek-v4-pro").strip() or "deepseek-v4-pro"
+    return (os.getenv("LLM_MODEL") or "qwen3.7-plus").strip() or "qwen3.7-plus"
 
 
 def llm_prompt_version() -> str:
-    return (os.getenv("LLM_PROMPT_VERSION") or "deepseek-order-preview-v2").strip() or "deepseek-order-preview-v2"
+    return (os.getenv("LLM_PROMPT_VERSION") or "qwen-order-preview-v1").strip() or "qwen-order-preview-v1"
 
 
 def llm_reasoning_effort() -> str:
@@ -57,11 +57,16 @@ def _llm_timeout_seconds() -> float:
 
 
 def _llm_base_url() -> str:
-    return (os.getenv("LLM_BASE_URL") or "https://api.deepseek.com").strip().rstrip("/")
+    return (os.getenv("LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1").strip().rstrip("/")
 
 
 def _llm_api_key() -> str:
-    return (os.getenv("DEEPSEEK_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
+    return (
+        os.getenv("LLM_API_KEY")
+        or os.getenv("QWEN_VISION_API_KEY")
+        or os.getenv("DASHSCOPE_API_KEY")
+        or ""
+    ).strip()
 
 
 def llm_base_url() -> str:

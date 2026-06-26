@@ -57,7 +57,8 @@ def test_llm_router_disabled_returns_none(monkeypatch):
 def test_llm_router_probe_reports_disabled(monkeypatch):
     monkeypatch.delenv("ASSISTANT_LLM_ROUTER_ENABLED", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("QWEN_VISION_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
 
     res = probe_llm_router(ChatMessageRequest(message="查物料 M001", org_id="org-test"))
 
