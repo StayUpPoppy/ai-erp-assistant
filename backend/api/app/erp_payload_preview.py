@@ -79,7 +79,7 @@ def build_datynk_sale_order_payload(
                 {
                     "materialCode": detail.materialCode,
                     "productName": detail.productName or detail.materialCode,
-                    "productSpec": detail.productSpec,
+                    "customerMaterialSpec": detail.productSpec,
                     "ph": detail.ph,
                     "customerMaterialNo": detail.customerMaterialNo,
                     "qty": detail.qty if detail.qty is not None else qty,
@@ -104,7 +104,7 @@ def build_datynk_sale_order_payload(
             {
                 "materialCode": material,
                 "productName": _pick(fields, "productName", "product_name") or material,
-                "productSpec": _pick(fields, "productSpec", "product_spec"),
+                "customerMaterialSpec": _pick(fields, "customerMaterialSpec", "productSpec", "product_spec"),
                 "ph": _pick(fields, "ph", "material_ph"),
                 "customerMaterialNo": _pick(fields, "customerMaterialNo", "customer_material_no"),
                 "qty": qty,

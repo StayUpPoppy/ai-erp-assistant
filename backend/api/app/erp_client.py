@@ -1314,7 +1314,13 @@ class RealErpClient:
                     status_code=0,
                     details={},
                 )
-            details: List[Dict[str, Any]] = list(parsed)
+            details = []
+            for raw_detail in parsed:
+                detail = dict(raw_detail)
+                if "customerMaterialSpec" not in detail and "productSpec" in detail:
+                    detail["customerMaterialSpec"] = detail.get("productSpec")
+                detail.pop("productSpec", None)
+                details.append(detail)
         else:
             price_raw = self._datynk_pick(payload, "unit_price", "line_price", "price")
             tax_price_raw = self._datynk_pick(payload, "taxPrice", "tax_price", "unit_price_incl_tax")
@@ -1344,7 +1350,12 @@ class RealErpClient:
             detail: Dict[str, Any] = {
                 "materialCode": material,
                 "productName": self._datynk_pick(payload, "productName", "product_name") or material,
-                "productSpec": self._datynk_pick(payload, "productSpec", "product_spec"),
+                "customerMaterialSpec": self._datynk_pick(
+                    payload,
+                    "customerMaterialSpec",
+                    "productSpec",
+                    "product_spec",
+                ),
                 "ph": self._datynk_pick(payload, "ph", "material_ph"),
                 "customerMaterialNo": self._datynk_pick(payload, "customerMaterialNo", "customer_material_no"),
                 "qty": qty if line_qty_raw.strip() else "",

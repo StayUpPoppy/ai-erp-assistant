@@ -78,6 +78,8 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
     assert payload["order"]["createUser"] == payload["order"]["salesUser"]
     assert payload["order"]["rate"] == 1.0
     assert payload["details"][0]["materialCode"] == "S01P019430"
+    assert payload["details"][0]["customerMaterialSpec"] == "左旋7*55*122*8.5"
+    assert "productSpec" not in payload["details"][0]
 
 
 def test_order_preview_keeps_tax_and_non_tax_fields_separate() -> None:

@@ -526,6 +526,7 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
             "currency": "CNY",
             "rate": "1",
             "deliveryDate": "2026-05-20",
+            "productSpec": "PS-01",
             **_datynk_detail_money_fields(),
         },
         "ik-1",
@@ -549,6 +550,8 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert "jhq" not in body["order"]
     assert len(body["details"]) == 1
     assert body["details"][0]["materialCode"] == "S01"
+    assert body["details"][0]["customerMaterialSpec"] == "PS-01"
+    assert "productSpec" not in body["details"][0]
     assert body["details"][0]["qty"] == 2.0
     assert set(body) == {"order", "details", "files"}
     assert body["files"] == [
@@ -600,6 +603,44 @@ def test_datynk_sale_order_allows_missing_detail_money_fields(monkeypatch):
     assert detail["amount"] == ""
     assert detail["allAmount"] == ""
     assert detail["tax"] == ""
+
+
+def test_datynk_sale_order_renames_product_spec_in_details_override(monkeypatch):
+    monkeypatch.setenv("ERP_CLIENT_MODE", "real")
+    monkeypatch.setenv("ERP_BASE_URL", "https://erp.example.com")
+    monkeypatch.setenv("ERP_CREATE_BODY_STYLE", "datynk_sale_order")
+    monkeypatch.setenv("ERP_ALLOW_EMPTY_DRAFT_URL", "true")
+    import app.erp_client as erp_client_module
+
+    importlib.reload(erp_client_module)
+    client = erp_client_module.erp_client
+    captured: dict[str, object] = {}
+
+    def _fake_request_json(_method, _path, payload=None, **_kwargs):
+        captured["body"] = payload
+        return {"code": 200, "message": "success", "data": "SPEC-RENAMED"}
+
+    monkeypatch.setattr(client, "_request_json", _fake_request_json)
+
+    client.create_draft(
+        "PO",
+        {
+            "org": "org-1",
+            "customerName": "customer-1",
+            "material_code": "fallback",
+            "line_qty": "1",
+            "doc_date": "2026-05-13",
+            "datynk_details_json": json.dumps(
+                [{"materialCode": "S01", "productSpec": "OLD-SPEC", "qty": 2}],
+                ensure_ascii=False,
+            ),
+        },
+        "ik-spec",
+    )
+
+    detail = captured["body"]["details"][0]
+    assert detail["customerMaterialSpec"] == "OLD-SPEC"
+    assert "productSpec" not in detail
 
 
 def test_datynk_sale_order_uses_default_org(monkeypatch):

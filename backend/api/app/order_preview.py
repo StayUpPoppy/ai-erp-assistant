@@ -113,7 +113,9 @@ def build_order_preview_data(ingestion: IngestionResponse) -> OrderPreviewData |
             OrderPreviewDetail(
                 materialCode=str(item.get("materialCode") or item.get("inventory_code") or item.get("material_code") or "").strip(),
                 productName=str(item.get("productName") or item.get("name") or item.get("product_name") or "").strip(),
-                productSpec=str(item.get("productSpec") or item.get("product_spec") or "").strip(),
+                productSpec=str(
+                    item.get("customerMaterialSpec") or item.get("productSpec") or item.get("product_spec") or ""
+                ).strip(),
                 ph=str(item.get("ph") or "").strip(),
                 customerMaterialNo=str(item.get("customerMaterialNo") or item.get("customer_material_no") or "").strip(),
                 qty=_float_or_none(item.get("qty") or item.get("quantity")),
@@ -132,7 +134,7 @@ def build_order_preview_data(ingestion: IngestionResponse) -> OrderPreviewData |
             OrderPreviewDetail(
                 materialCode=_pick(fields, "materialCode", "material_code"),
                 productName=_pick(fields, "productName", "product_name"),
-                productSpec=_pick(fields, "productSpec", "product_spec"),
+                productSpec=_pick(fields, "customerMaterialSpec", "productSpec", "product_spec"),
                 ph=_pick(fields, "ph", "material_ph"),
                 customerMaterialNo=_pick(fields, "customerMaterialNo", "customer_material_no"),
                 qty=_float_or_none(fields.get("qty") or fields.get("line_qty")),
@@ -387,7 +389,7 @@ def preview_to_resolved_fields(preview: OrderPreviewData) -> Dict[str, str]:
             {
                 "materialCode": item.materialCode,
                 "productName": item.productName,
-                "productSpec": item.productSpec,
+                "customerMaterialSpec": item.productSpec,
                 "ph": item.ph,
                 "customerMaterialNo": item.customerMaterialNo,
                 "qty": item.qty,
@@ -418,6 +420,7 @@ def preview_to_resolved_fields(preview: OrderPreviewData) -> Dict[str, str]:
         "material_code": first.materialCode,
         "productName": first.productName,
         "productSpec": first.productSpec,
+        "customerMaterialSpec": first.productSpec,
         "ph": first.ph,
         "customerMaterialNo": first.customerMaterialNo,
         "qty": "" if first.qty is None else str(first.qty),
