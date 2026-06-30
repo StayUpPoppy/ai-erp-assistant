@@ -79,6 +79,7 @@ from app.store import (
     create_ingestion,
     create_upload,
     get_ingestion,
+    list_pending_ingestions_for_user,
     process_ingestion,
     resolve_ingestion,
 )
@@ -115,6 +116,7 @@ def service_index() -> Dict[str, Any]:
             "assistant_llm_probe": {"method": "POST", "path": "/assistant/llm-router/probe"},
             "uploads": {"method": "POST", "path": "/uploads"},
             "ingestions_create": {"method": "POST", "path": "/ingestions"},
+            "ingestions_pending": {"method": "GET", "path": "/ingestions/pending"},
             "ingestion_get": {"method": "GET", "path": "/ingestions/{ingestion_id}"},
             "ingestion_resolve": {"method": "POST", "path": "/ingestions/{ingestion_id}/resolve"},
             "ingestion_confirm_preview": {"method": "POST", "path": "/ingestions/{ingestion_id}/confirm-preview"},
@@ -972,6 +974,17 @@ def assistant_session_route(session_id: str, request: Request) -> AssistantSessi
         )
         return AssistantSessionResponse(session_id=session_id)
     return session
+
+
+@router.get("/ingestions/pending", response_model=list[IngestionResponse])
+def pending_ingestions_route(
+    request: Request,
+    limit: int = Query(20, ge=1, le=20),
+) -> list[IngestionResponse]:
+    current_user = _current_user_from_request(request)
+    if not current_user.userId:
+        return []
+    return list_pending_ingestions_for_user(current_user.userId, limit=limit)
 
 
 @router.get("/ingestions/{ingestion_id}", response_model=IngestionResponse)

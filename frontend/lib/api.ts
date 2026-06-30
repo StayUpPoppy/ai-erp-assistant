@@ -506,6 +506,12 @@ export async function getIngestion(ingestionId: string): Promise<IngestionRespon
   });
 }
 
+export async function getPendingIngestions(): Promise<IngestionResponse[]> {
+  return apiFetchJson<IngestionResponse[]>("/ingestions/pending", {
+    method: "GET",
+  });
+}
+
 /** 拉取解析与抽取结果的稳定 JSON（集成/落库用）；大文件慎用 ``includeFullText``。 */
 export async function getIngestionDocumentExport(
   ingestionId: string,

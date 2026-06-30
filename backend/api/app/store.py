@@ -1,9 +1,9 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import os
 from threading import Lock
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
 from app.database import SessionLocal, is_database_enabled
@@ -91,6 +91,17 @@ class InMemoryStore:
 
 store = InMemoryStore(ingestions={}, file_hash_to_ingestion={}, lock=Lock())
 
+_PENDING_INGESTION_STATUSES = {
+    IngestionStatus.UPLOADED.value,
+    IngestionStatus.CLASSIFIED.value,
+    IngestionStatus.PARSED.value,
+    IngestionStatus.EXTRACTED.value,
+    IngestionStatus.MAPPED.value,
+    IngestionStatus.NEED_USER_INPUT.value,
+    IngestionStatus.VALIDATED.value,
+    IngestionStatus.FAILED.value,
+}
+
 
 def _file_owner_key(file_hash: str, user_id: str) -> str:
     return f"{user_id}:{file_hash}"
@@ -98,6 +109,43 @@ def _file_owner_key(file_hash: str, user_id: str) -> str:
 
 def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
+
+
+def _status_value(status: IngestionStatus | str) -> str:
+    return status.value if isinstance(status, IngestionStatus) else str(status)
+
+
+def _uploaded_at_timestamp(ingestion: IngestionResponse) -> Optional[float]:
+    raw = (ingestion.source_file_uploaded_at or "").strip()
+    if not raw:
+        return None
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _sort_pending_ingestions(
+    ingestions: Iterable[IngestionResponse],
+    limit: int,
+) -> List[IngestionResponse]:
+    pending = [
+        ingestion
+        for ingestion in ingestions
+        if _status_value(ingestion.status) in _PENDING_INGESTION_STATUSES
+    ]
+    pending.sort(
+        key=lambda ingestion: (
+            _uploaded_at_timestamp(ingestion) is not None,
+            _uploaded_at_timestamp(ingestion) or 0,
+        ),
+        reverse=True,
+    )
+    return pending[: max(0, min(limit, 20))]
 
 
 def _merge_upload_payload_into_ingestion(ing: IngestionResponse, payload: CreateIngestionRequest) -> bool:
@@ -532,6 +580,22 @@ def get_ingestion(ingestion_id: str) -> Optional[IngestionResponse]:
             session.close()
     with store.lock:
         return store.ingestions.get(ingestion_id)
+
+
+def list_pending_ingestions_for_user(user_id: str, limit: int = 20) -> List[IngestionResponse]:
+    owner = (user_id or "").strip()
+    if not owner:
+        return []
+    if is_database_enabled():
+        session = _db_session()
+        try:
+            rows = ingestion_db.list_by_user_id(session, owner)
+        finally:
+            session.close()
+        return _sort_pending_ingestions(rows, limit)
+    with store.lock:
+        rows = [ingestion for ingestion in store.ingestions.values() if ingestion.user_id == owner]
+    return _sort_pending_ingestions(rows, limit)
 
 
 def _refresh_preview_from_resolved_fields(ingestion: IngestionResponse) -> None:

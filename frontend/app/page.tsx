@@ -23,6 +23,7 @@ import {
   getCurrentUser,
   getHealth,
   getIngestion,
+  getPendingIngestions,
   postAssistantFile,
   postAssistantLlmProbe,
   postAssistantMessage,
@@ -641,6 +642,8 @@ export default function HomePage() {
   const [userId, setUserId] = useState("演示用户");
   const [userName, setUserName] = useState("演示用户");
   const [assistantSessionId, setAssistantSessionId] = useState<string | null>(null);
+  const [currentUserHydrated, setCurrentUserHydrated] = useState(false);
+  const [assistantSessionHydrated, setAssistantSessionHydrated] = useState(false);
   const [healthInfo, setHealthInfo] = useState<HealthResponse | null>(null);
   /** 可选：对应 API 侧 backend/config/extraction_profiles/{id}.json；留空则按 org_id / default 自动选 */
   const [extractionProfileId, setExtractionProfileId] = useState("datynk-dev");
@@ -707,6 +710,7 @@ export default function HomePage() {
   const clientDraftStateRef = useRef<ClientDraftStateByIngestion>({});
   const poll404WarnedRef = useRef(false);
   const poll404WarnedByIngestionRef = useRef<BooleanByIngestion>({});
+  const pendingAutoOpenAttemptedRef = useRef(false);
   /** 避免子元素触发 dragleave 导致「拖拽高亮」闪烁 */
   const dragDepthRef = useRef(0);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
@@ -722,16 +726,21 @@ export default function HomePage() {
 
   useEffect(() => {
     let cancelled = false;
+    const markHydrated = () => {
+      if (!cancelled) setCurrentUserHydrated(true);
+    };
     void getCurrentUser()
       .then((erpUser) => {
         if (cancelled) return;
         if (erpUser.userId) setUserId(erpUser.userId);
         if (erpUser.userName) setUserName(erpUser.userName);
         if (erpUser.orgId) setOrgId(erpUser.orgId);
+        markHydrated();
         clientLogger.info("已从后端同步 ERP 用户信息", erpUser);
       })
       .catch((error) => {
         if (cancelled) return;
+        markHydrated();
         clientLogger.warn("后端 ERP 用户信息同步失败，使用默认用户信息", { error });
       });
     return () => {
@@ -948,6 +957,7 @@ export default function HomePage() {
 
   useEffect(() => {
     let cancelled = false;
+    setAssistantSessionHydrated(false);
     let sid: string | null = null;
     let metas: ChatSessionMeta[] = [];
     try {
@@ -974,7 +984,7 @@ export default function HomePage() {
     setAssistantSessionId(sid);
 
     void getAssistantSession(sid)
-      .then((session) => {
+      .then(async (session) => {
         if (cancelled) return;
         const restoredMessages = session.messages.map((m, index) => ({
           id: `restored-${index}-${session.session_id}`,
@@ -984,16 +994,48 @@ export default function HomePage() {
           toolUi: m.ui ?? null,
         }));
         setChatMessages(restoredMessages);
-        void restoreActiveIngestion(sid, session.active_task?.ingestion_id ?? null, restoredMessages, () => cancelled);
+        await restoreActiveIngestion(sid, session.active_task?.ingestion_id ?? null, restoredMessages, () => cancelled);
       })
       .catch(() => {
         /* A brand-new local session has no server history yet. */
+      })
+      .finally(() => {
+        if (!cancelled) setAssistantSessionHydrated(true);
       });
 
     return () => {
       cancelled = true;
     };
   }, [restoreActiveIngestion]);
+
+  useEffect(() => {
+    if (!currentUserHydrated || !assistantSessionHydrated || pendingAutoOpenAttemptedRef.current) return;
+    pendingAutoOpenAttemptedRef.current = true;
+
+    let cancelled = false;
+    void getPendingIngestions()
+      .then((items) => {
+        if (cancelled || ingestionIdRef.current || items.length === 0) return;
+        clientLogger.info("auto_open_pending_ingestions", {
+          count: items.length,
+          firstIngestionId: items[0]?.ingestion_id ?? null,
+        });
+        items.forEach((item, index) => {
+          const displayStatus = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
+          upsertIngestionState(item, {
+            activate: index === 0,
+            poll: isBackgroundRunningStatus(displayStatus),
+          });
+        });
+      })
+      .catch((error) => {
+        if (!cancelled) clientLogger.warn("auto_open_pending_ingestions_failed", { error });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [assistantSessionHydrated, currentUserHydrated, upsertIngestionState]);
 
   /** 与 ``GET /ingestions/{id}/document`` 一致，便于复制到 Postman / 集成脚本 */
   const documentJsonUrls = useMemo(() => {

@@ -326,6 +326,12 @@ def get_by_file_hash_and_user_id(session: Session, file_hash: str, user_id: str)
     return row_to_ingestion(row)
 
 
+def list_by_user_id(session: Session, user_id: str) -> List[IngestionResponse]:
+    stmt = select(IngestionRow).where(IngestionRow.user_id == user_id)
+    rows = session.execute(stmt).scalars().all()
+    return [row_to_ingestion(row) for row in rows]
+
+
 def upsert_ingestion(session: Session, ing: IngestionResponse) -> None:
     """按 ingestion_id upsert：存在则更新，不存在则插入。"""
     row = session.get(IngestionRow, ing.ingestion_id)
