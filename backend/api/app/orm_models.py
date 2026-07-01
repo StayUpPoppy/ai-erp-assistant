@@ -9,7 +9,7 @@ ingestion 表的 ORM 定义。
 
 from typing import List, Optional
 
-from sqlalchemy import String, Text
+from sqlalchemy import Boolean, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,5 +52,21 @@ class AssistantSessionRow(Base):
     messages: Mapped[List] = mapped_column(JSONB, nullable=False, default=list)
     active_task: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     ui: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+
+
+class WecomOrderRouteRow(Base):
+    __tablename__ = "wecom_order_routes"
+
+    route_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    wecom_group_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    wecom_group_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    customer_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    factory_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    erp_user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    sales_user_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    org_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(40), nullable=False, index=True)

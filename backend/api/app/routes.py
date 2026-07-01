@@ -1,3 +1,5 @@
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -60,6 +62,8 @@ from app.schemas import (
     SaveCustomerResponse,
     UploadRequest,
     UploadResponse,
+    WecomOrderFileBase64Request,
+    WecomOrderFileResponse,
 )
 from app.tools.pdf_to_erp import pdf_to_erp_tool
 from app.queue_client import enqueue_ingestion_job, get_ingestion_fallback_mode, queue_health_payload, remove_ingestion_job
@@ -83,6 +87,7 @@ from app.store import (
     process_ingestion,
     resolve_ingestion,
 )
+from app.wecom_order_routes import WecomOrderRoute, resolve_wecom_order_route
 
 router = APIRouter()
 logger = logging.getLogger("ai_erp_api")
@@ -91,6 +96,11 @@ _SOURCE_FILE_BEARER = HTTPBearer(
     auto_error=False,
     scheme_name="SourceFileBearer",
     description="ERP backend source-file service token",
+)
+_WECOM_INGEST_BEARER = HTTPBearer(
+    auto_error=False,
+    scheme_name="WecomIngestBearer",
+    description="Enterprise WeCom order ingest token",
 )
 
 _ERP_USER_INFO_COOKIE_NAMES = ("userInfo", "userinfo")
@@ -115,6 +125,8 @@ def service_index() -> Dict[str, Any]:
             "assistant_files": {"method": "POST", "path": "/assistant/files"},
             "assistant_llm_probe": {"method": "POST", "path": "/assistant/llm-router/probe"},
             "uploads": {"method": "POST", "path": "/uploads"},
+            "wecom_order_files": {"method": "POST", "path": "/integrations/wecom/order-files"},
+            "wecom_order_files_base64": {"method": "POST", "path": "/integrations/wecom/order-files/base64"},
             "ingestions_create": {"method": "POST", "path": "/ingestions"},
             "ingestions_pending": {"method": "GET", "path": "/ingestions/pending"},
             "ingestion_get": {"method": "GET", "path": "/ingestions/{ingestion_id}"},
@@ -292,6 +304,36 @@ async def _create_ingestion_from_upload_file(
     log_event: str,
 ) -> IngestionResponse:
     raw = await file.read()
+    ingestion, _file_hash = _create_ingestion_from_raw_bytes(
+        request=request,
+        raw=raw,
+        file_name=file.filename or "upload.bin",
+        declared_content_type=file.content_type,
+        user_id=user_id,
+        org_id=org_id,
+        extraction_profile_id=extraction_profile_id,
+        force_reprocess=force_reprocess,
+        log_event=log_event,
+        apply_current_user=True,
+    )
+    return ingestion
+
+
+def _create_ingestion_from_raw_bytes(
+    *,
+    request: Request,
+    raw: bytes,
+    file_name: str,
+    declared_content_type: Optional[str],
+    user_id: str,
+    org_id: str,
+    extraction_profile_id: Optional[str],
+    force_reprocess: bool = False,
+    log_event: str,
+    provided_file_hash: Optional[str] = None,
+    require_pdf: bool = False,
+    apply_current_user: bool = True,
+) -> tuple[IngestionResponse, str]:
     if len(raw) > _MAX_UPLOAD_BYTES:
         logger.warning(
             "upload_binary_rejected_too_large request_id=%s size=%s",
@@ -301,8 +343,13 @@ async def _create_ingestion_from_upload_file(
         raise HTTPException(status_code=413, detail="FILE_TOO_LARGE")
 
     file_hash = hashlib.sha256(raw).hexdigest()
-    file_name = file.filename or "upload.bin"
-    content_type = _source_content_type(file_name, file.content_type, raw)
+    expected_hash = (provided_file_hash or "").strip().lower()
+    if expected_hash and expected_hash != file_hash:
+        raise HTTPException(status_code=400, detail="FILE_HASH_MISMATCH")
+    file_name = file_name or "upload.bin"
+    content_type = _source_content_type(file_name, declared_content_type, raw)
+    if require_pdf and not raw.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="UNSUPPORTED_WECOM_FILE_TYPE")
     uploaded_at = datetime.now(timezone.utc).isoformat()
     try:
         object_key = save_binary_file(
@@ -335,7 +382,8 @@ async def _create_ingestion_from_upload_file(
         force_reprocess=_form_bool(force_reprocess),
     )
 
-    payload = _apply_current_user_to_upload(payload, request)
+    if apply_current_user:
+        payload = _apply_current_user_to_upload(payload, request)
     try:
         ingestion = create_upload(payload)
     except Exception:
@@ -368,11 +416,11 @@ async def _create_ingestion_from_upload_file(
             ingestion.ingestion_id,
             ingestion.status,
         )
-        return ingestion
+        return ingestion, file_hash
     if not enqueued:
         logger.warning("enqueue_failed request_id=%s ingestion_id=%s", request_id, ingestion.ingestion_id)
     _handle_queue_dispatch_outcome(ingestion.ingestion_id, enqueued, request_id)
-    return ingestion
+    return ingestion, file_hash
 
 
 def _current_user_from_request(request: Request) -> CurrentUserResponse:
@@ -483,6 +531,89 @@ def _source_file_api_auth(
 ) -> None:
     provided = credentials.credentials if credentials and credentials.scheme.lower() == "bearer" else ""
     _assert_source_file_token_value(provided)
+
+
+def _assert_wecom_ingest_token_value(provided: str) -> None:
+    expected = os.getenv("WECOM_INGEST_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="WECOM_INGEST_DISABLED")
+    if not provided or not hmac.compare_digest(provided.strip(), expected):
+        raise HTTPException(
+            status_code=401,
+            detail="INVALID_WECOM_INGEST_TOKEN",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def _wecom_ingest_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_WECOM_INGEST_BEARER),
+) -> None:
+    provided = credentials.credentials if credentials and credentials.scheme.lower() == "bearer" else ""
+    _assert_wecom_ingest_token_value(provided)
+
+
+def _wecom_unmapped_detail(
+    *,
+    wecom_group_id: str,
+    wecom_group_name: str,
+    customer_name_hint: Optional[str],
+    factory_name_hint: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "ok": False,
+        "code": "UNMAPPED_WECOM_GROUP",
+        "assigned": False,
+        "wecom_group_id": wecom_group_id,
+        "wecom_group_name": wecom_group_name,
+        "customer_name_hint": customer_name_hint or "",
+        "factory_name_hint": factory_name_hint or "",
+        "message": "该微信群尚未绑定客户、工厂和销售员",
+    }
+
+
+def _resolve_wecom_route_or_409(
+    *,
+    wecom_group_id: str,
+    wecom_group_name: str,
+    customer_name_hint: Optional[str],
+    factory_name_hint: Optional[str],
+) -> WecomOrderRoute:
+    route = resolve_wecom_order_route(
+        wecom_group_id=wecom_group_id,
+        wecom_group_name=wecom_group_name,
+        customer_name_hint=customer_name_hint,
+        factory_name_hint=factory_name_hint,
+    )
+    if route is None:
+        raise HTTPException(
+            status_code=409,
+            detail=_wecom_unmapped_detail(
+                wecom_group_id=wecom_group_id,
+                wecom_group_name=wecom_group_name,
+                customer_name_hint=customer_name_hint,
+                factory_name_hint=factory_name_hint,
+            ),
+        )
+    return route
+
+
+def _wecom_order_file_response(
+    *,
+    ingestion: IngestionResponse,
+    file_hash: str,
+    route: WecomOrderRoute,
+) -> WecomOrderFileResponse:
+    return WecomOrderFileResponse(
+        ingestion_id=ingestion.ingestion_id,
+        file_id=ingestion.file_id,
+        status=ingestion.status,
+        file_hash=file_hash,
+        user_id=route.erp_user_id,
+        sales_user_name=route.sales_user_name,
+        org_id=route.org_id,
+        customer_name=route.customer_name,
+        factory_name=route.factory_name,
+    )
 
 
 def _parse_source_file_range(value: str, size: int) -> Optional[tuple[int, int]]:
@@ -627,6 +758,104 @@ async def upload_binary(
         ingestion_id=ingestion.ingestion_id,
         status=ingestion.status,
     )
+
+
+@router.post(
+    "/integrations/wecom/order-files",
+    response_model=WecomOrderFileResponse,
+    dependencies=[Depends(_wecom_ingest_auth)],
+)
+async def wecom_order_file_upload(
+    request: Request,
+    file: UploadFile = File(..., description="企业微信群订单 PDF 文件"),
+    file_name: str = Form(...),
+    wecom_group_id: str = Form(...),
+    wecom_group_name: str = Form(...),
+    wecom_message_id: str = Form(...),
+    sent_at: str = Form(...),
+    file_hash: Optional[str] = Form(default=None),
+    sender_user_id: Optional[str] = Form(default=None),
+    sender_name: Optional[str] = Form(default=None),
+    customer_name_hint: Optional[str] = Form(default=None),
+    factory_name_hint: Optional[str] = Form(default=None),
+    extraction_profile_id: Optional[str] = Form(default=None),
+) -> WecomOrderFileResponse:
+    route = _resolve_wecom_route_or_409(
+        wecom_group_id=wecom_group_id,
+        wecom_group_name=wecom_group_name,
+        customer_name_hint=customer_name_hint,
+        factory_name_hint=factory_name_hint,
+    )
+    raw = await file.read()
+    ingestion, actual_hash = _create_ingestion_from_raw_bytes(
+        request=request,
+        raw=raw,
+        file_name=file_name,
+        declared_content_type=file.content_type,
+        user_id=route.erp_user_id,
+        org_id=route.org_id,
+        extraction_profile_id=extraction_profile_id,
+        log_event="wecom_order_file_created",
+        provided_file_hash=file_hash,
+        require_pdf=True,
+        apply_current_user=False,
+    )
+    logger.info(
+        "wecom_order_file_received request_id=%s ingestion_id=%s group_id=%s message_id=%s sent_at=%s sender_user_id=%s sender_name=%s",
+        getattr(request.state, "request_id", "n/a"),
+        ingestion.ingestion_id,
+        wecom_group_id,
+        wecom_message_id,
+        sent_at,
+        sender_user_id or "",
+        sender_name or "",
+    )
+    return _wecom_order_file_response(ingestion=ingestion, file_hash=actual_hash, route=route)
+
+
+@router.post(
+    "/integrations/wecom/order-files/base64",
+    response_model=WecomOrderFileResponse,
+    dependencies=[Depends(_wecom_ingest_auth)],
+)
+def wecom_order_file_base64_upload(
+    payload: WecomOrderFileBase64Request,
+    request: Request,
+) -> WecomOrderFileResponse:
+    route = _resolve_wecom_route_or_409(
+        wecom_group_id=payload.wecom_group_id,
+        wecom_group_name=payload.wecom_group_name,
+        customer_name_hint=payload.customer_name_hint,
+        factory_name_hint=payload.factory_name_hint,
+    )
+    try:
+        raw = base64.b64decode(payload.base64_content, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="INVALID_BASE64_CONTENT") from exc
+    ingestion, actual_hash = _create_ingestion_from_raw_bytes(
+        request=request,
+        raw=raw,
+        file_name=payload.file_name,
+        declared_content_type=payload.content_type,
+        user_id=route.erp_user_id,
+        org_id=route.org_id,
+        extraction_profile_id=payload.extraction_profile_id,
+        log_event="wecom_order_file_base64_created",
+        provided_file_hash=payload.file_hash,
+        require_pdf=True,
+        apply_current_user=False,
+    )
+    logger.info(
+        "wecom_order_file_base64_received request_id=%s ingestion_id=%s group_id=%s message_id=%s sent_at=%s sender_user_id=%s sender_name=%s",
+        getattr(request.state, "request_id", "n/a"),
+        ingestion.ingestion_id,
+        payload.wecom_group_id,
+        payload.wecom_message_id,
+        payload.sent_at,
+        payload.sender_user_id or "",
+        payload.sender_name or "",
+    )
+    return _wecom_order_file_response(ingestion=ingestion, file_hash=actual_hash, route=route)
 
 
 @router.post("/ingestions", response_model=IngestionResponse)

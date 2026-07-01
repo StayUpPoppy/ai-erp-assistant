@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class IngestionStatus(str, Enum):
@@ -152,6 +152,39 @@ class UploadResponse(BaseModel):
     file_id: str
     ingestion_id: str
     status: IngestionStatus
+
+
+class WecomOrderFileBase64Request(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    file_name: str = Field(..., alias="fileName")
+    content_type: str = Field(..., alias="contentType")
+    base64_content: str = Field(..., alias="base64Content")
+    wecom_group_id: str = Field(..., alias="wecomGroupId")
+    wecom_group_name: str = Field(..., alias="wecomGroupName")
+    wecom_message_id: str = Field(..., alias="wecomMessageId")
+    sent_at: str = Field(..., alias="sentAt")
+    file_hash: Optional[str] = Field(default=None, alias="fileHash")
+    sender_user_id: Optional[str] = Field(default=None, alias="senderUserId")
+    sender_name: Optional[str] = Field(default=None, alias="senderName")
+    customer_name_hint: Optional[str] = Field(default=None, alias="customerNameHint")
+    factory_name_hint: Optional[str] = Field(default=None, alias="factoryNameHint")
+    extraction_profile_id: Optional[str] = Field(default=None, alias="extractionProfileId")
+
+
+class WecomOrderFileResponse(BaseModel):
+    ok: bool = True
+    assigned: bool = True
+    ingestion_id: str
+    file_id: str
+    status: IngestionStatus
+    file_hash: str
+    user_id: str
+    sales_user_name: str = ""
+    org_id: str
+    customer_name: str = ""
+    factory_name: str = ""
+    message: str = "订单已接收，等待解析"
 
 
 class CreateIngestionRequest(BaseModel):

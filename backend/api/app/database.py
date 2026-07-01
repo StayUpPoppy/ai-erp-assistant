@@ -46,7 +46,7 @@ def init_db() -> None:
     if not _engine:
         return
     # 延迟导入，避免在未启用数据库时加载 ORM 模型产生副作用
-    from app.orm_models import AssistantSessionRow, IngestionRow  # noqa: F401
+    from app.orm_models import AssistantSessionRow, IngestionRow, WecomOrderRouteRow  # noqa: F401
 
     Base.metadata.create_all(bind=_engine)
     # 已有部署可能缺新列：用 IF NOT EXISTS 做轻量迁移（当前仅 PostgreSQL 目标库）。
