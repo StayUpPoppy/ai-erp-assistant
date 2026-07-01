@@ -660,11 +660,31 @@ def _source_file_headers(ingestion: IngestionResponse, *, size: int, content_typ
     return headers
 
 
-def _load_source_file(ingestion_id: str, request: Request) -> tuple[IngestionResponse, Any, str]:
-    _assert_source_file_api_token(request)
+def _assert_source_file_owner(ingestion: IngestionResponse, request: Request) -> None:
+    current_user = _current_user_from_request(request)
+    if not current_user.userId:
+        raise HTTPException(status_code=401, detail="CURRENT_USER_REQUIRED")
+    if ingestion.user_id == current_user.userId:
+        return
+    logger.warning(
+        "source_file_owner_forbidden request_id=%s ingestion_id=%s owner_user_id=%s current_user_id=%s",
+        getattr(request.state, "request_id", "n/a"),
+        ingestion.ingestion_id,
+        ingestion.user_id,
+        current_user.userId,
+    )
+    raise HTTPException(status_code=403, detail="FORBIDDEN_SOURCE_FILE_OWNER")
+
+
+def _load_source_file_for_ingestion(
+    ingestion_id: str,
+    request: Optional[Request] = None,
+) -> tuple[IngestionResponse, Any, str]:
     ingestion = get_ingestion(ingestion_id)
     if ingestion is None or not ingestion.source_file_object_key:
         raise HTTPException(status_code=404, detail="SOURCE_FILE_NOT_FOUND")
+    if request is not None:
+        _assert_source_file_owner(ingestion, request)
     fallback_type = ingestion.source_file_content_type or (
         "application/pdf" if (ingestion.source_file_name or "").lower().endswith(".pdf") else "application/octet-stream"
     )
@@ -678,6 +698,60 @@ def _load_source_file(ingestion_id: str, request: Request) -> tuple[IngestionRes
     if content_type == "application/octet-stream" and (ingestion.source_file_name or "").lower().endswith(".pdf"):
         content_type = "application/pdf"
     return ingestion, stat, content_type
+
+
+def _load_source_file(ingestion_id: str, request: Request) -> tuple[IngestionResponse, Any, str]:
+    _assert_source_file_api_token(request)
+    return _load_source_file_for_ingestion(ingestion_id)
+
+
+def _load_user_source_file(ingestion_id: str, request: Request) -> tuple[IngestionResponse, Any, str]:
+    return _load_source_file_for_ingestion(ingestion_id, request)
+
+
+def _source_file_stream_response(
+    ingestion: IngestionResponse,
+    stat: Any,
+    content_type: str,
+    request: Request,
+) -> StreamingResponse:
+    try:
+        byte_range = _parse_source_file_range(request.headers.get("range", ""), stat.size)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=416,
+            detail="INVALID_SOURCE_FILE_RANGE",
+            headers={"Content-Range": f"bytes */{stat.size}"},
+        ) from exc
+
+    status_code = 200
+    offset = 0
+    length = stat.size
+    headers = _source_file_headers(
+        ingestion,
+        size=stat.size,
+        content_type=content_type,
+        etag=stat.etag,
+    )
+    if byte_range is not None:
+        start, end = byte_range
+        status_code = 206
+        offset = start
+        length = end - start + 1
+        headers["Content-Range"] = f"bytes {start}-{end}/{stat.size}"
+        headers["Content-Length"] = str(length)
+
+    try:
+        body = iter_object_bytes(
+            ingestion.source_file_object_key or "",
+            offset=offset,
+            length=length,
+        )
+    except ObjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="SOURCE_FILE_NOT_FOUND") from exc
+    except ObjectStorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="OBJECT_STORAGE_UNAVAILABLE") from exc
+    return StreamingResponse(body, status_code=status_code, media_type=content_type, headers=headers)
 
 
 @router.get("/current-user", response_model=CurrentUserResponse)
@@ -1255,6 +1329,24 @@ def get_ingestion_document_route(
     return DocumentParseExport.model_validate(payload)
 
 
+@router.head("/ingestions/{ingestion_id}/source-file")
+def head_user_source_file_route(ingestion_id: str, request: Request) -> Response:
+    ingestion, stat, content_type = _load_user_source_file(ingestion_id, request)
+    headers = _source_file_headers(
+        ingestion,
+        size=stat.size,
+        content_type=content_type,
+        etag=stat.etag,
+    )
+    return Response(status_code=200, media_type=content_type, headers=headers)
+
+
+@router.get("/ingestions/{ingestion_id}/source-file")
+def get_user_source_file_route(ingestion_id: str, request: Request) -> StreamingResponse:
+    ingestion, stat, content_type = _load_user_source_file(ingestion_id, request)
+    return _source_file_stream_response(ingestion, stat, content_type, request)
+
+
 @router.head(
     "/integrations/erp/ingestions/{ingestion_id}/source-file",
     dependencies=[Depends(_source_file_api_auth)],
@@ -1276,43 +1368,7 @@ def head_erp_source_file_route(ingestion_id: str, request: Request) -> Response:
 )
 def get_erp_source_file_route(ingestion_id: str, request: Request) -> StreamingResponse:
     ingestion, stat, content_type = _load_source_file(ingestion_id, request)
-    try:
-        byte_range = _parse_source_file_range(request.headers.get("range", ""), stat.size)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=416,
-            detail="INVALID_SOURCE_FILE_RANGE",
-            headers={"Content-Range": f"bytes */{stat.size}"},
-        ) from exc
-
-    status_code = 200
-    offset = 0
-    length = stat.size
-    headers = _source_file_headers(
-        ingestion,
-        size=stat.size,
-        content_type=content_type,
-        etag=stat.etag,
-    )
-    if byte_range is not None:
-        start, end = byte_range
-        status_code = 206
-        offset = start
-        length = end - start + 1
-        headers["Content-Range"] = f"bytes {start}-{end}/{stat.size}"
-        headers["Content-Length"] = str(length)
-
-    try:
-        body = iter_object_bytes(
-            ingestion.source_file_object_key or "",
-            offset=offset,
-            length=length,
-        )
-    except ObjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="SOURCE_FILE_NOT_FOUND") from exc
-    except ObjectStorageUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="OBJECT_STORAGE_UNAVAILABLE") from exc
-    return StreamingResponse(body, status_code=status_code, media_type=content_type, headers=headers)
+    return _source_file_stream_response(ingestion, stat, content_type, request)
 
 
 @router.get("/ingestions/{ingestion_id}/erp-payload", response_model=ErpPayloadPreviewResponse)

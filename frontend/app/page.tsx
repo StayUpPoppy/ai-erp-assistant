@@ -376,6 +376,93 @@ function ProgressSpinner({ className = "" }: { className?: string }) {
 }
 
 /** 给外行看的进度说明（系统消息里用）；技术枚举仍在下方详情里可见 */
+function sourceFileUrl(ingestionId: string): string {
+  const base = getApiBaseUrl();
+  return `${base}/ingestions/${encodeURIComponent(ingestionId)}/source-file`;
+}
+
+function SourceFilePane({ ingestion }: { ingestion: IngestionResponse | null | undefined }) {
+  const ingestionId = ingestion?.ingestion_id ?? "";
+  const canViewSource = Boolean(ingestionId && ingestion?.source_file_object_key);
+  const url = canViewSource ? sourceFileUrl(ingestionId) : "";
+  const name = ingestion?.source_file_name || "PDF 原件";
+  const [zoomPercent, setZoomPercent] = useState(100);
+
+  useEffect(() => {
+    setZoomPercent(100);
+  }, [ingestionId]);
+
+  const viewerUrl = url ? `${url}#zoom=${zoomPercent}` : "";
+  const zoomOut = () => setZoomPercent((value) => Math.max(50, value - 25));
+  const zoomIn = () => setZoomPercent((value) => Math.min(200, value + 25));
+  const resetZoom = () => setZoomPercent(100);
+
+  return (
+    <div className="flex min-h-[32rem] min-w-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white ring-1 ring-slate-100">
+      <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-slate-900">PDF 原件</div>
+          <div className="truncate text-xs text-slate-500" title={name}>
+            {name}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {url ? (
+            <div className="flex items-center overflow-hidden rounded-md border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={zoomOut}
+                disabled={zoomPercent <= 50}
+                className="h-8 w-8 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300"
+                title="缩小 PDF"
+                aria-label="缩小 PDF"
+              >
+                -
+              </button>
+              <button
+                type="button"
+                onClick={resetZoom}
+                className="h-8 min-w-12 border-x border-slate-200 px-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                title="重置 PDF 缩放"
+                aria-label="重置 PDF 缩放"
+              >
+                {zoomPercent}%
+              </button>
+              <button
+                type="button"
+                onClick={zoomIn}
+                disabled={zoomPercent >= 200}
+                className="h-8 w-8 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300"
+                title="放大 PDF"
+                aria-label="放大 PDF"
+              >
+                +
+              </button>
+            </div>
+          ) : null}
+          {url ? (
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              新窗口
+            </a>
+          ) : null}
+        </div>
+      </div>
+      {url ? (
+        <iframe title={`PDF 原件 - ${name}`} src={viewerUrl} className="min-h-0 flex-1 bg-slate-100" />
+      ) : (
+        <div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-slate-500">
+          暂无可查看的 PDF 原件
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ingestionStatusLabelZh(status: IngestionStatus | string): string {
   const map: Record<string, string> = {
     UPLOADED: "已收到文件，正在排队处理",
@@ -2760,6 +2847,8 @@ export default function HomePage() {
         const previewForCard = isCurrentTaskCard
           ? previewDraftsByIngestion[cardIngestionId] ?? taskIngestion?.preview_data ?? cardPreview
           : cardPreview;
+        const sourceFileIngestion = taskIngestion ?? (cardIngestionId === ingestionId ? ingestion : null);
+        const hasSourceFile = Boolean(sourceFileIngestion?.source_file_object_key);
         if (previewForCard) {
           const currentStatus = displayIngestionStatus(taskIngestion, clientDraftStateRef.current);
           const canCreateDraft =
@@ -2775,22 +2864,44 @@ export default function HomePage() {
                 </span>
               </div>
               <div className="mt-1 text-xs text-red-800">红色字段补齐后，点击「确认预览并校验」。</div>
-              <div className="mt-3 max-h-[40rem] overflow-auto">
-                <OrderPreviewEditor
-                  preview={previewForCard}
-                  editableFields={editableFields}
-                  issues={issues}
-                  onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
-                  onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
-                  onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
-                  confirming={isConfirmingPreviewCard}
-                  creatingDraft={isCreatingDraftCard}
-                  createDraftDisabled={!canCreateDraft}
-                  lockedSalesUser={userName}
-                  hideCreateDraftAction
-                  readOnly={!isCurrentTaskCard}
-                />
-              </div>
+              {hasSourceFile ? (
+                <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(22rem,0.95fr)_minmax(30rem,1.05fr)]">
+                  <SourceFilePane ingestion={sourceFileIngestion} />
+                  <div className="min-h-[32rem] max-h-[72vh] overflow-auto rounded-lg bg-white/70">
+                    <OrderPreviewEditor
+                      preview={previewForCard}
+                      editableFields={editableFields}
+                      issues={issues}
+                      onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
+                      onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
+                      onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                      confirming={isConfirmingPreviewCard}
+                      creatingDraft={isCreatingDraftCard}
+                      createDraftDisabled={!canCreateDraft}
+                      lockedSalesUser={userName}
+                      hideCreateDraftAction
+                      readOnly={!isCurrentTaskCard}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 max-h-[40rem] overflow-auto">
+                  <OrderPreviewEditor
+                    preview={previewForCard}
+                    editableFields={editableFields}
+                    issues={issues}
+                    onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
+                    onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
+                    onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                    confirming={isConfirmingPreviewCard}
+                    creatingDraft={isCreatingDraftCard}
+                    createDraftDisabled={!canCreateDraft}
+                    lockedSalesUser={userName}
+                    hideCreateDraftAction
+                    readOnly={!isCurrentTaskCard}
+                  />
+                </div>
+              )}
             </div>
           );
         }
@@ -2895,6 +3006,8 @@ export default function HomePage() {
         const previewForCard = isCurrentTaskCard
           ? previewDraftsByIngestion[cardIngestionId] ?? taskIngestion?.preview_data ?? cardPreview
           : cardPreview;
+        const sourceFileIngestion = taskIngestion ?? (cardIngestionId === ingestionId ? ingestion : null);
+        const hasSourceFile = Boolean(sourceFileIngestion?.source_file_object_key);
         const currentStatus = displayIngestionStatus(taskIngestion, clientDraftStateRef.current);
         const canCreateDraft = isCurrentTaskCard && currentStatus === "VALIDATED" && cardPreviewConfirmed && !cardPreviewDirty;
         const editableFields = isCurrentTaskCard
@@ -2968,22 +3081,44 @@ export default function HomePage() {
                 <summary className="cursor-pointer select-none px-1 py-1 text-sm font-semibold text-emerald-900">
                   查看和编辑订单预览
                 </summary>
-                <div className="mt-2 max-h-[32rem] overflow-auto">
-                  <OrderPreviewEditor
-                    preview={previewForCard}
-                    editableFields={editableFields}
-                    issues={issues}
-                    onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
-                    onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
-                    onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
-                    confirming={isConfirmingPreviewCard}
-                    creatingDraft={isCreatingDraftCard}
-                    createDraftDisabled={!canCreateDraft}
-                    lockedSalesUser={userName}
-                    hideActions
-                    readOnly={!isCurrentTaskCard}
-                  />
-                </div>
+                {hasSourceFile ? (
+                  <div className="mt-2 grid gap-3 xl:grid-cols-[minmax(22rem,0.95fr)_minmax(30rem,1.05fr)]">
+                    <SourceFilePane ingestion={sourceFileIngestion} />
+                    <div className="min-h-[32rem] max-h-[72vh] overflow-auto rounded-lg bg-white/70">
+                      <OrderPreviewEditor
+                        preview={previewForCard}
+                        editableFields={editableFields}
+                        issues={issues}
+                        onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
+                        onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
+                        onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                        confirming={isConfirmingPreviewCard}
+                        creatingDraft={isCreatingDraftCard}
+                        createDraftDisabled={!canCreateDraft}
+                        lockedSalesUser={userName}
+                        hideActions
+                        readOnly={!isCurrentTaskCard}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-2 max-h-[32rem] overflow-auto">
+                    <OrderPreviewEditor
+                      preview={previewForCard}
+                      editableFields={editableFields}
+                      issues={issues}
+                      onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
+                      onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
+                      onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                      confirming={isConfirmingPreviewCard}
+                      creatingDraft={isCreatingDraftCard}
+                      createDraftDisabled={!canCreateDraft}
+                      lockedSalesUser={userName}
+                      hideActions
+                      readOnly={!isCurrentTaskCard}
+                    />
+                  </div>
+                )}
               </details>
             ) : (
               <div className="mt-3 rounded-lg bg-white/80 px-3 py-2 text-xs text-emerald-800 ring-1 ring-emerald-100">
@@ -3239,7 +3374,7 @@ export default function HomePage() {
                         <div
                           className={[
                             isWideToolCard
-                              ? "max-w-[min(96%,58rem)] rounded-lg px-4 py-3 text-left text-sm leading-relaxed ring-1"
+                              ? "max-w-[min(98%,96rem)] rounded-lg px-4 py-3 text-left text-sm leading-relaxed ring-1"
                               : "max-w-[min(92%,32rem)] rounded-lg px-4 py-3 text-left text-sm leading-relaxed ring-1",
                             isUser
                               ? "bg-blue-600 text-white ring-blue-700/25"

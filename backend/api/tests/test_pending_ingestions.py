@@ -5,8 +5,9 @@ from types import SimpleNamespace
 from urllib.parse import quote
 
 import pytest
+from fastapi import HTTPException
 
-from app.routes import pending_ingestions_route
+from app.routes import get_user_source_file_route, head_user_source_file_route, pending_ingestions_route
 from app.schemas import IngestionResponse, IngestionStatus
 from app.store import list_pending_ingestions_for_user, store
 
@@ -25,6 +26,7 @@ def _request_for_user(user_id: str) -> SimpleNamespace:
     payload = {"userId": user_id, "realName": f"user-{user_id}", "currentOrgName": "org-test"}
     return SimpleNamespace(
         cookies={"userinfo": quote(json.dumps(payload))},
+        headers={},
         state=SimpleNamespace(request_id="test-request"),
     )
 
@@ -46,6 +48,17 @@ def _ingestion(
         prompt_version="prompt",
         status=status,
         source_file_uploaded_at=uploaded_at,
+    )
+
+
+def _source_file_ingestion(ingestion_id: str = "source-31", user_id: str = "31") -> IngestionResponse:
+    return _ingestion(ingestion_id, user_id, IngestionStatus.NEED_USER_INPUT, "2026-06-30T08:00:00Z").model_copy(
+        update={
+            "source_file_object_key": "__local__/uploads/order.pdf",
+            "source_file_name": "order.pdf",
+            "source_file_size": 16,
+            "source_file_content_type": "application/pdf",
+        }
     )
 
 
@@ -97,3 +110,49 @@ def test_pending_ingestions_db_path_filters_after_user_query(monkeypatch: pytest
 
     assert queried_user_ids == ["31"]
     assert [item.ingestion_id for item in result] == ["db-new", "db-old"]
+
+
+def test_user_source_file_route_allows_owner(monkeypatch: pytest.MonkeyPatch):
+    store.ingestions["source-31"] = _source_file_ingestion()
+    monkeypatch.setattr(
+        "app.routes.stat_object",
+        lambda *_args, **_kwargs: SimpleNamespace(size=16, content_type="application/pdf", etag="etag-1"),
+    )
+    monkeypatch.setattr("app.routes.iter_object_bytes", lambda *_args, **_kwargs: iter([b"%PDF-1.7 owner"]))
+
+    head = head_user_source_file_route("source-31", _request_for_user("31"))
+    get = get_user_source_file_route("source-31", _request_for_user("31"))
+
+    assert head.status_code == 200
+    assert head.headers["content-type"] == "application/pdf"
+    assert get.status_code == 200
+    assert get.headers["accept-ranges"] == "bytes"
+
+
+def test_user_source_file_route_rejects_other_user(monkeypatch: pytest.MonkeyPatch):
+    store.ingestions["source-31"] = _source_file_ingestion()
+    monkeypatch.setattr(
+        "app.routes.stat_object",
+        lambda *_args, **_kwargs: SimpleNamespace(size=16, content_type="application/pdf", etag="etag-1"),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        get_user_source_file_route("source-31", _request_for_user("58"))
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "FORBIDDEN_SOURCE_FILE_OWNER"
+
+
+def test_user_source_file_route_requires_cookie(monkeypatch: pytest.MonkeyPatch):
+    store.ingestions["source-31"] = _source_file_ingestion()
+    monkeypatch.setattr(
+        "app.routes.stat_object",
+        lambda *_args, **_kwargs: SimpleNamespace(size=16, content_type="application/pdf", etag="etag-1"),
+    )
+    request = SimpleNamespace(cookies={}, headers={}, state=SimpleNamespace(request_id="test-request"))
+
+    with pytest.raises(HTTPException) as exc:
+        get_user_source_file_route("source-31", request)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "CURRENT_USER_REQUIRED"
