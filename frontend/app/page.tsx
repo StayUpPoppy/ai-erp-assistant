@@ -2492,6 +2492,9 @@ export default function HomePage() {
       if (workflowToolUi) {
         setChatMessages((prev) => updateWorkflowToolCard(prev, data, workflowToolUi));
         workflowToolCardKeyRef.current = pdfToErpWorkflowCardKey(data, data.status);
+        if (workflowToolUi.type === "upload_confirm") {
+          scrollToActiveOrderSection(data.ingestion_id);
+        }
       }
     } catch (e) {
       clientLogger.error("confirm-preview 失败", e);
@@ -2499,7 +2502,18 @@ export default function HomePage() {
     } finally {
       setIsConfirmingPreview(false);
     }
-  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestionId, orgId, previewDraft, upsertIngestionState, userId, userName]);
+  }, [
+    appendChat,
+    appendToolResponse,
+    getAssistantSessionId,
+    ingestionId,
+    orgId,
+    previewDraft,
+    scrollToActiveOrderSection,
+    upsertIngestionState,
+    userId,
+    userName,
+  ]);
 
   const onPreviewDraftChange = useCallback((next: OrderPreviewData) => {
     const bound = bindPreviewSalesUser(next, userName);
@@ -2740,6 +2754,9 @@ export default function HomePage() {
             [targetIngestionId]: cardKey,
           };
           workflowToolCardKeyRef.current = cardKey;
+          if (workflowToolUi.type === "upload_confirm") {
+            scrollToActiveOrderSection(targetIngestionId);
+          }
         }
       } catch (e) {
         clientLogger.error("confirm preview failed", e);
@@ -2758,6 +2775,7 @@ export default function HomePage() {
       ingestionsById,
       orgId,
       previewDraftsByIngestion,
+      scrollToActiveOrderSection,
       upsertIngestionState,
       userId,
       userName,
@@ -3561,11 +3579,16 @@ export default function HomePage() {
                                   <span className="truncate text-xs font-semibold text-slate-900" title={pendingQueueFileName(item)}>
                                     {pendingQueueFileName(item)}
                                   </span>
-                                  {selected ? (
-                                    <span className="shrink-0 rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                                      当前
+                                  <span className="flex shrink-0 items-center gap-1">
+                                    <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-sm">
+                                      未处理
                                     </span>
-                                  ) : null}
+                                    {selected ? (
+                                      <span className="rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                                        当前
+                                      </span>
+                                    ) : null}
+                                  </span>
                                 </div>
                                 <div className="mt-1 truncate text-xs text-slate-600" title={pendingQueueCustomerName(item)}>
                                   {pendingQueueCustomerName(item)}
