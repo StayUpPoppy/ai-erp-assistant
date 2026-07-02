@@ -88,6 +88,7 @@ interface WorkspaceWindowState {
   ingestionId: string | null;
   ingestionsById: IngestionById;
   pollingIngestionIds: BooleanByIngestion;
+  pendingQueue: IngestionResponse[];
   ingestionHistory: IngestionHistoryItem[];
   resolveFields: Record<string, string>;
   resolveFieldsByIngestion: ResolveFieldsByIngestion;
@@ -209,6 +210,40 @@ const BACKGROUND_RUNNING_STATUSES = new Set<IngestionStatus>([
 
 function isBackgroundRunningStatus(status: IngestionStatus | null | undefined): boolean {
   return Boolean(status && BACKGROUND_RUNNING_STATUSES.has(status));
+}
+
+function isPendingQueueStatus(status: IngestionStatus | null | undefined): boolean {
+  return Boolean(status && status !== "DRAFT_CREATED" && status !== "CANCELED");
+}
+
+function pendingQueueFileName(ingestion: IngestionResponse): string {
+  return (
+    ingestion.file?.source_file_name ||
+    ingestion.source_file_name ||
+    ingestion.preview_data?.order.customerPoNo ||
+    ingestion.ingestion_id
+  );
+}
+
+function pendingQueueCustomerName(ingestion: IngestionResponse): string {
+  return ingestion.preview_data?.order.customerName || ingestion.resolved_fields?.customerName || "客户待识别";
+}
+
+function pendingQueuePoNo(ingestion: IngestionResponse): string {
+  return ingestion.preview_data?.order.customerPoNo || ingestion.resolved_fields?.customerPoNo || "";
+}
+
+function pendingQueueUpdatedLabel(ingestion: IngestionResponse): string {
+  const lastEvent = ingestion.audit_events?.[ingestion.audit_events.length - 1];
+  if (!lastEvent?.at) return "暂无时间";
+  const t = new Date(lastEvent.at);
+  if (Number.isNaN(t.getTime())) return "暂无时间";
+  return t.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function pdfToErpProgressState(
@@ -750,6 +785,9 @@ export default function HomePage() {
   const [ingestionsById, setIngestionsById] = useState<IngestionById>({});
   const [pollingIngestionIds, setPollingIngestionIds] = useState<BooleanByIngestion>({});
   const [ingestionPollNonce, setIngestionPollNonce] = useState(0);
+  const [pendingQueue, setPendingQueue] = useState<IngestionResponse[]>([]);
+  const [isPendingQueueLoading, setIsPendingQueueLoading] = useState(false);
+  const [pendingQueueError, setPendingQueueError] = useState<string | null>(null);
   const [ingestionHistory, setIngestionHistory] = useState<IngestionHistoryItem[]>([]);
 
   /** 拖拽上传中的 UX 状态 */
@@ -783,6 +821,7 @@ export default function HomePage() {
   const chatSessionsHydratedRef = useRef(false);
   const previewDirtyRef = useRef(false);
   const previewDirtyByIngestionRef = useRef<BooleanByIngestion>({});
+  const previewDraftsByIngestionRef = useRef<PreviewDraftByIngestion>({});
   const previewIngestionIdRef = useRef<string | null>(null);
   const chatSessionMetaTimerRef = useRef<number | null>(null);
   /** 当前 ingestion 对应的上传文件名，用于归档进历史/聊天时展示（跨多次上传仍准确） */
@@ -803,6 +842,8 @@ export default function HomePage() {
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const activeOrderSectionRef = useRef<HTMLDivElement | null>(null);
+  const taskCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pendingReprocessUploadsRef = useRef<Record<string, PendingReprocessUpload>>({});
@@ -851,6 +892,10 @@ export default function HomePage() {
     resolveFieldsByIngestionRef.current = resolveFieldsByIngestion;
   }, [resolveFieldsByIngestion]);
 
+  useEffect(() => {
+    previewDraftsByIngestionRef.current = previewDraftsByIngestion;
+  }, [previewDraftsByIngestion]);
+
   const upsertIngestionState = useCallback(
     (raw: IngestionResponse, opts?: { activate?: boolean; fileName?: string | null; poll?: boolean }) => {
       const data = applyClientDraftState(raw, clientDraftStateRef.current);
@@ -861,6 +906,14 @@ export default function HomePage() {
 
       const displayStatus = displayIngestionStatus(data, clientDraftStateRef.current) ?? data.status;
       lastStatusByIngestionRef.current = { ...lastStatusByIngestionRef.current, [id]: displayStatus };
+      setPendingQueue((prev) => {
+        const next = prev.filter((item) => item.ingestion_id !== id);
+        if (!isPendingQueueStatus(displayStatus)) return next;
+        if (prev.some((item) => item.ingestion_id === id)) {
+          return prev.map((item) => (item.ingestion_id === id ? data : item));
+        }
+        return [data, ...next].slice(0, 20);
+      });
       const fileName = opts?.fileName ?? data.file?.source_file_name ?? data.source_file_name ?? null;
       if (fileName) {
         lastIngestionFileNameByIngestionRef.current = {
@@ -887,6 +940,8 @@ export default function HomePage() {
           return { ...prev, [id]: nextPreview };
         });
         if (activate) setPreviewDraft(nextPreview);
+      } else if (activate) {
+        setPreviewDraft(previewDraftsByIngestionRef.current[id] ?? null);
       }
 
       if (opts?.poll ?? isBackgroundRunningStatus(displayStatus)) {
@@ -908,6 +963,76 @@ export default function HomePage() {
       return data;
     },
     [orgId, userName],
+  );
+
+  const refreshPendingQueue = useCallback(
+    async (opts?: { autoActivate?: boolean }) => {
+      setIsPendingQueueLoading(true);
+      setPendingQueueError(null);
+      try {
+        const items = await getPendingIngestions();
+        const displayItems = items.map((item) => applyClientDraftState(item, clientDraftStateRef.current));
+        setPendingQueue(displayItems);
+        displayItems.forEach((item, index) => {
+          const displayStatus = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
+          const shouldActivate = Boolean(opts?.autoActivate && !ingestionIdRef.current && index === 0);
+          upsertIngestionState(item, {
+            activate: shouldActivate,
+            poll: isBackgroundRunningStatus(displayStatus),
+          });
+        });
+      } catch (error) {
+        clientLogger.warn("refresh_pending_queue_failed", { error });
+        setPendingQueueError("待处理订单刷新失败，请稍后重试。");
+      } finally {
+        setIsPendingQueueLoading(false);
+      }
+    },
+    [upsertIngestionState],
+  );
+
+  const setTaskCardRef = useCallback((id: string, node: HTMLDivElement | null) => {
+    if (!id) return;
+    if (node) {
+      taskCardRefs.current[id] = node;
+      return;
+    }
+    delete taskCardRefs.current[id];
+  }, []);
+
+  const scrollToActiveOrderSection = useCallback((id?: string) => {
+    shouldAutoScrollRef.current = false;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const target = id ? taskCardRefs.current[id] : null;
+        (target ?? activeOrderSectionRef.current)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+  }, []);
+
+  const activatePendingQueueItem = useCallback(
+    (item: IngestionResponse) => {
+      const id = item.ingestion_id;
+      const cached = ingestionsByIdRef.current[id] ?? item;
+      const displayStatus = displayIngestionStatus(cached, clientDraftStateRef.current) ?? cached.status;
+      upsertIngestionState(cached, {
+        activate: true,
+        poll: isBackgroundRunningStatus(displayStatus),
+      });
+      scrollToActiveOrderSection(id);
+      void getIngestion(id)
+        .then((fresh) => {
+          const freshStatus = displayIngestionStatus(fresh, clientDraftStateRef.current) ?? fresh.status;
+          upsertIngestionState(fresh, {
+            activate: ingestionIdRef.current === id,
+            poll: isBackgroundRunningStatus(freshStatus),
+          });
+        })
+        .catch((error) => {
+          clientLogger.warn("activate_pending_queue_item_refresh_failed", { ingestionId: id, error });
+        });
+    },
+    [scrollToActiveOrderSection, upsertIngestionState],
   );
 
   const resetCurrentTaskState = useCallback(() => {
@@ -1100,21 +1225,7 @@ export default function HomePage() {
     pendingAutoOpenAttemptedRef.current = true;
 
     let cancelled = false;
-    void getPendingIngestions()
-      .then((items) => {
-        if (cancelled || ingestionIdRef.current || items.length === 0) return;
-        clientLogger.info("auto_open_pending_ingestions", {
-          count: items.length,
-          firstIngestionId: items[0]?.ingestion_id ?? null,
-        });
-        items.forEach((item, index) => {
-          const displayStatus = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
-          upsertIngestionState(item, {
-            activate: index === 0,
-            poll: isBackgroundRunningStatus(displayStatus),
-          });
-        });
-      })
+    void refreshPendingQueue({ autoActivate: true })
       .catch((error) => {
         if (!cancelled) clientLogger.warn("auto_open_pending_ingestions_failed", { error });
       });
@@ -1122,7 +1233,7 @@ export default function HomePage() {
     return () => {
       cancelled = true;
     };
-  }, [assistantSessionHydrated, currentUserHydrated, upsertIngestionState]);
+  }, [assistantSessionHydrated, currentUserHydrated, refreshPendingQueue]);
 
   /** 与 ``GET /ingestions/{id}/document`` 一致，便于复制到 Postman / 集成脚本 */
   const documentJsonUrls = useMemo(() => {
@@ -1325,6 +1436,7 @@ export default function HomePage() {
       ingestionId,
       ingestionsById,
       pollingIngestionIds,
+      pendingQueue,
       ingestionHistory,
       resolveFields,
       resolveFieldsByIngestion,
@@ -1352,6 +1464,7 @@ export default function HomePage() {
     ingestionHistory,
     ingestionId,
     ingestionsById,
+    pendingQueue,
     pollingIngestionIds,
     previewDirtyByIngestion,
     previewDraft,
@@ -1371,6 +1484,7 @@ export default function HomePage() {
         ingestionId: null,
         ingestionsById: {},
         pollingIngestionIds: {},
+        pendingQueue: [],
         ingestionHistory: [],
         resolveFields: {},
         resolveFieldsByIngestion: {},
@@ -1400,6 +1514,7 @@ export default function HomePage() {
     setIngestionsById(nextState.ingestionsById);
     ingestionsByIdRef.current = nextState.ingestionsById;
     setPollingIngestionIds(nextState.pollingIngestionIds);
+    setPendingQueue(nextState.pendingQueue);
     ingestionIdRef.current = nextState.ingestionId;
     setIngestionHistory(nextState.ingestionHistory);
     setResolveFields(nextState.resolveFields);
@@ -1487,6 +1602,7 @@ export default function HomePage() {
       ingestionId: null,
       ingestionsById: {},
       pollingIngestionIds: {},
+      pendingQueue: [],
       ingestionHistory: [],
       resolveFields: {},
       resolveFieldsByIngestion: {},
@@ -2324,7 +2440,7 @@ export default function HomePage() {
         });
         return;
       }
-      setIngestion(data);
+      upsertIngestionState(data, { activate: true, poll: isBackgroundRunningStatus(data.status) });
       clientLogger.info("resolve 成功", { status: data.status, missing: data.missing_fields });
       appendChat("system", `已保存您填的内容。${ingestionStatusLabelZh(data.status)}`);
     } catch (e) {
@@ -2333,7 +2449,7 @@ export default function HomePage() {
     } finally {
       setIsResolving(false);
     }
-  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestion, ingestionId, orgId, resolveFields, userId]);
+  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestion, ingestionId, orgId, resolveFields, upsertIngestionState, userId]);
 
   const onConfirmPreview = useCallback(async () => {
     if (!ingestionId || !previewDraft) return;
@@ -2363,9 +2479,14 @@ export default function HomePage() {
         return;
       }
       previewDirtyRef.current = false;
+      previewDirtyByIngestionRef.current = withoutRecordKey(
+        previewDirtyByIngestionRef.current,
+        data.ingestion_id,
+      ) as BooleanByIngestion;
+      setPreviewDirtyByIngestion((prev) => withoutRecordKey(prev, data.ingestion_id) as BooleanByIngestion);
       setConfirmedPreviewIds((prev) => ({ ...prev, [data.ingestion_id]: true }));
       setPreviewDraft(bindPreviewSalesUser(data.preview_data ?? previewToConfirm, userName));
-      setIngestion(data);
+      upsertIngestionState(data, { activate: true, poll: isBackgroundRunningStatus(data.status) });
       const workflowToolUi = buildPdfToErpToolUi(data);
       if (workflowToolUi) {
         setChatMessages((prev) => updateWorkflowToolCard(prev, data, workflowToolUi));
@@ -2377,20 +2498,27 @@ export default function HomePage() {
     } finally {
       setIsConfirmingPreview(false);
     }
-  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestionId, orgId, previewDraft, userId, userName]);
+  }, [appendChat, appendToolResponse, getAssistantSessionId, ingestionId, orgId, previewDraft, upsertIngestionState, userId, userName]);
 
   const onPreviewDraftChange = useCallback((next: OrderPreviewData) => {
+    const bound = bindPreviewSalesUser(next, userName);
     previewDirtyRef.current = true;
     if (ingestionIdRef.current) {
       const id = ingestionIdRef.current;
+      previewDirtyByIngestionRef.current = {
+        ...previewDirtyByIngestionRef.current,
+        [id]: true,
+      };
+      setPreviewDirtyByIngestion((prev) => ({ ...prev, [id]: true }));
       setConfirmedPreviewIds((prev) => {
         if (!prev[id]) return prev;
         const nextState = { ...prev };
         delete nextState[id];
         return nextState;
       });
+      setPreviewDraftsByIngestion((prev) => ({ ...prev, [id]: bound }));
     }
-    setPreviewDraft(bindPreviewSalesUser(next, userName));
+    setPreviewDraft(bound);
   }, [userName]);
 
   const onCreateDraft = useCallback(async () => {
@@ -2427,8 +2555,13 @@ export default function HomePage() {
         const confirmed = confirmRes.tool_result?.ingestion;
         if (confirmed?.ingestion_id === ingestionIdRef.current) {
           previewDirtyRef.current = false;
+          previewDirtyByIngestionRef.current = withoutRecordKey(
+            previewDirtyByIngestionRef.current,
+            confirmed.ingestion_id,
+          ) as BooleanByIngestion;
+          setPreviewDirtyByIngestion((prev) => withoutRecordKey(prev, confirmed.ingestion_id) as BooleanByIngestion);
           setPreviewDraft(bindPreviewSalesUser(confirmed.preview_data ?? previewToConfirm, userName));
-          setIngestion(confirmed);
+          upsertIngestionState(confirmed, { activate: true, poll: isBackgroundRunningStatus(confirmed.status) });
         }
       }
       clientLogger.info("请求创建草稿 create-draft", { ingestionId });
@@ -2457,8 +2590,11 @@ export default function HomePage() {
         draft_no: data.draft_no,
         draft_url: data.draft_url,
       };
-      setIngestion((prev) => (prev ? mergeDraftCreatedState(prev, data) : prev));
+      const base = ingestionsByIdRef.current[data.ingestion_id] ?? ingestion;
+      const merged = base ? mergeDraftCreatedState(base, data) : null;
+      if (merged) upsertIngestionState(merged, { activate: true, poll: false });
       lastStatusRef.current = "DRAFT_CREATED";
+      setPollingIngestionIds((prev) => withoutRecordKey(prev, data.ingestion_id) as BooleanByIngestion);
       if (pollTimerRef.current) {
         window.clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
@@ -2479,6 +2615,7 @@ export default function HomePage() {
     isCreatingDraft,
     orgId,
     previewDraft,
+    upsertIngestionState,
     userId,
     userName,
   ]);
@@ -3349,10 +3486,83 @@ export default function HomePage() {
                       </p>
                     </div>
                   ) : null}
+                  {workspaceMode === "pdf_to_erp" ? (
+                    <section className="w-full rounded-xl border border-slate-200 bg-slate-50/80 p-3 shadow-sm ring-1 ring-slate-100">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-900">我的待处理订单</div>
+                          <div className="mt-0.5 text-xs text-slate-500">
+                            {pendingQueue.length > 0
+                              ? `共 ${pendingQueue.length} 条，点击订单可切换处理`
+                              : "暂无待处理订单；微信群新上传后可点刷新查看"}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void refreshPendingQueue({ autoActivate: false })}
+                          disabled={isPendingQueueLoading}
+                          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isPendingQueueLoading ? <ProgressSpinner className="h-3.5 w-3.5" /> : null}
+                          刷新
+                        </button>
+                      </div>
+                      {pendingQueueError ? (
+                        <div className="mt-2 rounded-md bg-rose-50 px-2.5 py-1.5 text-xs text-rose-800 ring-1 ring-rose-100">
+                          {pendingQueueError}
+                        </div>
+                      ) : null}
+                      {pendingQueue.length > 0 ? (
+                        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                          {pendingQueue.map((item) => {
+                            const displayStatus = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
+                            const selected = item.ingestion_id === ingestionId;
+                            const poNo = pendingQueuePoNo(item);
+                            return (
+                              <button
+                                type="button"
+                                key={item.ingestion_id}
+                                onClick={() => activatePendingQueueItem(item)}
+                                className={[
+                                  "min-w-[17rem] max-w-[22rem] rounded-lg border px-3 py-2 text-left transition",
+                                  selected
+                                    ? "border-blue-300 bg-blue-50 ring-2 ring-blue-100"
+                                    : "border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50",
+                                ].join(" ")}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="truncate text-xs font-semibold text-slate-900" title={pendingQueueFileName(item)}>
+                                    {pendingQueueFileName(item)}
+                                  </span>
+                                  {selected ? (
+                                    <span className="shrink-0 rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                                      当前
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="mt-1 truncate text-xs text-slate-600" title={pendingQueueCustomerName(item)}>
+                                  {pendingQueueCustomerName(item)}
+                                </div>
+                                <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                                  <span className="truncate">{poNo || "客户 PO 待识别"}</span>
+                                  <span className="shrink-0 font-mono">{displayStatus}</span>
+                                </div>
+                                <div className="mt-1 text-[11px] text-slate-400">更新：{pendingQueueUpdatedLabel(item)}</div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </section>
+                  ) : null}
                   {chatMessages.map((m) => {
                     const isUser = m.role === "user";
                     const showProgressSpinner = m.role === "system" && isBackgroundRunningStatus(m.progressStatus);
                     const hasMessageContent = m.content.trim().length > 0;
+                    const messageIngestionId =
+                      m.toolUi?.data && typeof m.toolUi.data === "object"
+                        ? String((m.toolUi.data as Record<string, unknown>).ingestion_id ?? "")
+                        : "";
                     const isWideToolCard = Boolean(
                       m.toolUi &&
                         [
@@ -3366,6 +3576,7 @@ export default function HomePage() {
                     return (
                       <div
                         key={m.id}
+                        ref={(node) => setTaskCardRef(messageIngestionId, node)}
                         className={[
                           "flex w-full [contain:layout_paint_style] [content-visibility:auto] [contain-intrinsic-size:96px]",
                           isUser ? "justify-end" : "justify-start",
@@ -3474,7 +3685,7 @@ export default function HomePage() {
                     </span>
                   </summary>
                   <div className="mt-3 space-y-4">
-            <div className="w-full rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm shadow-slate-200/30 ring-1 ring-slate-900/[0.03] sm:p-5">
+            <div ref={activeOrderSectionRef} className="w-full rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm shadow-slate-200/30 ring-1 ring-slate-900/[0.03] sm:p-5">
             <div className="text-base font-semibold text-slate-900">任务状态</div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">
               <span>
