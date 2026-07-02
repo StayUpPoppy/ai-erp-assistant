@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.routes import get_user_source_file_route, head_user_source_file_route, pending_ingestions_route
-from app.schemas import IngestionResponse, IngestionStatus
+from app.schemas import ErrorCode, IngestionResponse, IngestionStatus
 from app.store import list_pending_ingestions_for_user, store
 
 
@@ -67,6 +67,9 @@ def test_pending_ingestions_route_returns_only_current_user_pending_tasks():
         _ingestion("old-31", "31", IngestionStatus.NEED_USER_INPUT, "2026-06-29T08:00:00Z"),
         _ingestion("new-31", "31", IngestionStatus.VALIDATED, "2026-06-30T08:00:00Z"),
         _ingestion("failed-31", "31", IngestionStatus.FAILED, None),
+        _ingestion("unsupported-31", "31", IngestionStatus.FAILED, "2026-06-30T12:00:00Z").model_copy(
+            update={"error_code": ErrorCode.UNSUPPORTED_DOCUMENT.value}
+        ),
         _ingestion("other-user", "58", IngestionStatus.NEED_USER_INPUT, "2026-06-30T09:00:00Z"),
         _ingestion("draft-31", "31", IngestionStatus.DRAFT_CREATED, "2026-06-30T10:00:00Z"),
         _ingestion("canceled-31", "31", IngestionStatus.CANCELED, "2026-06-30T11:00:00Z"),
@@ -99,6 +102,9 @@ def test_pending_ingestions_db_path_filters_after_user_query(monkeypatch: pytest
         return [
             _ingestion("db-new", "31", IngestionStatus.UPLOADED, "2026-06-30T09:00:00Z"),
             _ingestion("db-draft", "31", IngestionStatus.DRAFT_CREATED, "2026-06-30T10:00:00Z"),
+            _ingestion("db-unsupported", "31", IngestionStatus.FAILED, "2026-06-30T11:00:00Z").model_copy(
+                update={"error_code": ErrorCode.UNSUPPORTED_DOCUMENT.value}
+            ),
             _ingestion("db-old", "31", IngestionStatus.MAPPED, "2026-06-29T09:00:00Z"),
         ]
 

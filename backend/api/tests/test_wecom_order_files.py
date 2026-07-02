@@ -234,6 +234,7 @@ async def test_wecom_unmapped_group_returns_409_without_ingestion() -> None:
 
     assert exc.value.status_code == 409
     assert exc.value.detail["code"] == "UNMAPPED_WECOM_CUSTOMER"
+    assert exc.value.detail["message"] == "订单接收失败：客户公司未绑定销售员，请维护客户销售员映射后重传。"
     assert store.ingestions == {}
 
 

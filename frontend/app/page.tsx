@@ -216,6 +216,12 @@ function isPendingQueueStatus(status: IngestionStatus | null | undefined): boole
   return Boolean(status && status !== "DRAFT_CREATED" && status !== "CANCELED");
 }
 
+function isPendingQueueIngestion(ingestion: IngestionResponse): boolean {
+  if (!isPendingQueueStatus(ingestion.status)) return false;
+  if (ingestion.status === "FAILED" && ingestion.error_code === "UNSUPPORTED_DOCUMENT") return false;
+  return true;
+}
+
 function pendingQueueFileName(ingestion: IngestionResponse): string {
   return (
     ingestion.file?.source_file_name ||
@@ -909,7 +915,7 @@ export default function HomePage() {
       lastStatusByIngestionRef.current = { ...lastStatusByIngestionRef.current, [id]: displayStatus };
       setPendingQueue((prev) => {
         const next = prev.filter((item) => item.ingestion_id !== id);
-        if (!isPendingQueueStatus(displayStatus)) return next;
+        if (!isPendingQueueIngestion(data)) return next;
         if (prev.some((item) => item.ingestion_id === id)) {
           return prev.map((item) => (item.ingestion_id === id ? data : item));
         }
@@ -972,7 +978,9 @@ export default function HomePage() {
       setPendingQueueError(null);
       try {
         const items = await getPendingIngestions();
-        const displayItems = items.map((item) => applyClientDraftState(item, clientDraftStateRef.current));
+        const displayItems = items
+          .map((item) => applyClientDraftState(item, clientDraftStateRef.current))
+          .filter(isPendingQueueIngestion);
         setPendingQueue(displayItems);
         displayItems.forEach((item, index) => {
           const displayStatus = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
@@ -3535,11 +3543,24 @@ export default function HomePage() {
                           <button
                             type="button"
                             onClick={() => setIsPendingQueueCollapsed((prev) => !prev)}
-                            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            className="inline-flex h-8 items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 text-xs font-semibold text-blue-700 transition hover:border-blue-200 hover:bg-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200"
                             aria-expanded={!isPendingQueueCollapsed}
+                            title={isPendingQueueCollapsed ? "展开待处理订单列表" : "收起待处理订单列表"}
                           >
-                            <span className="text-sm leading-none">{isPendingQueueCollapsed ? "⌄" : "⌃"}</span>
-                            {isPendingQueueCollapsed ? "展开" : "收起"}
+                            <svg
+                              className={[
+                                "h-3.5 w-3.5 transition-transform duration-200",
+                                isPendingQueueCollapsed ? "rotate-0" : "rotate-180",
+                              ].join(" ")}
+                              viewBox="0 0 20 20"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              aria-hidden
+                            >
+                              <path d="M5 7.5 10 12.5 15 7.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            {isPendingQueueCollapsed ? "展开列表" : "收起列表"}
                           </button>
                           <button
                             type="button"

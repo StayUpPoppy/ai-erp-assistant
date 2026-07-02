@@ -569,7 +569,7 @@ def _wecom_unmapped_detail(
         "wecom_group_name": wecom_group_name or "",
         "customer_name_hint": customer_name_hint or "",
         "factory_name_hint": factory_name_hint or "",
-        "message": "该客户公司尚未绑定销售员",
+        "message": "订单接收失败：客户公司未绑定销售员，请维护客户销售员映射后重传。",
     }
 
 

@@ -103,6 +103,14 @@ _PENDING_INGESTION_STATUSES = {
 }
 
 
+def _is_pending_ingestion(ingestion: IngestionResponse) -> bool:
+    if _status_value(ingestion.status) not in _PENDING_INGESTION_STATUSES:
+        return False
+    if ingestion.status == IngestionStatus.FAILED and ingestion.error_code == ErrorCode.UNSUPPORTED_DOCUMENT.value:
+        return False
+    return True
+
+
 def _file_owner_key(file_hash: str, user_id: str) -> str:
     return f"{user_id}:{file_hash}"
 
@@ -136,7 +144,7 @@ def _sort_pending_ingestions(
     pending = [
         ingestion
         for ingestion in ingestions
-        if _status_value(ingestion.status) in _PENDING_INGESTION_STATUSES
+        if _is_pending_ingestion(ingestion)
     ]
     pending.sort(
         key=lambda ingestion: (
