@@ -788,6 +788,7 @@ export default function HomePage() {
   const [pendingQueue, setPendingQueue] = useState<IngestionResponse[]>([]);
   const [isPendingQueueLoading, setIsPendingQueueLoading] = useState(false);
   const [pendingQueueError, setPendingQueueError] = useState<string | null>(null);
+  const [isPendingQueueCollapsed, setIsPendingQueueCollapsed] = useState(false);
   const [ingestionHistory, setIngestionHistory] = useState<IngestionHistoryItem[]>([]);
 
   /** 拖拽上传中的 UX 状态 */
@@ -2920,6 +2921,9 @@ export default function HomePage() {
   const isPreviewConfirmed = useMemo(() => {
     return Boolean(ingestionId && confirmedPreviewIds[ingestionId] && !isPreviewDirty);
   }, [confirmedPreviewIds, ingestionId, isPreviewDirty]);
+  const activePendingQueueItem = useMemo(() => {
+    return pendingQueue.find((item) => item.ingestion_id === ingestionId) ?? null;
+  }, [ingestionId, pendingQueue]);
 
   const renderToolUi = useCallback(
     (ui: ToolUi | null | undefined) => {
@@ -3487,32 +3491,55 @@ export default function HomePage() {
                     </div>
                   ) : null}
                   {workspaceMode === "pdf_to_erp" ? (
-                    <section className="w-full rounded-xl border border-slate-200 bg-slate-50/80 p-3 shadow-sm ring-1 ring-slate-100">
+                    <section className="sticky top-0 z-20 w-full rounded-xl border border-slate-200 bg-white/95 p-3 shadow-lg shadow-slate-200/50 ring-1 ring-slate-100 backdrop-blur">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div>
-                          <div className="text-sm font-semibold text-slate-900">我的待处理订单</div>
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="text-sm font-semibold text-slate-900">我的待处理订单</div>
+                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
+                              {pendingQueue.length}
+                            </span>
+                            {activePendingQueueItem ? (
+                              <span className="hidden max-w-[28rem] truncate text-xs text-slate-500 md:inline" title={pendingQueueFileName(activePendingQueueItem)}>
+                                当前：{pendingQueueFileName(activePendingQueueItem)}
+                              </span>
+                            ) : null}
+                          </div>
                           <div className="mt-0.5 text-xs text-slate-500">
                             {pendingQueue.length > 0
-                              ? `共 ${pendingQueue.length} 条，点击订单可切换处理`
+                              ? isPendingQueueCollapsed
+                                ? "已收起，展开后可切换订单"
+                                : `共 ${pendingQueue.length} 条，点击订单可切换处理`
                               : "暂无待处理订单；微信群新上传后可点刷新查看"}
                           </div>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => void refreshPendingQueue({ autoActivate: false })}
-                          disabled={isPendingQueueLoading}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {isPendingQueueLoading ? <ProgressSpinner className="h-3.5 w-3.5" /> : null}
-                          刷新
-                        </button>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsPendingQueueCollapsed((prev) => !prev)}
+                            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            aria-expanded={!isPendingQueueCollapsed}
+                          >
+                            <span className="text-sm leading-none">{isPendingQueueCollapsed ? "⌄" : "⌃"}</span>
+                            {isPendingQueueCollapsed ? "展开" : "收起"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void refreshPendingQueue({ autoActivate: false })}
+                            disabled={isPendingQueueLoading}
+                            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isPendingQueueLoading ? <ProgressSpinner className="h-3.5 w-3.5" /> : null}
+                            刷新
+                          </button>
+                        </div>
                       </div>
-                      {pendingQueueError ? (
+                      {!isPendingQueueCollapsed && pendingQueueError ? (
                         <div className="mt-2 rounded-md bg-rose-50 px-2.5 py-1.5 text-xs text-rose-800 ring-1 ring-rose-100">
                           {pendingQueueError}
                         </div>
                       ) : null}
-                      {pendingQueue.length > 0 ? (
+                      {!isPendingQueueCollapsed && pendingQueue.length > 0 ? (
                         <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
                           {pendingQueue.map((item) => {
                             const displayStatus = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
