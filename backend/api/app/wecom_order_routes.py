@@ -135,6 +135,7 @@ def _enabled(routes: List[WecomOrderRoute]) -> List[WecomOrderRoute]:
 
 def _resolve_from_memory(
     *,
+    customer_name: str,
     wecom_group_id: str,
     wecom_group_name: str,
     customer_name_hint: str,
@@ -142,6 +143,10 @@ def _resolve_from_memory(
 ) -> Optional[WecomOrderRoute]:
     with wecom_route_store.lock:
         routes = _enabled(list(wecom_route_store.routes.values()))
+    if customer_name:
+        for route in routes:
+            if route.customer_name == customer_name:
+                return route
     if wecom_group_id:
         for route in routes:
             if route.wecom_group_id == wecom_group_id:
@@ -171,11 +176,13 @@ def _first_db_match(session, field: str, value: str) -> Optional[WecomOrderRoute
 
 def resolve_wecom_order_route(
     *,
-    wecom_group_id: str,
-    wecom_group_name: str,
+    customer_name: Optional[str] = None,
+    wecom_group_id: Optional[str] = None,
+    wecom_group_name: Optional[str] = None,
     customer_name_hint: Optional[str] = None,
     factory_name_hint: Optional[str] = None,
 ) -> Optional[WecomOrderRoute]:
+    customer_exact = _norm(customer_name)
     gid = _norm(wecom_group_id)
     gname = _norm(wecom_group_name)
     customer = _norm(customer_name_hint)
@@ -185,6 +192,9 @@ def resolve_wecom_order_route(
         assert SessionLocal is not None
         session = SessionLocal()
         try:
+            found = _first_db_match(session, "customer_name", customer_exact)
+            if found:
+                return found
             found = _first_db_match(session, "wecom_group_id", gid)
             if found:
                 return found
@@ -207,6 +217,7 @@ def resolve_wecom_order_route(
             session.close()
 
     return _resolve_from_memory(
+        customer_name=customer_exact,
         wecom_group_id=gid,
         wecom_group_name=gname,
         customer_name_hint=customer,

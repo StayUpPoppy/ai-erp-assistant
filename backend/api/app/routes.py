@@ -554,31 +554,35 @@ def _wecom_ingest_auth(
 
 def _wecom_unmapped_detail(
     *,
-    wecom_group_id: str,
-    wecom_group_name: str,
+    customer_name: str,
+    wecom_group_id: Optional[str],
+    wecom_group_name: Optional[str],
     customer_name_hint: Optional[str],
     factory_name_hint: Optional[str],
 ) -> Dict[str, Any]:
     return {
         "ok": False,
-        "code": "UNMAPPED_WECOM_GROUP",
+        "code": "UNMAPPED_WECOM_CUSTOMER",
         "assigned": False,
-        "wecom_group_id": wecom_group_id,
-        "wecom_group_name": wecom_group_name,
+        "customer_name": customer_name,
+        "wecom_group_id": wecom_group_id or "",
+        "wecom_group_name": wecom_group_name or "",
         "customer_name_hint": customer_name_hint or "",
         "factory_name_hint": factory_name_hint or "",
-        "message": "该微信群尚未绑定客户、工厂和销售员",
+        "message": "该客户公司尚未绑定销售员",
     }
 
 
 def _resolve_wecom_route_or_409(
     *,
-    wecom_group_id: str,
-    wecom_group_name: str,
+    customer_name: str,
+    wecom_group_id: Optional[str],
+    wecom_group_name: Optional[str],
     customer_name_hint: Optional[str],
     factory_name_hint: Optional[str],
 ) -> WecomOrderRoute:
     route = resolve_wecom_order_route(
+        customer_name=customer_name,
         wecom_group_id=wecom_group_id,
         wecom_group_name=wecom_group_name,
         customer_name_hint=customer_name_hint,
@@ -588,6 +592,7 @@ def _resolve_wecom_route_or_409(
         raise HTTPException(
             status_code=409,
             detail=_wecom_unmapped_detail(
+                customer_name=customer_name,
                 wecom_group_id=wecom_group_id,
                 wecom_group_name=wecom_group_name,
                 customer_name_hint=customer_name_hint,
@@ -843,10 +848,11 @@ async def wecom_order_file_upload(
     request: Request,
     file: UploadFile = File(..., description="企业微信群订单 PDF 文件"),
     file_name: str = Form(...),
-    wecom_group_id: str = Form(...),
-    wecom_group_name: str = Form(...),
+    customer_name: str = Form(...),
     wecom_message_id: str = Form(...),
-    sent_at: str = Form(...),
+    wecom_group_id: Optional[str] = Form(default=None),
+    wecom_group_name: Optional[str] = Form(default=None),
+    sent_at: Optional[str] = Form(default=None),
     file_hash: Optional[str] = Form(default=None),
     sender_user_id: Optional[str] = Form(default=None),
     sender_name: Optional[str] = Form(default=None),
@@ -855,6 +861,7 @@ async def wecom_order_file_upload(
     extraction_profile_id: Optional[str] = Form(default=None),
 ) -> WecomOrderFileResponse:
     route = _resolve_wecom_route_or_409(
+        customer_name=customer_name,
         wecom_group_id=wecom_group_id,
         wecom_group_name=wecom_group_name,
         customer_name_hint=customer_name_hint,
@@ -875,12 +882,13 @@ async def wecom_order_file_upload(
         apply_current_user=False,
     )
     logger.info(
-        "wecom_order_file_received request_id=%s ingestion_id=%s group_id=%s message_id=%s sent_at=%s sender_user_id=%s sender_name=%s",
+        "wecom_order_file_received request_id=%s ingestion_id=%s customer_name=%s group_id=%s message_id=%s sent_at=%s sender_user_id=%s sender_name=%s",
         getattr(request.state, "request_id", "n/a"),
         ingestion.ingestion_id,
-        wecom_group_id,
+        customer_name,
+        wecom_group_id or "",
         wecom_message_id,
-        sent_at,
+        sent_at or "",
         sender_user_id or "",
         sender_name or "",
     )
@@ -897,6 +905,7 @@ def wecom_order_file_base64_upload(
     request: Request,
 ) -> WecomOrderFileResponse:
     route = _resolve_wecom_route_or_409(
+        customer_name=payload.customer_name,
         wecom_group_id=payload.wecom_group_id,
         wecom_group_name=payload.wecom_group_name,
         customer_name_hint=payload.customer_name_hint,
@@ -920,12 +929,13 @@ def wecom_order_file_base64_upload(
         apply_current_user=False,
     )
     logger.info(
-        "wecom_order_file_base64_received request_id=%s ingestion_id=%s group_id=%s message_id=%s sent_at=%s sender_user_id=%s sender_name=%s",
+        "wecom_order_file_base64_received request_id=%s ingestion_id=%s customer_name=%s group_id=%s message_id=%s sent_at=%s sender_user_id=%s sender_name=%s",
         getattr(request.state, "request_id", "n/a"),
         ingestion.ingestion_id,
-        payload.wecom_group_id,
+        payload.customer_name,
+        payload.wecom_group_id or "",
         payload.wecom_message_id,
-        payload.sent_at,
+        payload.sent_at or "",
         payload.sender_user_id or "",
         payload.sender_name or "",
     )

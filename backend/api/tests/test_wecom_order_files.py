@@ -133,10 +133,11 @@ async def test_wecom_multipart_upload_assigns_ingestion_to_mapped_erp_user() -> 
         request=_request(),
         file=_upload_file(raw),
         file_name="PO-20260630.pdf",
-        wecom_group_id="wr-group-1",
-        wecom_group_name="格鲁赛特阀门配件江苏有限公司-英科1厂",
+        customer_name="格鲁赛特阀门配件江苏有限公司",
         wecom_message_id="msg-1",
-        sent_at="2026-06-30T10:30:00+08:00",
+        wecom_group_id=None,
+        wecom_group_name=None,
+        sent_at=None,
         file_hash=digest,
         sender_user_id=None,
         sender_name=None,
@@ -165,10 +166,11 @@ async def test_wecom_multipart_hash_mismatch_rejected_without_ingestion() -> Non
             request=_request(),
             file=_upload_file(),
             file_name="PO.pdf",
-            wecom_group_id="wr-group-1",
-            wecom_group_name="格鲁赛特阀门配件江苏有限公司-英科1厂",
+            customer_name="格鲁赛特阀门配件江苏有限公司",
             wecom_message_id="msg-1",
-            sent_at="2026-06-30T10:30:00+08:00",
+            wecom_group_id=None,
+            wecom_group_name=None,
+            sent_at=None,
             file_hash="0" * 64,
             sender_user_id=None,
             sender_name=None,
@@ -192,10 +194,11 @@ async def test_wecom_multipart_too_large_rejected(monkeypatch: pytest.MonkeyPatc
             request=_request(),
             file=_upload_file(b"%PDF-1.7 too large"),
             file_name="PO.pdf",
-            wecom_group_id="wr-group-1",
-            wecom_group_name="格鲁赛特阀门配件江苏有限公司-英科1厂",
+            customer_name="格鲁赛特阀门配件江苏有限公司",
             wecom_message_id="msg-1",
-            sent_at="2026-06-30T10:30:00+08:00",
+            wecom_group_id=None,
+            wecom_group_name=None,
+            sent_at=None,
             file_hash=None,
             sender_user_id=None,
             sender_name=None,
@@ -216,10 +219,11 @@ async def test_wecom_unmapped_group_returns_409_without_ingestion() -> None:
             request=_request(),
             file=_upload_file(),
             file_name="PO.pdf",
-            wecom_group_id="wr-missing",
-            wecom_group_name="未知客户-英科1厂",
+            customer_name="未知客户",
             wecom_message_id="msg-1",
-            sent_at="2026-06-30T10:30:00+08:00",
+            wecom_group_id=None,
+            wecom_group_name=None,
+            sent_at=None,
             customer_name_hint="未知客户",
             factory_name_hint="英科1厂",
             file_hash=None,
@@ -229,7 +233,7 @@ async def test_wecom_unmapped_group_returns_409_without_ingestion() -> None:
         )
 
     assert exc.value.status_code == 409
-    assert exc.value.detail["code"] == "UNMAPPED_WECOM_GROUP"
+    assert exc.value.detail["code"] == "UNMAPPED_WECOM_CUSTOMER"
     assert store.ingestions == {}
 
 
@@ -241,11 +245,9 @@ def test_wecom_base64_upload_success_and_pending_visibility() -> None:
         fileName="PO-base64.pdf",
         contentType="application/pdf",
         base64Content=base64.b64encode(raw).decode("ascii"),
+        customerName="格鲁赛特阀门配件江苏有限公司",
         fileHash=digest,
-        wecomGroupId="wr-group-1",
-        wecomGroupName="格鲁赛特阀门配件江苏有限公司-英科1厂",
         wecomMessageId="msg-base64",
-        sentAt="2026-06-30T10:30:00+08:00",
     )
 
     res = wecom_order_file_base64_upload(payload, _request("/integrations/wecom/order-files/base64"))
@@ -262,10 +264,8 @@ def test_wecom_base64_invalid_content_rejected() -> None:
         fileName="PO-base64.pdf",
         contentType="application/pdf",
         base64Content="not valid ***",
-        wecomGroupId="wr-group-1",
-        wecomGroupName="格鲁赛特阀门配件江苏有限公司-英科1厂",
+        customerName="格鲁赛特阀门配件江苏有限公司",
         wecomMessageId="msg-base64",
-        sentAt="2026-06-30T10:30:00+08:00",
     )
 
     with pytest.raises(HTTPException) as exc:
@@ -281,11 +281,9 @@ def test_wecom_base64_hash_mismatch_rejected() -> None:
         fileName="PO-base64.pdf",
         contentType="application/pdf",
         base64Content=base64.b64encode(b"%PDF-1.7 base64 order").decode("ascii"),
+        customerName="格鲁赛特阀门配件江苏有限公司",
         fileHash="0" * 64,
-        wecomGroupId="wr-group-1",
-        wecomGroupName="格鲁赛特阀门配件江苏有限公司-英科1厂",
         wecomMessageId="msg-base64",
-        sentAt="2026-06-30T10:30:00+08:00",
     )
 
     with pytest.raises(HTTPException) as exc:
