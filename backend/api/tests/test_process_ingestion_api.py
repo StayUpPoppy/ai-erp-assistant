@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.schemas import CreateIngestionRequest, ErrorCode, IngestionStatus, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader
 from app.routes import process_ingestion_route
-from app.store import create_ingestion, store
+from app.store import create_ingestion, process_ingestion, store
 
 
 def _reset_in_memory_store() -> None:
@@ -59,6 +59,65 @@ def test_process_ingestion_route_advances_status_in_memory():
     assert len(result.audit_events) >= 5
 
 
+def test_process_ingestion_does_not_restore_record_deleted_during_workflow(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    created = create_ingestion(_new_ingestion_payload("hash-delete-race"))
+
+    def delete_while_processing(ingestion, erp, append_event):
+        with store.lock:
+            store.ingestions.pop(ingestion.ingestion_id, None)
+        return ingestion
+
+    monkeypatch.setattr("app.store.run_ingestion_processing_workflow", delete_while_processing)
+
+    result = process_ingestion(created.ingestion_id)
+
+    assert result is None
+    assert created.ingestion_id not in store.ingestions
+
+
+def test_process_ingestion_database_path_never_upserts_after_concurrent_delete(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    created = create_ingestion(_new_ingestion_payload("hash-db-delete-race"))
+    actions: list[str] = []
+
+    class FakeSession:
+        def expire_all(self) -> None:
+            actions.append("expire")
+
+        def commit(self) -> None:
+            actions.append("commit")
+
+        def rollback(self) -> None:
+            actions.append("rollback")
+
+        def close(self) -> None:
+            actions.append("close")
+
+    def finish_workflow(ingestion, erp, append_event):
+        ingestion.status = IngestionStatus.NEED_USER_INPUT
+        return ingestion
+
+    database_reads = [created.model_copy(deep=True), created.model_copy(deep=True)]
+    monkeypatch.setattr("app.store.is_database_enabled", lambda: True)
+    monkeypatch.setattr("app.store._db_session", lambda: FakeSession())
+    monkeypatch.setattr("app.store.ingestion_db.get_by_id", lambda _session, _id: database_reads.pop(0))
+    monkeypatch.setattr("app.store.run_ingestion_processing_workflow", finish_workflow)
+    monkeypatch.setattr("app.store.ingestion_db.update_existing_ingestion", lambda _session, _ingestion: False)
+    monkeypatch.setattr(
+        "app.store.ingestion_db.upsert_ingestion",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("deleted ingestion must not be upserted")),
+    )
+
+    result = process_ingestion(created.ingestion_id)
+
+    assert result is None
+    assert "commit" not in actions
+    assert actions[-2:] == ["rollback", "close"]
+
+
 def test_process_ingestion_parses_text_object_when_bytes_available(monkeypatch):
     os.environ.pop("DATABASE_URL", None)
     _reset_in_memory_store()
@@ -78,13 +137,16 @@ def test_process_ingestion_parses_text_object_when_bytes_available(monkeypatch):
         "app.workflow.get_object_bytes",
         lambda _k: b"Purchase Order V001\nDate 2026-05-06\nCurrency CNY\nMaterial M001\nQty 10\n",
     )
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-09")
 
     result = process_ingestion_route(created.ingestion_id, _build_request())
 
     assert result.status == IngestionStatus.NEED_USER_INPUT
     assert (result.parsed_char_count or 0) > 0
     assert result.extract_preview
-    assert result.resolved_fields.get("doc_date") == "2026-05-06"
+    assert result.resolved_fields.get("doc_date") == "2026-08-09"
+    assert result.resolved_fields.get("orderDate") == "2026-08-09"
+    assert result.resolved_fields.get("order_date") == "2026-08-09"
     assert result.resolved_fields.get("currency") == "CNY"
     assert result.resolved_fields.get("vendor_code") == "V001"
     assert result.resolved_fields.get("material_code") == "M001"
@@ -94,7 +156,13 @@ def test_process_ingestion_parses_text_object_when_bytes_available(monkeypatch):
     assert len(result.material_candidates) >= 1
     assert result.preview_data is not None
     assert result.preview_data.order.org == "org-test"
+    assert result.preview_data.order.orderDate == "2026-08-09"
+    assert result.preview_data.order.deliveryDate == "2026-05-06"
     assert len(result.preview_data.details) >= 1
+    assert any(
+        "order_date=2026-08-09 order_date_source=current_date timezone=Asia/Shanghai" in event.message
+        for event in result.audit_events
+    )
 
 
 def test_process_ingestion_rebuilds_stale_preview_data(monkeypatch):
@@ -117,13 +185,44 @@ def test_process_ingestion_rebuilds_stale_preview_data(monkeypatch):
         "app.workflow.get_object_bytes",
         lambda _k: b"Purchase Order V001\nDate 2026-05-06\nCurrency CNY\nMaterial M001\nQty 10\n",
     )
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-09")
 
     result = process_ingestion_route(created.ingestion_id, _build_request())
 
     assert result.preview_data is not None
-    assert result.preview_data.order.orderDate == "2026-05-06"
+    assert result.preview_data.order.orderDate == "2026-08-09"
+    assert result.preview_data.order.deliveryDate == "2026-05-06"
     assert result.preview_data.details[0].materialCode == "M001"
     assert result.preview_data.details[0].qty == 10
+
+
+def test_process_ingestion_po_without_document_date_uses_current_date(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    payload = CreateIngestionRequest(
+        file_id="file-po-no-date",
+        file_hash="hash-po-no-date-1",
+        user_id="u-test",
+        org_id="org-test",
+        source_file_object_key="uploads/org/2026-05-01/po-without-date.txt",
+        extract_version="v0",
+        model_version="mock-llm-v1",
+        prompt_version="prompt-v1",
+    )
+    created = create_ingestion(payload)
+    monkeypatch.setattr(
+        "app.workflow.get_object_bytes",
+        lambda _k: b"Purchase Order V001\nCurrency CNY\nMaterial M001\nQty 10\n",
+    )
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-09")
+
+    result = process_ingestion_route(created.ingestion_id, _build_request())
+
+    assert result.doc_type_hint and result.doc_type_hint.value == "PO"
+    assert result.preview_data is not None
+    assert result.preview_data.order.orderDate == "2026-08-09"
+    assert result.resolved_fields.get("doc_date") == "2026-08-09"
+    assert "doc_date" not in result.missing_fields
 
 
 def test_process_ingestion_gr_auto_validated_when_text_complete(monkeypatch):
@@ -159,6 +258,7 @@ def test_process_ingestion_gr_auto_validated_when_text_complete(monkeypatch):
     assert result.resolved_fields.get("po_no")
     assert result.resolved_fields.get("material_code") == "M050"
     assert result.resolved_fields.get("qty_received") == "20"
+    assert result.resolved_fields.get("doc_date") == "2026-05-10"
 
 
 def test_process_ingestion_inv_auto_validated_when_text_complete(monkeypatch):
@@ -192,6 +292,7 @@ def test_process_ingestion_inv_auto_validated_when_text_complete(monkeypatch):
     assert result.resolved_fields.get("vendor_code") == "V005"
     assert result.resolved_fields.get("invoice_no") == "INV-ZZ99"
     assert result.resolved_fields.get("invoice_date") == "2026-05-12"
+    assert result.resolved_fields.get("doc_date") == "2026-05-12"
 
 
 def test_datynk_sale_order_mode_rejects_invoice_named_upload(monkeypatch):

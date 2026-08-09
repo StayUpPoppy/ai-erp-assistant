@@ -18,10 +18,12 @@ import { LogPanel } from "@/components/LogPanel";
 import { OrderPreviewEditor } from "@/components/OrderPreviewEditor";
 import { clientLogger } from "@/lib/client-logger";
 import {
+  deleteIngestion,
   getAssistantSession,
   getApiBaseUrl,
   getCurrentUser,
   getHealth,
+  getHistoryOrders,
   getIngestion,
   getPendingIngestions,
   postAssistantFile,
@@ -31,7 +33,15 @@ import {
   streamAssistantMessage,
 } from "@/lib/api";
 import { precheckUploadFile, SUPPORTED_UPLOAD_EXTENSIONS } from "@/lib/upload-policy";
-import type { AuditEvent, HealthResponse, IngestionResponse, IngestionStatus, OrderPreviewData, ToolUi } from "@/lib/types";
+import type {
+  AuditEvent,
+  HealthResponse,
+  HistoryOrderSummary,
+  IngestionResponse,
+  IngestionStatus,
+  OrderPreviewData,
+  ToolUi,
+} from "@/lib/types";
 
 type ChatRole = "user" | "assistant" | "system";
 type WorkspaceMode = "pdf_to_erp" | "assistant";
@@ -245,6 +255,18 @@ function pendingQueueUpdatedLabel(ingestion: IngestionResponse): string {
   const t = new Date(lastEvent.at);
   if (Number.isNaN(t.getTime())) return "暂无时间";
   return t.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function historyCompletedLabel(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value || "完成时间未知";
+  return parsed.toLocaleString("zh-CN", {
+    year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -649,12 +671,60 @@ function updateWorkflowToolCard(messages: ChatMessage[], ingestion: IngestionRes
   return changed ? next : messages;
 }
 
+const PDF_TO_ERP_TASK_UI_TYPES = new Set(["processing", "missing_fields_form", "upload_confirm", "draft_result", "error"]);
+
+function reconcileRestoredPdfToErpTaskCards(
+  messages: ChatMessage[],
+  ingestion: IngestionResponse,
+): ChatMessage[] {
+  const toolUi = buildPdfToErpToolUi(ingestion);
+  let inserted = false;
+  let changed = false;
+  const next: ChatMessage[] = [];
+
+  for (const message of messages) {
+    const ui = message.toolUi;
+    const isTargetTaskCard = Boolean(
+      ui &&
+        PDF_TO_ERP_TASK_UI_TYPES.has(ui.type) &&
+        String(ui.data.ingestion_id ?? "") === ingestion.ingestion_id,
+    );
+    if (!isTargetTaskCard) {
+      next.push(message);
+      continue;
+    }
+
+    changed = true;
+    if (!toolUi || inserted) continue;
+    inserted = true;
+    next.push({
+      ...message,
+      role: "assistant",
+      content: pdfToErpWorkflowCardText(ingestion, ingestion.status),
+      progressStatus: undefined,
+      toolUi,
+    });
+  }
+
+  if (toolUi && !inserted) {
+    changed = true;
+    next.push({
+      id: `restored-workflow-${ingestion.ingestion_id}-${ingestion.status}`,
+      role: "assistant",
+      content: pdfToErpWorkflowCardText(ingestion, ingestion.status),
+      createdAt: "",
+      toolUi,
+    });
+  }
+
+  return changed ? next : messages;
+}
+
 /** FAILED 时根据审计事件推断失败前最后一档，用于进度条高亮已走过节点 */
 function removePdfToErpTaskCards(messages: ChatMessage[], ingestionId: string): ChatMessage[] {
-  const removableTypes = new Set(["processing", "missing_fields_form", "upload_confirm", "draft_result", "error"]);
   const next = messages.filter((message) => {
     const ui = message.toolUi;
-    if (!ui || !removableTypes.has(ui.type)) return true;
+    if (!ui || !PDF_TO_ERP_TASK_UI_TYPES.has(ui.type)) return true;
     return String(ui.data.ingestion_id ?? "") !== ingestionId;
   });
   return next.length === messages.length ? messages : next;
@@ -796,6 +866,16 @@ export default function HomePage() {
   const [pendingQueueError, setPendingQueueError] = useState<string | null>(null);
   const [isPendingQueueCollapsed, setIsPendingQueueCollapsed] = useState(false);
   const [ingestionHistory, setIngestionHistory] = useState<IngestionHistoryItem[]>([]);
+  const [deletingIngestionIds, setDeletingIngestionIds] = useState<BooleanByIngestion>({});
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  const [historyOrders, setHistoryOrders] = useState<HistoryOrderSummary[]>([]);
+  const [historyNextOffset, setHistoryNextOffset] = useState<number | null>(null);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyDetail, setHistoryDetail] = useState<IngestionResponse | null>(null);
+  const [isHistoryDetailLoading, setIsHistoryDetailLoading] = useState(false);
+  const [historyRefreshNonce, setHistoryRefreshNonce] = useState(0);
 
   /** 拖拽上传中的 UX 状态 */
   const [isDragging, setIsDragging] = useState(false);
@@ -844,6 +924,7 @@ export default function HomePage() {
   const poll404WarnedRef = useRef(false);
   const poll404WarnedByIngestionRef = useRef<BooleanByIngestion>({});
   const pendingAutoOpenAttemptedRef = useRef(false);
+  const historyInvalidatedIngestionIdsRef = useRef<Set<string>>(new Set());
   /** 避免子元素触发 dragleave 导致「拖拽高亮」闪烁 */
   const dragDepthRef = useRef(0);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
@@ -903,11 +984,25 @@ export default function HomePage() {
     previewDraftsByIngestionRef.current = previewDraftsByIngestion;
   }, [previewDraftsByIngestion]);
 
+  const observeDraftCreated = useCallback((ingestionIdToArchive: string) => {
+    if (!ingestionIdToArchive) return;
+    setPendingQueue((previous) =>
+      previous.filter((item) => item.ingestion_id !== ingestionIdToArchive),
+    );
+    if (!historyInvalidatedIngestionIdsRef.current.has(ingestionIdToArchive)) {
+      historyInvalidatedIngestionIdsRef.current.add(ingestionIdToArchive);
+      setHistoryRefreshNonce((value) => value + 1);
+    }
+  }, []);
+
   const upsertIngestionState = useCallback(
     (raw: IngestionResponse, opts?: { activate?: boolean; fileName?: string | null; poll?: boolean }) => {
       const data = applyClientDraftState(raw, clientDraftStateRef.current);
       const id = data.ingestion_id;
       const activate = opts?.activate ?? true;
+      if (data.status === "DRAFT_CREATED") {
+        observeDraftCreated(id);
+      }
       ingestionsByIdRef.current = { ...ingestionsByIdRef.current, [id]: data };
       setIngestionsById((prev) => ({ ...prev, [id]: data }));
 
@@ -969,7 +1064,7 @@ export default function HomePage() {
 
       return data;
     },
-    [orgId, userName],
+    [observeDraftCreated, orgId, userName],
   );
 
   const refreshPendingQueue = useCallback(
@@ -999,6 +1094,61 @@ export default function HomePage() {
     },
     [upsertIngestionState],
   );
+
+  const loadHistoryOrders = useCallback(async (offset: number, append: boolean) => {
+    setIsHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const response = await getHistoryOrders(offset, 20);
+      setHistoryOrders((previous) => {
+        if (!append) return response.items;
+        const byId = new Map(previous.map((item) => [item.ingestion_id, item]));
+        response.items.forEach((item) => byId.set(item.ingestion_id, item));
+        return Array.from(byId.values());
+      });
+      setHistoryNextOffset(response.next_offset ?? null);
+      setHistoryHasMore(response.has_more);
+      response.items.forEach((item) => historyInvalidatedIngestionIdsRef.current.add(item.ingestion_id));
+    } catch (error) {
+      clientLogger.warn("load_history_orders_failed", { error, offset });
+      setHistoryError("历史订单加载失败，请稍后重试。");
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  }, []);
+
+  const openHistoryDrawer = useCallback(() => {
+    setHistoryDetail(null);
+    setHistoryDrawerOpen(true);
+  }, []);
+
+  const selectHistoryOrder = useCallback(async (item: HistoryOrderSummary) => {
+    setIsHistoryDetailLoading(true);
+    setHistoryError(null);
+    try {
+      const detail = await getIngestion(item.ingestion_id);
+      setHistoryDetail(detail);
+    } catch (error) {
+      clientLogger.warn("load_history_order_detail_failed", { ingestionId: item.ingestion_id, error });
+      setHistoryError("历史订单详情加载失败，请稍后重试。");
+    } finally {
+      setIsHistoryDetailLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!historyDrawerOpen) return;
+    void loadHistoryOrders(0, false);
+  }, [historyDrawerOpen, historyRefreshNonce, loadHistoryOrders]);
+
+  useEffect(() => {
+    if (!historyDrawerOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setHistoryDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [historyDrawerOpen]);
 
   const setTaskCardRef = useCallback((id: string, node: HTMLDivElement | null) => {
     if (!id) return;
@@ -1082,6 +1232,97 @@ export default function HomePage() {
     }
   }, []);
 
+  const deletePendingQueueItem = useCallback(
+    async (item: IngestionResponse, index: number) => {
+      const id = item.ingestion_id;
+      if (deletingIngestionIds[id]) return;
+      const confirmed = window.confirm(
+        `确定永久删除“${pendingQueueFileName(item)}”吗？\n\n任务、数据库记录和原始 PDF 都会被删除，且无法恢复。`,
+      );
+      if (!confirmed) return;
+
+      setDeletingIngestionIds((previous) => ({ ...previous, [id]: true }));
+      setPendingQueueError(null);
+      try {
+        await deleteIngestion(id);
+        const remaining = pendingQueue.filter((entry) => entry.ingestion_id !== id);
+        setPendingQueue(remaining);
+        setChatMessages((previous) => removePdfToErpTaskCards(previous, id));
+        setIngestionHistory((previous) => previous.filter((entry) => entry.id !== id));
+        setChatSessions((previous) =>
+          previous.map((session) =>
+            session.taskIngestionId === id
+              ? { ...session, taskIngestionId: null, taskStatus: null, taskType: null }
+              : session,
+          ),
+        );
+        delete taskCardRefs.current[id];
+        delete clientDraftStateRef.current[id];
+        historyInvalidatedIngestionIdsRef.current.delete(id);
+
+        ingestionsByIdRef.current = withoutRecordKey(ingestionsByIdRef.current, id) as IngestionById;
+        lastStatusByIngestionRef.current = withoutRecordKey(lastStatusByIngestionRef.current, id) as StatusByIngestion;
+        workflowToolCardKeyByIngestionRef.current = withoutRecordKey(
+          workflowToolCardKeyByIngestionRef.current,
+          id,
+        ) as StringByIngestion;
+        lastIngestionFileNameByIngestionRef.current = withoutRecordKey(
+          lastIngestionFileNameByIngestionRef.current,
+          id,
+        ) as StringByIngestion;
+        pollingInFlightRef.current = withoutRecordKey(pollingInFlightRef.current, id) as BooleanByIngestion;
+        poll404WarnedByIngestionRef.current = withoutRecordKey(
+          poll404WarnedByIngestionRef.current,
+          id,
+        ) as BooleanByIngestion;
+        resolveFieldsByIngestionRef.current = withoutRecordKey(
+          resolveFieldsByIngestionRef.current,
+          id,
+        ) as ResolveFieldsByIngestion;
+        previewDraftsByIngestionRef.current = withoutRecordKey(
+          previewDraftsByIngestionRef.current,
+          id,
+        ) as PreviewDraftByIngestion;
+        previewDirtyByIngestionRef.current = withoutRecordKey(
+          previewDirtyByIngestionRef.current,
+          id,
+        ) as BooleanByIngestion;
+        setIngestionsById((previous) => withoutRecordKey(previous, id) as IngestionById);
+        setPollingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+        setResolveFieldsByIngestion((previous) => withoutRecordKey(previous, id) as ResolveFieldsByIngestion);
+        setPreviewDraftsByIngestion((previous) => withoutRecordKey(previous, id) as PreviewDraftByIngestion);
+        setConfirmedPreviewIds((previous) => withoutRecordKey(previous, id));
+        setPreviewDirtyByIngestion((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+        setResolvingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+        setConfirmingPreviewIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+        setCreatingDraftIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+
+        if (ingestionIdRef.current === id) {
+          setIngestion(null);
+          setIngestionId(null);
+          ingestionIdRef.current = null;
+          lastStatusRef.current = null;
+          workflowToolCardKeyRef.current = null;
+          lastIngestionFileNameRef.current = null;
+          setResolveFields({});
+          setPreviewDraft(null);
+          previewDirtyRef.current = false;
+          previewIngestionIdRef.current = null;
+          poll404WarnedRef.current = false;
+          const next = remaining[Math.min(index, Math.max(0, remaining.length - 1))];
+          if (next) activatePendingQueueItem(next);
+        }
+        clientLogger.info("待处理订单已永久删除", { ingestionId: id });
+      } catch (error) {
+        clientLogger.error("delete_pending_ingestion_failed", { ingestionId: id, error });
+        setPendingQueueError("订单删除失败，数据库记录和文件已保留，请稍后重试。");
+      } finally {
+        setDeletingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+      }
+    },
+    [activatePendingQueueItem, deletingIngestionIds, pendingQueue],
+  );
+
   const restoreActiveIngestion = useCallback(
     async (
       sid: string,
@@ -1105,6 +1346,8 @@ export default function HomePage() {
         const data = await getIngestion(activeIngestionId);
         if (isCancelled() || assistantSessionIdRef.current !== sid || data.ingestion_id !== ingestionIdRef.current) return;
         const displayData = upsertIngestionState(data, { activate: true });
+        const reconciledMessages = reconcileRestoredPdfToErpTaskCards(restoredMessages, displayData);
+        setChatMessages(reconciledMessages);
         const displayStatus = displayIngestionStatus(displayData, clientDraftStateRef.current) ?? data.status;
         lastIngestionFileNameRef.current =
           displayData.file?.source_file_name ?? displayData.source_file_name ?? lastIngestionFileNameRef.current;
@@ -1112,11 +1355,11 @@ export default function HomePage() {
         previewIngestionIdRef.current = displayData.ingestion_id;
         workflowToolCardKeyByIngestionRef.current = {
           ...workflowToolCardKeyByIngestionRef.current,
-          [displayData.ingestion_id]: hasWorkflowCardForIngestion(restoredMessages, displayData)
+          [displayData.ingestion_id]: hasWorkflowCardForIngestion(reconciledMessages, displayData)
             ? pdfToErpWorkflowCardKey(displayData, displayStatus)
             : null,
         };
-        workflowToolCardKeyRef.current = hasWorkflowCardForIngestion(restoredMessages, displayData)
+        workflowToolCardKeyRef.current = hasWorkflowCardForIngestion(reconciledMessages, displayData)
           ? pdfToErpWorkflowCardKey(displayData, displayStatus)
           : null;
       } catch (e) {
@@ -1771,6 +2014,7 @@ export default function HomePage() {
       }
       const draft = res.tool_result?.draft;
       if (draft) {
+        observeDraftCreated(draft.ingestion_id);
         clientDraftStateRef.current[draft.ingestion_id] = {
           draft_no: draft.draft_no,
           draft_url: draft.draft_url,
@@ -1788,7 +2032,7 @@ export default function HomePage() {
         if (ingestionIdRef.current === draft.ingestion_id) lastStatusRef.current = "DRAFT_CREATED";
       }
     },
-    [appendChat, upsertIngestionState],
+    [appendChat, observeDraftCreated, upsertIngestionState],
   );
 
   const [copiedTag, setCopiedTag] = useState<string | null>(null);
@@ -2609,6 +2853,7 @@ export default function HomePage() {
         return;
       }
       clientLogger.info("草稿创建成功", data);
+      observeDraftCreated(data.ingestion_id);
       clientDraftStateRef.current[data.ingestion_id] = {
         draft_no: data.draft_no,
         draft_url: data.draft_url,
@@ -2637,6 +2882,7 @@ export default function HomePage() {
     ingestionId,
     isCreatingDraft,
     orgId,
+    observeDraftCreated,
     previewDraft,
     upsertIngestionState,
     userId,
@@ -3444,17 +3690,30 @@ export default function HomePage() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white">
           <div className="shrink-0 bg-white px-5 py-3 lg:px-7">
             <div className="flex items-center justify-end">
-              <button
-                type="button"
-                onClick={() => void onClearCurrentPage()}
-                className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#2248b8] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1b3fa8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2"
-              >
-                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-                  <rect x="4" y="4" width="16" height="16" rx="1.5" />
-                  <path d="M9 4v16M4 9h5M4 15h5M13 12h4M15 10v4" strokeLinecap="round" />
-                </svg>
-                刷新页面
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={openHistoryDrawer}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2"
+                >
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                    <path d="M4 7h16M6 4h12a2 2 0 0 1 2 2v14H4V6a2 2 0 0 1 2-2Z" />
+                    <path d="M8 11h8M8 15h6" strokeLinecap="round" />
+                  </svg>
+                  历史订单
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onClearCurrentPage()}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#2248b8] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1b3fa8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2"
+                >
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                    <rect x="4" y="4" width="16" height="16" rx="1.5" />
+                    <path d="M9 4v16M4 9h5M4 15h5M13 12h4M15 10v4" strokeLinecap="round" />
+                  </svg>
+                  刷新页面
+                </button>
+              </div>
             </div>
           </div>
 
@@ -3580,46 +3839,71 @@ export default function HomePage() {
                       ) : null}
                       {!isPendingQueueCollapsed && pendingQueue.length > 0 ? (
                         <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
-                          {pendingQueue.map((item) => {
+                          {pendingQueue.map((item, index) => {
                             const displayStatus = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
                             const selected = item.ingestion_id === ingestionId;
                             const poNo = pendingQueuePoNo(item);
+                            const deleting = Boolean(deletingIngestionIds[item.ingestion_id]);
                             return (
-                              <button
-                                type="button"
+                              <div
                                 key={item.ingestion_id}
-                                onClick={() => activatePendingQueueItem(item)}
                                 className={[
-                                  "min-w-[17rem] max-w-[22rem] rounded-lg border px-3 py-2 text-left transition",
+                                  "relative flex min-w-[19rem] max-w-[24rem] overflow-hidden rounded-lg border transition",
                                   selected
                                     ? "border-blue-300 bg-blue-50 ring-2 ring-blue-100"
                                     : "border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50",
                                 ].join(" ")}
                               >
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="truncate text-xs font-semibold text-slate-900" title={pendingQueueFileName(item)}>
-                                    {pendingQueueFileName(item)}
-                                  </span>
-                                  <span className="flex shrink-0 items-center gap-1">
-                                    <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-sm">
-                                      未处理
+                                <button
+                                  type="button"
+                                  onClick={() => activatePendingQueueItem(item)}
+                                  disabled={deleting}
+                                  className="min-w-0 flex-1 px-3 py-2 pr-11 text-left disabled:cursor-wait disabled:opacity-60"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="truncate text-xs font-semibold text-slate-900" title={pendingQueueFileName(item)}>
+                                      {pendingQueueFileName(item)}
                                     </span>
-                                    {selected ? (
-                                      <span className="rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                                        当前
+                                    <span className="flex shrink-0 items-center gap-1">
+                                      <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-sm">
+                                        未处理
                                       </span>
-                                    ) : null}
-                                  </span>
-                                </div>
-                                <div className="mt-1 truncate text-xs text-slate-600" title={pendingQueueCustomerName(item)}>
-                                  {pendingQueueCustomerName(item)}
-                                </div>
-                                <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
-                                  <span className="truncate">{poNo || "客户 PO 待识别"}</span>
-                                  <span className="shrink-0 font-mono">{displayStatus}</span>
-                                </div>
-                                <div className="mt-1 text-[11px] text-slate-400">更新：{pendingQueueUpdatedLabel(item)}</div>
-                              </button>
+                                      {selected ? (
+                                        <span className="rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                                          当前
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 truncate text-xs text-slate-600" title={pendingQueueCustomerName(item)}>
+                                    {pendingQueueCustomerName(item)}
+                                  </div>
+                                  <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                                    <span className="truncate">{poNo || "客户 PO 待识别"}</span>
+                                    <span className="shrink-0 font-mono">{displayStatus}</span>
+                                  </div>
+                                  <div className="mt-1 text-[11px] text-slate-400">更新：{pendingQueueUpdatedLabel(item)}</div>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void deletePendingQueueItem(item, index);
+                                  }}
+                                  disabled={deleting}
+                                  className="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md border border-rose-200 bg-white text-rose-600 shadow-sm transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-wait disabled:opacity-60"
+                                  title={deleting ? "正在删除待处理订单" : "永久删除待处理订单"}
+                                  aria-label={deleting ? "正在删除待处理订单" : "永久删除待处理订单"}
+                                >
+                                  {deleting ? (
+                                    <ProgressSpinner className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                                      <path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                  )}
+                                </button>
+                              </div>
                             );
                           })}
                         </div>
@@ -4306,6 +4590,190 @@ export default function HomePage() {
           </div>
         </div>
       </div>
+
+      {historyDrawerOpen ? (
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 z-40 cursor-default bg-slate-950/35 backdrop-blur-[1px]"
+            aria-label="关闭历史订单"
+            onClick={() => setHistoryDrawerOpen(false)}
+          />
+          <aside className="fixed inset-y-0 right-0 z-50 flex w-full max-w-5xl flex-col bg-slate-50 shadow-[-18px_0_54px_rgba(15,23,42,0.22)] sm:w-[min(92vw,72rem)]">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-5 py-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  {historyDetail ? (
+                    <button
+                      type="button"
+                      onClick={() => setHistoryDetail(null)}
+                      className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                    >
+                      <span aria-hidden>←</span>
+                      返回列表
+                    </button>
+                  ) : null}
+                  <h2 className="truncate text-lg font-semibold text-slate-950">
+                    {historyDetail ? "历史订单详情" : "历史订单"}
+                  </h2>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">仅展示已经成功生成 ERP 草稿的订单</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHistoryDrawerOpen(false)}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-xl text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                aria-label="关闭历史订单"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+              {historyError ? (
+                <div className="mb-4 flex items-center justify-between gap-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-800 ring-1 ring-rose-100">
+                  <span>{historyError}</span>
+                  <button
+                    type="button"
+                    onClick={() => void loadHistoryOrders(0, false)}
+                    disabled={isHistoryLoading}
+                    className="shrink-0 rounded-md border border-rose-200 bg-white px-2.5 py-1 text-xs font-semibold hover:bg-rose-100 disabled:opacity-50"
+                  >
+                    重试
+                  </button>
+                </div>
+              ) : null}
+
+              {historyDetail ? (
+                <div className="space-y-4">
+                  <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-base font-semibold text-slate-950" title={pendingQueueFileName(historyDetail)}>
+                          {pendingQueueFileName(historyDetail)}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-600">
+                          {pendingQueueCustomerName(historyDetail)} · {pendingQueuePoNo(historyDetail) || "客户 PO 未填写"}
+                        </div>
+                        <div className="mt-2 font-mono text-xs text-slate-500">草稿号：{historyDetail.draft_no || "—"}</div>
+                      </div>
+                      {historyDetail.draft_url ? (
+                        <a
+                          href={historyDetail.draft_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex h-9 items-center rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white hover:bg-emerald-600"
+                        >
+                          打开 ERP 草稿
+                        </a>
+                      ) : null}
+                    </div>
+                  </section>
+
+                  <div className="grid gap-4 xl:grid-cols-[minmax(22rem,0.9fr)_minmax(30rem,1.1fr)]">
+                    {historyDetail.source_file_object_key ? (
+                      <SourceFilePane ingestion={historyDetail} />
+                    ) : (
+                      <div className="flex min-h-[20rem] items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white text-sm text-slate-500">
+                        该历史订单没有可查看的原始 PDF
+                      </div>
+                    )}
+                    {historyDetail.preview_data ? (
+                      <div className="max-h-[76vh] overflow-auto rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+                        <OrderPreviewEditor
+                          preview={historyDetail.preview_data}
+                          editableFields={historyDetail.editable_fields ?? []}
+                          issues={historyDetail.issues ?? []}
+                          onChange={() => undefined}
+                          onConfirm={() => undefined}
+                          onCreateDraft={() => undefined}
+                          confirming={false}
+                          creatingDraft={false}
+                          createDraftDisabled
+                          hideActions
+                          readOnly
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex min-h-[20rem] items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white text-sm text-slate-500">
+                        该历史订单没有结构化预览
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : isHistoryDetailLoading ? (
+                <div className="flex min-h-[20rem] items-center justify-center gap-2 text-sm text-slate-500">
+                  <ProgressSpinner className="h-5 w-5" />
+                  正在加载订单详情...
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {historyOrders.map((item) => (
+                    <div key={item.ingestion_id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-blue-200 hover:shadow-md">
+                      <button type="button" onClick={() => void selectHistoryOrder(item)} className="w-full text-left">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-semibold text-slate-950" title={item.source_file_name || "历史订单"}>
+                              {item.source_file_name || "历史订单"}
+                            </div>
+                            <div className="mt-1 truncate text-sm text-slate-600">{item.customer_name || "客户待确认"}</div>
+                          </div>
+                          <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-emerald-100">
+                            ERP 已成功
+                          </span>
+                        </div>
+                        <div className="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-3">
+                          <span>客户 PO：{item.customer_po_no || "—"}</span>
+                          <span className="font-mono">草稿号：{item.draft_no || "—"}</span>
+                          <span className="sm:text-right">{historyCompletedLabel(item.completed_at)}</span>
+                        </div>
+                      </button>
+                      <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
+                        <button
+                          type="button"
+                          onClick={() => void selectHistoryOrder(item)}
+                          className="text-xs font-semibold text-blue-700 hover:text-blue-600"
+                        >
+                          查看 PDF 和订单详情
+                        </button>
+                        {item.draft_url ? (
+                          <a href={item.draft_url} target="_blank" rel="noreferrer" className="text-xs font-semibold text-emerald-700 hover:text-emerald-600">
+                            打开 ERP 草稿 ↗
+                          </a>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+
+                  {!isHistoryLoading && historyOrders.length === 0 && !historyError ? (
+                    <div className="flex min-h-[20rem] flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white text-center">
+                      <div className="text-base font-semibold text-slate-800">暂无历史订单</div>
+                      <div className="mt-2 text-sm text-slate-500">成功上传到 ERP 后，订单会自动出现在这里。</div>
+                    </div>
+                  ) : null}
+
+                  {isHistoryLoading ? (
+                    <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-500">
+                      <ProgressSpinner className="h-5 w-5" />
+                      正在加载历史订单...
+                    </div>
+                  ) : null}
+
+                  {historyHasMore && historyNextOffset !== null && !isHistoryLoading ? (
+                    <button
+                      type="button"
+                      onClick={() => void loadHistoryOrders(historyNextOffset, true)}
+                      className="w-full rounded-xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-700 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                    >
+                      加载更多
+                    </button>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          </aside>
+        </>
+      ) : null}
 
       {logOpen ? (
         <>

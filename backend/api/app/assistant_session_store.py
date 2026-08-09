@@ -88,6 +88,70 @@ def get_session_response(session_id: str) -> Optional[AssistantSessionResponse]:
         return _to_response(session)
 
 
+def _ui_references_ingestion(ui: Optional[ToolUi], ingestion_id: str) -> bool:
+    if ui is None or not isinstance(ui.data, dict):
+        return False
+    return str(ui.data.get("ingestion_id") or "").strip() == ingestion_id
+
+
+def _remove_ingestion_from_session(session: AssistantSession, ingestion_id: str) -> bool:
+    changed = False
+    kept_messages: list[ChatToolMessage] = []
+    for message in session.messages:
+        if _ui_references_ingestion(message.ui, ingestion_id):
+            changed = True
+            continue
+        kept_messages.append(message)
+    if changed:
+        session.messages = kept_messages
+    if session.active_task and session.active_task.ingestion_id == ingestion_id:
+        session.active_task = None
+        changed = True
+    if _ui_references_ingestion(session.ui, ingestion_id):
+        session.ui = None
+        changed = True
+    if changed:
+        _trim_and_touch(session)
+    return changed
+
+
+def remove_ingestion_references(ingestion_id: str) -> int:
+    """Remove deleted task references from persisted and in-memory assistant sessions."""
+    target = (ingestion_id or "").strip()
+    if not target:
+        return 0
+    with _lock:
+        if is_database_enabled():
+            from sqlalchemy import select
+
+            from app import assistant_session_db
+            from app.orm_models import AssistantSessionRow
+
+            db = _db_session()
+            changed_count = 0
+            try:
+                rows = db.execute(select(AssistantSessionRow)).scalars().all()
+                for row in rows:
+                    model = assistant_session_db.row_to_session(row)
+                    if not _remove_ingestion_from_session(model, target):
+                        continue
+                    assistant_session_db.apply_session_to_row(row, model)
+                    changed_count += 1
+                db.commit()
+                return changed_count
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        changed_count = 0
+        for session in _sessions.values():
+            if _remove_ingestion_from_session(session, target):
+                changed_count += 1
+        return changed_count
+
+
 def reset_sessions_for_tests() -> None:
     with _lock:
         _sessions.clear()

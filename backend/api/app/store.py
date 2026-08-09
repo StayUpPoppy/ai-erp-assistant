@@ -6,6 +6,8 @@ from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
+from sqlalchemy.orm.exc import StaleDataError
+
 from app.database import SessionLocal, is_database_enabled
 from app.erp_audit_log import append_erp_call_log, append_erp_call_log_with_upstream
 from app.document_extract import resolved_upload_file_name
@@ -19,7 +21,9 @@ from app.order_preview import (
     preview_to_resolved_fields,
 )
 from app.workflow import run_ingestion_processing_workflow
+from app.queue_client import remove_ingestion_job
 from app.storage_client import (
+    delete_object,
     ObjectNotFoundError,
     ObjectStorageUnavailableError,
     iter_object_bytes,
@@ -35,8 +39,11 @@ from app.schemas import (
     AuditEvent,
     CreateIngestionRequest,
     CreateDraftResponse,
+    DeleteIngestionResponse,
     DocType,
     ErrorCode,
+    HistoryOrderListResponse,
+    HistoryOrderSummary,
     IngestionResponse,
     IngestionStatus,
     OrderPreviewData,
@@ -45,6 +52,10 @@ from app.schemas import (
 )
 
 logger = logging.getLogger("ai_erp_api")
+
+
+class PendingIngestionDeleteConflict(RuntimeError):
+    pass
 
 
 def _env_truthy(name: str, default: bool = False) -> bool:
@@ -154,6 +165,48 @@ def _sort_pending_ingestions(
         reverse=True,
     )
     return pending[: max(0, min(limit, 20))]
+
+
+def _iso_timestamp(raw: Optional[str]) -> float:
+    value = (raw or "").strip()
+    if not value:
+        return 0.0
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _history_completed_at(ingestion: IngestionResponse) -> str:
+    for event in reversed(ingestion.audit_events or []):
+        if event.status == IngestionStatus.DRAFT_CREATED and event.at:
+            return event.at
+    if ingestion.audit_events:
+        return ingestion.audit_events[-1].at
+    return ingestion.source_file_uploaded_at or ""
+
+
+def _history_summary(ingestion: IngestionResponse) -> HistoryOrderSummary:
+    fields = ingestion.resolved_fields or {}
+    order = ingestion.preview_data.order if ingestion.preview_data else None
+    customer_name = (order.customerName if order else "") or fields.get("customerName", "") or fields.get("customer_name", "")
+    customer_po_no = (order.customerPoNo if order else "") or fields.get("customerPoNo", "") or fields.get("po_no", "")
+    org_id = (order.org if order else "") or fields.get("org", "") or ingestion.org_id
+    return HistoryOrderSummary(
+        ingestion_id=ingestion.ingestion_id,
+        source_file_name=ingestion.source_file_name
+        or resolved_upload_file_name(ingestion.source_file_object_key, ingestion.source_file_name),
+        customer_name=str(customer_name or "").strip(),
+        customer_po_no=str(customer_po_no or "").strip(),
+        org_id=str(org_id or "").strip(),
+        draft_no=str(ingestion.draft_no or "").strip(),
+        draft_url=str(ingestion.draft_url or "").strip(),
+        completed_at=_history_completed_at(ingestion),
+    )
 
 
 def _merge_upload_payload_into_ingestion(ing: IngestionResponse, payload: CreateIngestionRequest) -> bool:
@@ -606,6 +659,111 @@ def list_pending_ingestions_for_user(user_id: str, limit: int = 20) -> List[Inge
     return _sort_pending_ingestions(rows, limit)
 
 
+def list_history_orders_for_user(user_id: str, offset: int = 0, limit: int = 20) -> HistoryOrderListResponse:
+    owner = (user_id or "").strip()
+    safe_offset = max(0, offset)
+    safe_limit = max(1, min(limit, 50))
+    if not owner:
+        return HistoryOrderListResponse(offset=safe_offset, limit=safe_limit)
+    if is_database_enabled():
+        session = _db_session()
+        try:
+            rows = ingestion_db.list_by_user_id(session, owner)
+        finally:
+            session.close()
+    else:
+        with store.lock:
+            rows = [ingestion for ingestion in store.ingestions.values() if ingestion.user_id == owner]
+
+    completed = [ingestion for ingestion in rows if ingestion.status == IngestionStatus.DRAFT_CREATED]
+    completed.sort(
+        key=lambda ingestion: (_iso_timestamp(_history_completed_at(ingestion)), ingestion.ingestion_id),
+        reverse=True,
+    )
+    page = completed[safe_offset : safe_offset + safe_limit]
+    next_offset = safe_offset + len(page)
+    has_more = next_offset < len(completed)
+    return HistoryOrderListResponse(
+        items=[_history_summary(ingestion) for ingestion in page],
+        offset=safe_offset,
+        limit=safe_limit,
+        next_offset=next_offset if has_more else None,
+        has_more=has_more,
+    )
+
+
+def delete_pending_ingestion(ingestion_id: str) -> Optional[DeleteIngestionResponse]:
+    """Hard-delete a pending ingestion, its source file, and its queued Redis job."""
+    with store.lock:
+        if is_database_enabled():
+            session = _db_session()
+            try:
+                ingestion = ingestion_db.get_by_id(session, ingestion_id)
+                if ingestion is None:
+                    return None
+                if not _is_pending_ingestion(ingestion):
+                    raise PendingIngestionDeleteConflict(ingestion.status.value)
+                shared_source = bool(
+                    ingestion.source_file_object_key
+                    and ingestion_db.has_other_source_object_reference(
+                        session,
+                        ingestion.source_file_object_key,
+                        ingestion_id,
+                    )
+                )
+                source_deleted = False if shared_source else delete_object(ingestion.source_file_object_key)
+                queue_removed = remove_ingestion_job(ingestion_id)
+                ingestion_db.delete_by_id(session, ingestion_id)
+                session.commit()
+                logger.info(
+                    "delete_ingestion_succeeded ingestion_id=%s storage=db queue_removed=%s source_deleted=%s",
+                    ingestion_id,
+                    queue_removed,
+                    source_deleted,
+                )
+                return DeleteIngestionResponse(
+                    ingestion_id=ingestion_id,
+                    queue_removed=queue_removed,
+                    source_file_deleted=source_deleted,
+                )
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+        ingestion = store.ingestions.get(ingestion_id)
+        if ingestion is None:
+            return None
+        if not _is_pending_ingestion(ingestion):
+            raise PendingIngestionDeleteConflict(ingestion.status.value)
+        shared_source = bool(
+            ingestion.source_file_object_key
+            and any(
+                other.ingestion_id != ingestion_id
+                and other.source_file_object_key == ingestion.source_file_object_key
+                for other in store.ingestions.values()
+            )
+        )
+        source_deleted = False if shared_source else delete_object(ingestion.source_file_object_key)
+        queue_removed = remove_ingestion_job(ingestion_id)
+        store.ingestions.pop(ingestion_id, None)
+        owner_file_key = _file_owner_key(ingestion.file_hash, ingestion.user_id)
+        if store.file_hash_to_ingestion.get(owner_file_key) == ingestion_id:
+            store.file_hash_to_ingestion.pop(owner_file_key, None)
+        logger.info(
+            "delete_ingestion_succeeded ingestion_id=%s storage=memory queue_removed=%s source_deleted=%s",
+            ingestion_id,
+            queue_removed,
+            source_deleted,
+        )
+        return DeleteIngestionResponse(
+            ingestion_id=ingestion_id,
+            queue_removed=queue_removed,
+            source_file_deleted=source_deleted,
+        )
+
+
 def _refresh_preview_from_resolved_fields(ingestion: IngestionResponse) -> None:
     existing_preview = ingestion.preview_data
     ingestion.preview_data = None
@@ -745,12 +903,24 @@ def process_ingestion(ingestion_id: str) -> Optional[IngestionResponse]:
 
             session.expire_all()
             latest = ingestion_db.get_by_id(session, ingestion_id)
+            if latest is None:
+                logger.info("process_ingestion_discarded_deleted ingestion_id=%s storage=db", ingestion_id)
+                session.rollback()
+                return None
             if latest and latest.status != IngestionStatus.UPLOADED:
                 logger.info("process_ingestion_skip_after_workflow ingestion_id=%s status=%s storage=db", ingestion_id, latest.status)
                 return latest
 
-            ingestion_db.upsert_ingestion(session, ingestion)
-            session.commit()
+            if not ingestion_db.update_existing_ingestion(session, ingestion):
+                session.rollback()
+                logger.info("process_ingestion_discarded_deleted ingestion_id=%s storage=db", ingestion_id)
+                return None
+            try:
+                session.commit()
+            except StaleDataError:
+                session.rollback()
+                logger.info("process_ingestion_discarded_concurrent_delete ingestion_id=%s storage=db", ingestion_id)
+                return None
             logger.info("process_ingestion_succeeded ingestion_id=%s status=%s storage=db", ingestion_id, ingestion.status)
             return ingestion
         except Exception:

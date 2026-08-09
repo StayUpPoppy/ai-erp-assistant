@@ -336,6 +336,8 @@ def test_workflow_uses_final_pdf_parse_without_second_ocr(monkeypatch):
 
 
 def test_workflow_calls_llm_extractor_once(monkeypatch):
+    from app.order_preview import apply_preview_to_ingestion, preview_to_resolved_fields
+
     monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
     monkeypatch.setattr("app.workflow.StateGraph", None)
     monkeypatch.setattr("app.workflow.END", None)
@@ -348,18 +350,38 @@ def test_workflow_calls_llm_extractor_once(monkeypatch):
     monkeypatch.setattr("app.workflow.extract_document_from_bytes", lambda *_args: _parsed(text))
     calls = {"count": 0}
 
-    def fake_llm(_ingestion, _text):
+    def fake_llm(ingestion, _text):
         calls["count"] += 1
-        return False
+        preview = OrderPreviewData(
+            order=OrderPreviewHeader(
+                org=ingestion.org_id,
+                customerName="Acme",
+                customerPoNo="PO-ONE",
+                orderDate="2026-03-06",
+                currency="CNY",
+                deliveryDate="2026-03-27",
+            ),
+            details=[OrderPreviewDetail(materialCode="M001", productName="Spring", qty=2, price=10)],
+        )
+        ingestion.doc_type_hint = DocType.PO
+        apply_preview_to_ingestion(ingestion, preview)
+        ingestion.resolved_fields.update(preview_to_resolved_fields(preview))
+        return True
 
     monkeypatch.setattr("app.workflow.try_apply_llm_preview", fake_llm)
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-09")
     ing = _new_ingestion()
     ing.source_file_object_key = "__local__/uploads/org-test/2099-01-01/PO-ONE.pdf"
     ing.source_file_name = "PO-ONE.pdf"
 
-    run_ingestion_processing_workflow(ingestion=ing, erp=MockErpClient(), append_event=_append_event)
+    result = run_ingestion_processing_workflow(ingestion=ing, erp=MockErpClient(), append_event=_append_event)
 
     assert calls["count"] == 1
+    assert result.preview_data is not None
+    assert result.preview_data.order.orderDate == "2026-08-09"
+    assert result.preview_data.order.deliveryDate == "2026-03-27"
+    assert result.resolved_fields["doc_date"] == "2026-08-09"
+    assert any("thinking=0" in event.message for event in result.audit_events if "structured fields extracted" in event.message)
 
 
 def test_workflow_qwen_vision_success_uses_local_context_and_skips_text_llm(monkeypatch):
@@ -412,6 +434,7 @@ def test_workflow_qwen_vision_success_uses_local_context_and_skips_text_llm(monk
         )
 
     monkeypatch.setattr("app.workflow.try_apply_qwen_vision_preview", fake_qwen)
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-09")
     ing = _new_ingestion()
     ing.source_file_object_key = "__local__/uploads/org-test/2099-01-01/PO-QWEN.pdf"
     ing.source_file_name = "PO-QWEN.pdf"
@@ -425,7 +448,13 @@ def test_workflow_qwen_vision_success_uses_local_context_and_skips_text_llm(monk
     assert result.prompt_version == "qwen-vision-order-preview-v2"
     assert result.preview_data is not None
     assert result.preview_data.order.customerPoNo == "PO-QWEN"
+    assert result.preview_data.order.orderDate == "2026-08-09"
+    assert result.preview_data.order.deliveryDate == "2026-07-01"
+    assert result.resolved_fields["doc_date"] == "2026-08-09"
+    assert result.resolved_fields["orderDate"] == "2026-08-09"
+    assert result.resolved_fields["order_date"] == "2026-08-09"
     assert any("qwen vision structured fields extracted" in event.message for event in result.audit_events)
+    assert any("thinking=0" in event.message for event in result.audit_events if "qwen vision structured" in event.message)
 
 
 def test_workflow_qwen_vision_failure_falls_back_to_local_parse(monkeypatch):

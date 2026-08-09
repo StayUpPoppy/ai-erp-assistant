@@ -123,6 +123,33 @@ def test_process_job_handles_http_error(monkeypatch):
     worker.process_job("ing-err")
 
 
+def test_process_job_treats_deleted_404_as_success_without_dlq(monkeypatch):
+    class _R:
+        def __init__(self):
+            self.rows: list[tuple[str, str]] = []
+
+        def rpush(self, key: str, line: str):
+            self.rows.append((key, line))
+
+    redis_client = _R()
+
+    def _fake_urlopen(_req, timeout=None, **_kw):
+        raise urllib.error.HTTPError(
+            url="http://api-test/internal/ingestions/deleted/process",
+            code=404,
+            msg="not found",
+            hdrs=None,
+            fp=io.BytesIO(b"INGESTION_NOT_FOUND"),
+        )
+
+    monkeypatch.setattr("worker.urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("worker.API_BASE", "http://api-test")
+
+    worker.process_job("deleted", redis_client=redis_client)  # type: ignore[arg-type]
+
+    assert redis_client.rows == []
+
+
 def test_process_job_dlq_on_terminal_http_500(monkeypatch):
     class _R:
         def __init__(self):

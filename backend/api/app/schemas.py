@@ -43,6 +43,7 @@ class ErrorCode(str, Enum):
     ERP_UPSTREAM_ERROR = "ERP_UPSTREAM_ERROR"
     ERP_CUSTOMER_SAVE_DISABLED = "ERP_CUSTOMER_SAVE_DISABLED"
     INGESTION_CANCELED = "INGESTION_CANCELED"
+    INGESTION_DELETE_NOT_ALLOWED = "INGESTION_DELETE_NOT_ALLOWED"
 
 
 class HealthResponse(BaseModel):
@@ -75,6 +76,7 @@ class HealthResponse(BaseModel):
     aliyun_ocr_configured: bool = False
     qwen_vision_extract_enabled: bool = False
     qwen_vision_force_all: bool = False
+    qwen_vision_enable_thinking: bool = False
     qwen_vision_model: str = "qwen3.7-plus"
     qwen_vision_base_url: str = ""
     qwen_vision_api_key_configured: bool = False
@@ -106,6 +108,7 @@ class HealthResponse(BaseModel):
     erp_customer_page_keyword_param: str = ""
     erp_qa_report_definitions_count: int = 0
     llm_extract_enabled: bool = False
+    llm_extract_enable_thinking: bool = False
     llm_router_enabled: bool = False
     llm_api_key_configured: bool = False
     llm_model: str = ""
@@ -262,6 +265,33 @@ class IngestionResponse(BaseModel):
     preview_data: Optional["OrderPreviewData"] = None
     editable_fields: List["PreviewEditableField"] = Field(default_factory=list)
     issues: List["PreviewIssue"] = Field(default_factory=list)
+
+
+class HistoryOrderSummary(BaseModel):
+    ingestion_id: str
+    source_file_name: Optional[str] = None
+    customer_name: str = ""
+    customer_po_no: str = ""
+    org_id: str = ""
+    draft_no: str
+    draft_url: str = ""
+    completed_at: str
+    status: IngestionStatus = IngestionStatus.DRAFT_CREATED
+
+
+class HistoryOrderListResponse(BaseModel):
+    items: List[HistoryOrderSummary] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 20
+    next_offset: Optional[int] = None
+    has_more: bool = False
+
+
+class DeleteIngestionResponse(BaseModel):
+    ingestion_id: str
+    deleted: bool = True
+    queue_removed: int = 0
+    source_file_deleted: bool = False
 
 
 def _parse_float_value(value: object) -> float:

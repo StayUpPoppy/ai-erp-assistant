@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import sys
 
@@ -302,18 +303,22 @@ def test_try_apply_llm_preview_keeps_rule_preview_when_llm_is_empty(monkeypatch)
 
 def test_try_apply_llm_preview_applies_llm_when_more_complete(monkeypatch) -> None:
     ingestion = _ingestion_with_fields({"customerPoNo": "PO-ROUGH"})
+    request_options = {}
 
     monkeypatch.setattr("app.llm_extract.llm_available", lambda: True)
-    monkeypatch.setattr(
-        "app.llm_extract.chat_completion_json",
-        lambda *_args, **_kwargs: (
+    monkeypatch.setenv("LLM_EXTRACT_ENABLE_THINKING", "false")
+
+    def fake_completion(*_args, **kwargs):
+        request_options.update(kwargs)
+        return (
             '{"purchase_order":{"order_number":"PO-BETTER","purchaser_name":"Better Customer",'
             '"order_date":"2026-04-01","delivery_address":"Delivery Road",'
             '"items":[{"material_code":"MAT-001","material_name":"Spring","specification":"10x20",'
             '"quantity":12,"unit_price_without_tax":3.5,"total_amount_without_tax":42,'
             '"delivery_date":"2026-04-15"}]}}'
-        ),
-    )
+        )
+
+    monkeypatch.setattr("app.llm_extract.chat_completion_json", fake_completion)
 
     applied = try_apply_llm_preview(ingestion, "Purchase Order PO-BETTER MAT-001")
 
@@ -325,6 +330,56 @@ def test_try_apply_llm_preview_applies_llm_when_more_complete(monkeypatch) -> No
     assert ingestion.preview_data.details[0].materialCode == "MAT-001"
     assert ingestion.preview_data.details[0].qty == 12
     assert ingestion.resolved_fields["customerPoNo"] == "PO-BETTER"
+    assert request_options["enable_thinking"] is False
+
+
+def test_chat_completion_json_only_adds_thinking_when_requested(monkeypatch) -> None:
+    from app.llm_client import chat_completion_json
+
+    payloads = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}'
+
+    def fake_urlopen(req, timeout):
+        _ = timeout
+        payloads.append(json.loads(req.data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setenv("LLM_API_KEY", "secret")
+    monkeypatch.setenv("LLM_BASE_URL", "https://dashscope.example.test/v1")
+    monkeypatch.setattr("app.llm_client.request.urlopen", fake_urlopen)
+    messages = [{"role": "user", "content": "extract"}]
+
+    chat_completion_json(messages, enable_thinking=False)
+    chat_completion_json(messages)
+
+    assert payloads[0]["enable_thinking"] is False
+    assert "enable_thinking" not in payloads[1]
+
+
+def test_chat_completion_json_does_not_forward_thinking_to_anthropic(monkeypatch) -> None:
+    from app.llm_client import chat_completion_json
+
+    calls = []
+
+    def fake_anthropic(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "{}"
+
+    monkeypatch.setenv("LLM_API_KEY", "secret")
+    monkeypatch.setenv("LLM_BASE_URL", "https://provider.example.test/anthropic")
+    monkeypatch.setattr("app.llm_client._chat_completion_anthropic", fake_anthropic)
+
+    assert chat_completion_json([{"role": "user", "content": "extract"}], enable_thinking=False) == "{}"
+    assert "enable_thinking" not in calls[0][1]
 
 
 def test_try_apply_llm_preview_preserves_rule_completed_wrapped_material_code(monkeypatch) -> None:

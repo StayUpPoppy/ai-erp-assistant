@@ -165,6 +165,33 @@ export interface IngestionResponse {
   };
 }
 
+export interface HistoryOrderSummary {
+  ingestion_id: string;
+  source_file_name?: string | null;
+  customer_name: string;
+  customer_po_no: string;
+  org_id: string;
+  draft_no: string;
+  draft_url: string;
+  completed_at: string;
+  status: "DRAFT_CREATED";
+}
+
+export interface HistoryOrderListResponse {
+  items: HistoryOrderSummary[];
+  offset: number;
+  limit: number;
+  next_offset?: number | null;
+  has_more: boolean;
+}
+
+export interface DeleteIngestionResponse {
+  ingestion_id: string;
+  deleted: boolean;
+  queue_removed: number;
+  source_file_deleted: boolean;
+}
+
 /** 与 ``GET /ingestions/{id}/document`` 对齐，供集成方拉取解析 JSON */
 export interface DocumentParseExport {
   schema_version: string;

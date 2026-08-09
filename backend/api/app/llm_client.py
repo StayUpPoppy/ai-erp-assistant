@@ -20,6 +20,10 @@ def llm_extract_enabled() -> bool:
     return os.getenv("LLM_EXTRACT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def llm_extract_thinking_enabled() -> bool:
+    return os.getenv("LLM_EXTRACT_ENABLE_THINKING", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def llm_model_name() -> str:
     return (os.getenv("LLM_MODEL") or "qwen3.7-plus").strip() or "qwen3.7-plus"
 
@@ -107,6 +111,7 @@ def _chat_completion_openai(
     json_response: bool,
     max_tokens: int | None = None,
     timeout_seconds: float | None = None,
+    enable_thinking: bool | None = None,
 ) -> str:
     api_key = _llm_api_key()
     if not api_key:
@@ -120,6 +125,8 @@ def _chat_completion_openai(
     }
     if json_response:
         payload["response_format"] = {"type": "json_object"}
+    if enable_thinking is not None:
+        payload["enable_thinking"] = enable_thinking
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = request.Request(
         f"{base_url}/chat/completions",
@@ -332,6 +339,7 @@ def chat_completion_json(
     *,
     max_tokens: int | None = None,
     timeout_seconds: float | None = None,
+    enable_thinking: bool | None = None,
 ) -> str:
     api_key = _llm_api_key()
     if not api_key:
@@ -352,6 +360,7 @@ def chat_completion_json(
         json_response=True,
         max_tokens=max_tokens,
         timeout_seconds=timeout_seconds,
+        enable_thinking=enable_thinking,
     )
 
 

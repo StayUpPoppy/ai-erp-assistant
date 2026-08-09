@@ -172,6 +172,39 @@ def save_binary_file(
     return _save_to_local_filesystem(raw, file_name, file_hash, org_id)
 
 
+def delete_object(object_key: Optional[str]) -> bool:
+    """Permanently delete a source object. Missing objects are treated as already deleted."""
+    key = (object_key or "").strip()
+    if not key:
+        return False
+
+    if key.startswith(LOCAL_OBJECT_KEY_PREFIX):
+        full = _resolve_local_object_path(key)
+        if full is None:
+            raise ObjectNotFoundError("source file object not found")
+        if not full.exists():
+            return True
+        try:
+            full.unlink()
+            return True
+        except OSError as exc:
+            raise ObjectStorageUnavailableError("failed to delete local source file") from exc
+
+    client = _build_client()
+    if client is None:
+        raise ObjectStorageUnavailableError("MinIO is not configured")
+    bucket = os.getenv("MINIO_BUCKET", "ai-erp-assistant").strip() or "ai-erp-assistant"
+    try:
+        client.remove_object(bucket_name=bucket, object_name=key)
+        return True
+    except S3Error as exc:
+        if exc.code in {"NoSuchKey", "NoSuchObject", "NoSuchBucket", "NotFound"}:
+            return True
+        raise ObjectStorageUnavailableError("failed to delete MinIO source file") from exc
+    except Exception as exc:
+        raise ObjectStorageUnavailableError("failed to delete MinIO source file") from exc
+
+
 def stat_object(object_key: str, *, fallback_content_type: str = "application/octet-stream") -> StoredObjectStat:
     if object_key.startswith(LOCAL_OBJECT_KEY_PREFIX):
         full = _resolve_local_object_path(object_key)

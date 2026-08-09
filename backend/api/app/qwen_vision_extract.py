@@ -75,6 +75,10 @@ def qwen_vision_force_all() -> bool:
     return _env_truthy("QWEN_VISION_FORCE_ALL", False)
 
 
+def qwen_vision_thinking_enabled() -> bool:
+    return _env_truthy("QWEN_VISION_ENABLE_THINKING", False)
+
+
 def qwen_vision_fallback_to_local() -> bool:
     return _env_truthy("QWEN_VISION_FALLBACK_TO_LOCAL", True)
 
@@ -115,6 +119,7 @@ def qwen_vision_health_payload() -> Dict[str, Any]:
     return {
         "qwen_vision_extract_enabled": qwen_vision_enabled(),
         "qwen_vision_force_all": qwen_vision_force_all(),
+        "qwen_vision_enable_thinking": qwen_vision_thinking_enabled(),
         "qwen_vision_model": qwen_vision_model_name(),
         "qwen_vision_base_url": qwen_vision_base_url(),
         "qwen_vision_api_key_configured": qwen_vision_api_key_configured(),
@@ -396,6 +401,7 @@ def _chat_completion_vision(
         "stream": False,
         "temperature": 0,
         "max_tokens": _env_int("LLM_MAX_TOKENS", 8192, 1024, 32768),
+        "enable_thinking": qwen_vision_thinking_enabled(),
         "response_format": {"type": "json_object"},
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -761,7 +767,8 @@ def try_apply_qwen_vision_preview(
         summary_text = _apply_purchase_order(ingestion, purchase_order, truncated=truncated, local_text=local_text)
         elapsed_ms = int((perf_counter() - started) * 1000)
         logger.info(
-            "qwen_vision_preview_applied ingestion_id=%s model=%s pages=%s images=%s truncated=%s elapsed_ms=%s items=%s",
+            "qwen_vision_preview_applied ingestion_id=%s model=%s pages=%s images=%s truncated=%s "
+            "elapsed_ms=%s items=%s thinking=%s",
             ingestion.ingestion_id,
             qwen_vision_model_name(),
             page_count,
@@ -769,6 +776,7 @@ def try_apply_qwen_vision_preview(
             int(truncated),
             elapsed_ms,
             len(purchase_order.items),
+            int(qwen_vision_thinking_enabled()),
         )
         return QwenVisionApplyResult(
             attempted=True,

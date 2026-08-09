@@ -9,7 +9,7 @@ from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.assistant_session_store import reset_sessions_for_tests
+from app.assistant_session_store import remove_ingestion_references, reset_sessions_for_tests
 from app.routes import assistant_files_route, assistant_messages_route, assistant_session_route
 from app.schemas import ChatMessageRequest, CreateIngestionRequest
 from app.store import create_ingestion, store
@@ -127,6 +127,28 @@ def test_assistant_session_missing_returns_empty_history():
     assert session.session_id == "s-new"
     assert session.messages == []
     assert session.active_task is None
+
+
+def test_remove_ingestion_references_clears_active_task_and_structured_messages():
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    ing = _new_ingestion("hash-session-delete")
+    assistant_messages_route(
+        ChatMessageRequest(
+            session_id="s-delete",
+            message="查进度",
+            org_id="org-test",
+            user_id="u-test",
+            active_task_id=ing.ingestion_id,
+        ),
+        _build_request(),
+    )
+
+    assert remove_ingestion_references(ing.ingestion_id) == 1
+    session = assistant_session_route("s-delete", _build_request("/assistant/sessions/s-delete"))
+
+    assert session.active_task is None
+    assert all((message.ui is None or message.ui.data.get("ingestion_id") != ing.ingestion_id) for message in session.messages)
 
 
 @pytest.mark.anyio

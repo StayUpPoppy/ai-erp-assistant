@@ -7,7 +7,13 @@ import re
 from time import perf_counter
 from typing import Any, Dict, Optional
 
-from app.llm_client import chat_completion_json, llm_available, llm_model_name, llm_prompt_version
+from app.llm_client import (
+    chat_completion_json,
+    llm_available,
+    llm_extract_thinking_enabled,
+    llm_model_name,
+    llm_prompt_version,
+)
 from app.order_preview import apply_preview_to_ingestion, build_order_preview_data, preview_missing_keys, preview_to_resolved_fields
 from app.schemas import IngestionResponse, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader, PreviewIssue, PurchaseOrder
 
@@ -287,7 +293,8 @@ def _repair_llm_json(raw_content: str, parse_error: Exception) -> str:
         [
             {"role": "system", "content": JSON_REPAIR_SYSTEM_PROMPT},
             {"role": "user", "content": repair_prompt},
-        ]
+        ],
+        enable_thinking=llm_extract_thinking_enabled(),
     )
 
 
@@ -545,6 +552,7 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
                 {"role": "user", "content": user_prompt},
             ],
             timeout_seconds=_llm_extract_timeout_seconds(),
+            enable_thinking=llm_extract_thinking_enabled(),
         )
         elapsed_ms = int((perf_counter() - llm_started) * 1000)
         parsed, repaired_json = _extract_json_with_repair(content)

@@ -91,6 +91,14 @@ def process_job(ingestion_id: str, redis_client: Optional[redis.Redis] = None) -
                 body = exc.read().decode(errors="ignore")
             except Exception:
                 body = ""
+            if exc.code == 404:
+                logger.info(
+                    "process_ignored_deleted ingestion_id=%s status_code=404 attempt=%s/%s",
+                    ingestion_id,
+                    attempt + 1,
+                    max_attempts,
+                )
+                return
             if exc.code in (502, 503, 504) and attempt + 1 < max_attempts:
                 sleep_s = WORKER_PROCESS_RETRY_BACKOFF_SEC * (attempt + 1)
                 logger.warning(

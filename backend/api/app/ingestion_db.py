@@ -332,6 +332,45 @@ def list_by_user_id(session: Session, user_id: str) -> List[IngestionResponse]:
     return [row_to_ingestion(row) for row in rows]
 
 
+def delete_by_id(session: Session, ingestion_id: str) -> bool:
+    row = session.get(IngestionRow, ingestion_id)
+    if row is None:
+        return False
+    session.delete(row)
+    logger.info("db_ingestion_deleted ingestion_id=%s", ingestion_id)
+    return True
+
+
+def has_other_source_object_reference(session: Session, object_key: str, ingestion_id: str) -> bool:
+    if not object_key:
+        return False
+    stmt = (
+        select(IngestionRow.ingestion_id)
+        .where(
+            IngestionRow.source_file_object_key == object_key,
+            IngestionRow.ingestion_id != ingestion_id,
+        )
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none() is not None
+
+
+def update_existing_ingestion(session: Session, ing: IngestionResponse) -> bool:
+    """Update an existing row without ever inserting a replacement after a user deletion."""
+    row = session.get(IngestionRow, ing.ingestion_id)
+    if row is None:
+        logger.info("db_ingestion_update_discarded_missing ingestion_id=%s", ing.ingestion_id)
+        return False
+    apply_ingestion_to_row(row, ing)
+    logger.info(
+        "db_ingestion_updated_existing ingestion_id=%s status=%s missing_fields=%s",
+        ing.ingestion_id,
+        ing.status.value if isinstance(ing.status, IngestionStatus) else str(ing.status),
+        len(ing.missing_fields or []),
+    )
+    return True
+
+
 def upsert_ingestion(session: Session, ing: IngestionResponse) -> None:
     """按 ingestion_id upsert：存在则更新，不存在则插入。"""
     row = session.get(IngestionRow, ing.ingestion_id)

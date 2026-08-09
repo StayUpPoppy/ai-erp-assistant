@@ -12,8 +12,10 @@ import type {
   ChatMessageResponse,
   CreateDraftResponse,
   CurrentUserResponse,
+  DeleteIngestionResponse,
   DocumentParseExport,
   HealthResponse,
+  HistoryOrderListResponse,
   IngestionResponse,
   OrderPreviewData,
   UploadResponse,
@@ -509,6 +511,17 @@ export async function getIngestion(ingestionId: string): Promise<IngestionRespon
 export async function getPendingIngestions(): Promise<IngestionResponse[]> {
   return apiFetchJson<IngestionResponse[]>("/ingestions/pending", {
     method: "GET",
+  });
+}
+
+export async function getHistoryOrders(offset = 0, limit = 20): Promise<HistoryOrderListResponse> {
+  const query = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  return apiFetchJson<HistoryOrderListResponse>(`/ingestions/history?${query.toString()}`, { method: "GET" });
+}
+
+export async function deleteIngestion(ingestionId: string): Promise<DeleteIngestionResponse> {
+  return apiFetchJson<DeleteIngestionResponse>(`/ingestions/${encodeURIComponent(ingestionId)}`, {
+    method: "DELETE",
   });
 }
 

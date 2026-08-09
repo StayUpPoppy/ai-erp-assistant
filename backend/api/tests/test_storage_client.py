@@ -7,6 +7,7 @@ import pytest
 from app.storage_client import (
     LOCAL_OBJECT_KEY_PREFIX,
     ObjectStorageUnavailableError,
+    delete_object,
     get_object_bytes,
     iter_object_bytes,
     save_binary_file,
@@ -63,3 +64,28 @@ def test_local_object_stat_and_range_iteration(no_minio_env: None, monkeypatch, 
     assert key is not None
     assert stat_object(key, fallback_content_type="application/pdf").size == 10
     assert b"".join(iter_object_bytes(key, offset=2, length=4)) == b"2345"
+
+
+def test_delete_local_object_is_permanent_and_idempotent(no_minio_env: None, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LOCAL_OBJECT_STORAGE_DIR", str(tmp_path))
+    key = save_binary_file(b"delete-me", "delete.pdf", "f" * 64, "org")
+    assert key is not None
+    assert get_object_bytes(key) == b"delete-me"
+
+    assert delete_object(key) is True
+    assert get_object_bytes(key) is None
+    assert delete_object(key) is True
+
+
+def test_delete_minio_object_uses_configured_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeMinio:
+        def remove_object(self, *, bucket_name: str, object_name: str) -> None:
+            calls.append((bucket_name, object_name))
+
+    monkeypatch.setenv("MINIO_BUCKET", "orders-test")
+    monkeypatch.setattr("app.storage_client._build_client", lambda: FakeMinio())
+
+    assert delete_object("uploads/org/order.pdf") is True
+    assert calls == [("orders-test", "uploads/org/order.pdf")]

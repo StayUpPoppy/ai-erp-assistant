@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from time import perf_counter, sleep
 from typing import Callable, Dict, List, Literal, Tuple, TypedDict
+from zoneinfo import ZoneInfo
 
 try:
     from langgraph.graph import END, StateGraph
@@ -39,11 +40,13 @@ from app.erp_client import ErpClientError, ErpClientProtocol, clear_last_upstrea
 from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus, OrderPreviewData, PreviewIssue
 from app.extraction_profile import apply_field_aliases, get_profile, refresh_ingestion_required_keys
 from app.llm_extract import try_apply_llm_preview
+from app.llm_client import llm_extract_thinking_enabled
 from app.order_preview import apply_customer_material_mapping, apply_preview_to_ingestion, build_order_preview_data
 from app.qwen_vision_extract import (
     qwen_vision_fallback_to_local,
     qwen_vision_max_pdf_pages,
     qwen_vision_model_name,
+    qwen_vision_thinking_enabled,
     should_defer_local_parse_for_qwen,
     try_apply_qwen_vision_preview,
 )
@@ -55,6 +58,7 @@ from app.storage_client import get_object_bytes
 
 logger = logging.getLogger("ai_erp_api")
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 # 由调用方注入“写状态+记审计”的实现，保证存储层语义统一。
 AppendEventFn = Callable[[IngestionResponse, IngestionStatus, str], None]
@@ -95,6 +99,27 @@ def _force_datynk_sale_order_doc_type(ing: IngestionResponse) -> bool:
         return False
     ing.doc_type_hint = DocType.PO
     return True
+
+
+def _current_po_order_date() -> str:
+    """Return the date used when a new PO preview is generated."""
+    return datetime.now(_SHANGHAI_TIMEZONE).date().isoformat()
+
+
+def _apply_po_current_order_date(ing: IngestionResponse, preview: OrderPreviewData) -> str | None:
+    """Make the generated PO order date authoritative without changing delivery date."""
+    if ing.doc_type_hint != DocType.PO:
+        return None
+    order_date = _current_po_order_date()
+    preview.order.orderDate = order_date
+    ing.resolved_fields.update(
+        {
+            "doc_date": order_date,
+            "orderDate": order_date,
+            "order_date": order_date,
+        }
+    )
+    return order_date
 
 
 class WorkflowState(TypedDict):
@@ -702,7 +727,8 @@ def _node_extract(state: WorkflowState) -> WorkflowState:
                     f"qwen vision structured fields extracted missing_count={len(ing.missing_fields)} "
                     f"doc_type_hint={ing.doc_type_hint.value if ing.doc_type_hint else 'none'} "
                     f"pages={qwen_result.pages} images={qwen_result.images} truncated={int(qwen_result.truncated)} "
-                    f"elapsed_ms={qwen_result.elapsed_ms} model={qwen_vision_model_name()} llm_passes=1",
+                    f"elapsed_ms={qwen_result.elapsed_ms} model={qwen_vision_model_name()} llm_passes=1 "
+                    f"thinking={int(qwen_vision_thinking_enabled())}",
                 )
                 return {
                     "missing": len(ing.missing_fields),
@@ -737,7 +763,8 @@ def _node_extract(state: WorkflowState) -> WorkflowState:
             f"structured fields extracted missing_count={len(ing.missing_fields)} doc_type_hint="
             f"{ing.doc_type_hint.value if ing.doc_type_hint else 'none'} llm_preview={metrics.get('llm_preview', 0)} "
             f"preview_score={_preview_completeness_score(_preview_for_scoring(ing))} "
-            f"qwen_vision_attempted={int(state.get('qwen_vision_attempted', False))} llm_passes=1",
+            f"qwen_vision_attempted={int(state.get('qwen_vision_attempted', False))} llm_passes=1 "
+            f"thinking={int(llm_extract_thinking_enabled())}",
         )
         return metrics
 
@@ -949,6 +976,12 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
                     failure_type="node",
                 )
             return {"preview": 0}
+        defaulted_order_date = _apply_po_current_order_date(ing, preview)
+        order_date_audit = (
+            f" order_date={defaulted_order_date} order_date_source=current_date timezone=Asia/Shanghai"
+            if defaulted_order_date
+            else ""
+        )
         preview_valid, preview_reason, preview_metrics = _validate_order_preview(preview)
         if not preview_valid:
             if _should_continue_on_incomplete_purchase_order_preview(ing, state["document_text"] or ""):
@@ -959,7 +992,8 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
                 state["append_event"](
                     ing,
                     IngestionStatus.MAPPED,
-                    f"order preview incomplete but purchase order evidence is strong; waiting user input reason={preview_reason}",
+                    f"order preview incomplete but purchase order evidence is strong; waiting user input "
+                    f"reason={preview_reason}{order_date_audit}",
                 )
                 return {
                     "preview": 1,
@@ -1043,7 +1077,8 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             f"order preview prepared details={len(preview.details)} editable={len(ing.editable_fields)} issues={len(ing.issues)} "
             f"customer_material matched={customer_material_metrics.get('matched', 0)} "
             f"exact={customer_material_metrics.get('exact', 0)} normalized={customer_material_metrics.get('normalized', 0)} "
-            f"unmatched={customer_material_metrics.get('unmatched', 0)} rows={customer_material_metrics.get('mapping_rows', 0)}",
+            f"unmatched={customer_material_metrics.get('unmatched', 0)} "
+            f"rows={customer_material_metrics.get('mapping_rows', 0)}{order_date_audit}",
         )
         return {
             "preview": 1,

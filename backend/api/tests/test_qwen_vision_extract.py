@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import sys
 
@@ -42,10 +43,44 @@ def test_qwen_vision_health_payload_masks_key(monkeypatch) -> None:
 
     assert health["qwen_vision_extract_enabled"] is True
     assert health["qwen_vision_force_all"] is True
+    assert health["qwen_vision_enable_thinking"] is False
     assert health["qwen_vision_api_key_configured"] is True
     assert health["qwen_vision_include_local_text"] is True
     assert isinstance(health["qwen_vision_local_text_max_chars"], int)
     assert "secret" not in str(health)
+
+
+def test_qwen_vision_request_explicitly_controls_thinking(monkeypatch) -> None:
+    from app.qwen_vision_extract import _chat_completion_vision
+
+    captured_payloads = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}'
+
+    def fake_urlopen(req, timeout):
+        _ = timeout
+        captured_payloads.append(json.loads(req.data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setenv("QWEN_VISION_API_KEY", "secret")
+    monkeypatch.setattr("app.qwen_vision_extract.request.urlopen", fake_urlopen)
+    image = VisionImage(bytes=b"image", mime_type="image/jpeg", page_number=1)
+
+    monkeypatch.setenv("QWEN_VISION_ENABLE_THINKING", "false")
+    _chat_completion_vision([image], file_name="order.jpg", page_count=1, truncated=False)
+    monkeypatch.setenv("QWEN_VISION_ENABLE_THINKING", "true")
+    _chat_completion_vision([image], file_name="order.jpg", page_count=1, truncated=False)
+
+    assert captured_payloads[0]["enable_thinking"] is False
+    assert captured_payloads[1]["enable_thinking"] is True
 
 
 def test_qwen_vision_user_prompt_includes_local_parse_text(monkeypatch) -> None:

@@ -119,6 +119,8 @@ def test_confirm_preview_then_create_draft_success(monkeypatch):
     def _fake_create_draft(doc_type, payload, idempotency_key):
         calls["count"] += 1
         assert payload.get("customerName") == "北京优向国际能源装备有限公司"
+        assert payload.get("doc_date") == "2026-05-13"
+        assert payload.get("orderDate") == "2026-05-13"
         assert payload.get("datynk_details_json")
         details = json.loads(payload["datynk_details_json"])
         assert details[0]["customerMaterialSpec"] == "左旋7*55*122*8.5"
@@ -167,6 +169,8 @@ def test_confirm_preview_then_create_draft_success(monkeypatch):
     assert confirmed.status == IngestionStatus.VALIDATED
     assert confirmed.preview_data is not None
     assert confirmed.resolved_fields.get("customerName") == "北京优向国际能源装备有限公司"
+    assert confirmed.resolved_fields.get("doc_date") == "2026-05-13"
+    assert confirmed.resolved_fields.get("orderDate") == "2026-05-13"
     assert confirmed.resolved_fields.get("material_code") == "S01P019430"
 
     draft = create_draft_route(created.ingestion_id, _build_request("/ingestions/test/create-draft"))

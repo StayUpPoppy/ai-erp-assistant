@@ -31,10 +31,24 @@ from app.assistant_llm_router import (
     should_use_plain_chat_fast_path,
     stream_assistant_answer_with_llm,
 )
-from app.assistant_session_store import append_response, append_user_message, ensure_session_id, get_session_response
+from app.assistant_session_store import (
+    append_response,
+    append_user_message,
+    ensure_session_id,
+    get_session_response,
+    remove_ingestion_references,
+)
 from app.chat_orchestrator import handle_chat_message
 from app.ingestion_export import build_document_parse_export
-from app.llm_client import LlmClientError, llm_api_key_configured, llm_base_url, llm_extract_enabled, llm_model_name, llm_prompt_version
+from app.llm_client import (
+    LlmClientError,
+    llm_api_key_configured,
+    llm_base_url,
+    llm_extract_enabled,
+    llm_extract_thinking_enabled,
+    llm_model_name,
+    llm_prompt_version,
+)
 from app.qwen_vision_extract import qwen_vision_health_payload
 from app.schemas import (
     ChatMessageRequest,
@@ -50,10 +64,12 @@ from app.schemas import (
     CurrentUserResponse,
     CreateDraftResponse,
     CreateIngestionRequest,
+    DeleteIngestionResponse,
     DocumentParseExport,
     ErpPayloadPreviewResponse,
     ErrorCode,
     HealthResponse,
+    HistoryOrderListResponse,
     IngestionResponse,
     IngestionStatus,
     ResolveIngestionRequest,
@@ -76,14 +92,17 @@ from app.storage_client import (
     storage_health_payload,
 )
 from app.store import (
+    PendingIngestionDeleteConflict,
     append_ingestion_event,
     confirm_preview_for_ingestion,
     cancel_ingestion,
     create_draft_for_ingestion,
     create_ingestion,
     create_upload,
+    delete_pending_ingestion,
     get_ingestion,
     list_pending_ingestions_for_user,
+    list_history_orders_for_user,
     process_ingestion,
     resolve_ingestion,
 )
@@ -129,6 +148,8 @@ def service_index() -> Dict[str, Any]:
             "wecom_order_files_base64": {"method": "POST", "path": "/integrations/wecom/order-files/base64"},
             "ingestions_create": {"method": "POST", "path": "/ingestions"},
             "ingestions_pending": {"method": "GET", "path": "/ingestions/pending"},
+            "ingestions_history": {"method": "GET", "path": "/ingestions/history"},
+            "ingestion_delete": {"method": "DELETE", "path": "/ingestions/{ingestion_id}"},
             "ingestion_get": {"method": "GET", "path": "/ingestions/{ingestion_id}"},
             "ingestion_resolve": {"method": "POST", "path": "/ingestions/{ingestion_id}/resolve"},
             "ingestion_confirm_preview": {"method": "POST", "path": "/ingestions/{ingestion_id}/confirm-preview"},
@@ -263,6 +284,7 @@ def health() -> HealthResponse:
         **erp_adapter_health_payload(),
         **erp_qa_reports_health_payload(),
         llm_extract_enabled=llm_extract_enabled(),
+        llm_extract_enable_thinking=llm_extract_thinking_enabled(),
         llm_router_enabled=assistant_llm_router_enabled(),
         llm_api_key_configured=llm_api_key_configured(),
         llm_model=llm_model_name(),
@@ -502,6 +524,22 @@ def _assert_ingestion_owner(ingestion: IngestionResponse, request: Request) -> N
         ingestion.user_id,
         current_user.userId,
         current_user.userName,
+    )
+    raise HTTPException(status_code=403, detail="FORBIDDEN_INGESTION_OWNER")
+
+
+def _assert_ingestion_owner_required(ingestion: IngestionResponse, request: Request) -> None:
+    current_user = _current_user_from_request(request)
+    if not current_user.userId:
+        raise HTTPException(status_code=401, detail="CURRENT_USER_REQUIRED")
+    if ingestion.user_id == current_user.userId:
+        return
+    logger.warning(
+        "ingestion_delete_owner_forbidden request_id=%s ingestion_id=%s owner_user_id=%s current_user_id=%s",
+        getattr(request.state, "request_id", "n/a"),
+        ingestion.ingestion_id,
+        ingestion.user_id,
+        current_user.userId,
     )
     raise HTTPException(status_code=403, detail="FORBIDDEN_INGESTION_OWNER")
 
@@ -1300,6 +1338,18 @@ def pending_ingestions_route(
     return list_pending_ingestions_for_user(current_user.userId, limit=limit)
 
 
+@router.get("/ingestions/history", response_model=HistoryOrderListResponse)
+def history_orders_route(
+    request: Request,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=50),
+) -> HistoryOrderListResponse:
+    current_user = _current_user_from_request(request)
+    if not current_user.userId:
+        return HistoryOrderListResponse(offset=offset, limit=limit)
+    return list_history_orders_for_user(current_user.userId, offset=offset, limit=limit)
+
+
 @router.get("/ingestions/{ingestion_id}", response_model=IngestionResponse)
 def get_ingestion_route(ingestion_id: str, request: Request) -> IngestionResponse:
     ingestion = get_ingestion(ingestion_id)
@@ -1308,6 +1358,42 @@ def get_ingestion_route(ingestion_id: str, request: Request) -> IngestionRespons
         raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
     _assert_ingestion_owner(ingestion, request)
     return ingestion
+
+
+@router.delete("/ingestions/{ingestion_id}", response_model=DeleteIngestionResponse)
+def delete_ingestion_route(ingestion_id: str, request: Request) -> DeleteIngestionResponse:
+    existing = get_ingestion(ingestion_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner_required(existing, request)
+    try:
+        result = delete_pending_ingestion(ingestion_id)
+    except PendingIngestionDeleteConflict as exc:
+        raise HTTPException(status_code=409, detail=ErrorCode.INGESTION_DELETE_NOT_ALLOWED.value) from exc
+    except (ObjectNotFoundError, ObjectStorageUnavailableError) as exc:
+        logger.warning(
+            "delete_ingestion_source_failed request_id=%s ingestion_id=%s",
+            getattr(request.state, "request_id", "n/a"),
+            ingestion_id,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=503, detail="SOURCE_FILE_DELETE_FAILED") from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    try:
+        sessions_cleaned = remove_ingestion_references(ingestion_id)
+    except Exception:
+        sessions_cleaned = 0
+        logger.exception("delete_ingestion_session_cleanup_failed ingestion_id=%s", ingestion_id)
+    logger.info(
+        "ingestion_deleted request_id=%s ingestion_id=%s queue_removed=%s source_deleted=%s sessions_cleaned=%s",
+        getattr(request.state, "request_id", "n/a"),
+        ingestion_id,
+        result.queue_removed,
+        result.source_file_deleted,
+        sessions_cleaned,
+    )
+    return result
 
 
 @router.get("/ingestions/{ingestion_id}/document", response_model=DocumentParseExport)

@@ -71,10 +71,11 @@ def test_llm_router_probe_reports_disabled(monkeypatch):
 def test_llm_router_probe_calls_model(monkeypatch):
     monkeypatch.setenv("ASSISTANT_LLM_ROUTER_ENABLED", "true")
     monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setattr(
-        "app.assistant_llm_router.chat_completion_json",
-        lambda _messages, **_kwargs: '{"tool_call":{"name":"erp_qa","arguments":{"query":"查物料 M001"}},"reason":"probe"}',
-    )
+    def fake_completion(_messages, **kwargs):
+        assert "enable_thinking" not in kwargs
+        return '{"tool_call":{"name":"erp_qa","arguments":{"query":"查物料 M001"}},"reason":"probe"}'
+
+    monkeypatch.setattr("app.assistant_llm_router.chat_completion_json", fake_completion)
 
     res = probe_llm_router(ChatMessageRequest(message="查物料 M001", org_id="org-test"))
 

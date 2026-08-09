@@ -7,9 +7,16 @@ from urllib.parse import quote
 import pytest
 from fastapi import HTTPException
 
-from app.routes import get_user_source_file_route, head_user_source_file_route, pending_ingestions_route
-from app.schemas import ErrorCode, IngestionResponse, IngestionStatus
-from app.store import list_pending_ingestions_for_user, store
+from app.routes import (
+    delete_ingestion_route,
+    get_user_source_file_route,
+    head_user_source_file_route,
+    history_orders_route,
+    pending_ingestions_route,
+)
+from app.schemas import AuditEvent, ErrorCode, IngestionResponse, IngestionStatus
+from app.storage_client import ObjectStorageUnavailableError
+from app.store import delete_pending_ingestion, list_pending_ingestions_for_user, store
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +123,164 @@ def test_pending_ingestions_db_path_filters_after_user_query(monkeypatch: pytest
 
     assert queried_user_ids == ["31"]
     assert [item.ingestion_id for item in result] == ["db-new", "db-old"]
+
+
+def test_history_orders_route_filters_sorts_and_paginates_current_user():
+    older = _ingestion("history-old", "31", IngestionStatus.DRAFT_CREATED, "2026-06-30T08:00:00Z").model_copy(
+        update={
+            "draft_no": "DRAFT-OLD",
+            "resolved_fields": {"customerName": "旧客户", "customerPoNo": "PO-OLD", "org": "英科一厂"},
+            "audit_events": [
+                AuditEvent(at="2026-06-30T09:00:00Z", status=IngestionStatus.DRAFT_CREATED, message="done")
+            ],
+        }
+    )
+    newer = _ingestion("history-new", "31", IngestionStatus.DRAFT_CREATED, "2026-07-01T08:00:00Z").model_copy(
+        update={
+            "source_file_name": "new.pdf",
+            "draft_no": "DRAFT-NEW",
+            "draft_url": "https://erp.example/drafts/new",
+            "audit_events": [
+                AuditEvent(at="2026-07-01T10:00:00Z", status=IngestionStatus.DRAFT_CREATED, message="done")
+            ],
+        }
+    )
+    store.ingestions = {
+        older.ingestion_id: older,
+        newer.ingestion_id: newer,
+        "pending": _ingestion("pending", "31", IngestionStatus.VALIDATED, "2026-07-02T08:00:00Z"),
+        "other": _ingestion("other", "58", IngestionStatus.DRAFT_CREATED, "2026-07-03T08:00:00Z").model_copy(
+            update={"draft_no": "DRAFT-OTHER"}
+        ),
+    }
+
+    first = history_orders_route(_request_for_user("31"), offset=0, limit=1)
+    second = history_orders_route(_request_for_user("31"), offset=1, limit=1)
+
+    assert [item.ingestion_id for item in first.items] == ["history-new"]
+    assert first.items[0].source_file_name == "new.pdf"
+    assert first.has_more is True
+    assert first.next_offset == 1
+    assert [item.ingestion_id for item in second.items] == ["history-old"]
+    assert second.items[0].customer_name == "旧客户"
+    assert second.has_more is False
+    assert second.next_offset is None
+
+
+def test_history_orders_route_returns_empty_without_cookie():
+    request = SimpleNamespace(cookies={}, state=SimpleNamespace(request_id="test-request"))
+    result = history_orders_route(request, offset=0, limit=20)
+    assert result.items == []
+
+
+def test_delete_pending_ingestion_route_hard_deletes_record_file_queue_and_session_refs(monkeypatch: pytest.MonkeyPatch):
+    ingestion = _source_file_ingestion("delete-me", "31")
+    store.ingestions[ingestion.ingestion_id] = ingestion
+    store.file_hash_to_ingestion[f"31:{ingestion.file_hash}"] = ingestion.ingestion_id
+    deleted_objects: list[str] = []
+    cleaned_sessions: list[str] = []
+    monkeypatch.setattr("app.store.delete_object", lambda key: deleted_objects.append(str(key)) or True)
+    monkeypatch.setattr("app.store.remove_ingestion_job", lambda ingestion_id: 1)
+    monkeypatch.setattr("app.routes.remove_ingestion_references", lambda ingestion_id: cleaned_sessions.append(ingestion_id) or 1)
+
+    result = delete_ingestion_route(ingestion.ingestion_id, _request_for_user("31"))
+
+    assert result.deleted is True
+    assert result.queue_removed == 1
+    assert result.source_file_deleted is True
+    assert ingestion.ingestion_id not in store.ingestions
+    assert f"31:{ingestion.file_hash}" not in store.file_hash_to_ingestion
+    assert deleted_objects == [ingestion.source_file_object_key]
+    assert cleaned_sessions == [ingestion.ingestion_id]
+
+
+def test_delete_pending_ingestion_requires_cookie_and_exact_owner():
+    ingestion = _ingestion("delete-owner", "31", IngestionStatus.NEED_USER_INPUT, "2026-06-30T08:00:00Z")
+    store.ingestions[ingestion.ingestion_id] = ingestion
+    no_cookie = SimpleNamespace(cookies={}, state=SimpleNamespace(request_id="test-request"))
+
+    with pytest.raises(HTTPException) as missing:
+        delete_ingestion_route(ingestion.ingestion_id, no_cookie)
+    with pytest.raises(HTTPException) as other:
+        delete_ingestion_route(ingestion.ingestion_id, _request_for_user("58"))
+
+    assert missing.value.status_code == 401
+    assert other.value.status_code == 403
+    assert ingestion.ingestion_id in store.ingestions
+
+
+def test_delete_ingestion_rejects_completed_order(monkeypatch: pytest.MonkeyPatch):
+    ingestion = _ingestion("delete-draft", "31", IngestionStatus.DRAFT_CREATED, "2026-06-30T08:00:00Z").model_copy(
+        update={"draft_no": "DRAFT-1"}
+    )
+    store.ingestions[ingestion.ingestion_id] = ingestion
+    monkeypatch.setattr("app.store.delete_object", lambda _key: True)
+
+    with pytest.raises(HTTPException) as exc:
+        delete_ingestion_route(ingestion.ingestion_id, _request_for_user("31"))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == ErrorCode.INGESTION_DELETE_NOT_ALLOWED.value
+    assert ingestion.ingestion_id in store.ingestions
+
+
+def test_delete_storage_failure_keeps_database_record(monkeypatch: pytest.MonkeyPatch):
+    ingestion = _source_file_ingestion("delete-storage-failure", "31")
+    store.ingestions[ingestion.ingestion_id] = ingestion
+    monkeypatch.setattr(
+        "app.store.delete_object",
+        lambda _key: (_ for _ in ()).throw(ObjectStorageUnavailableError("storage down")),
+    )
+    monkeypatch.setattr("app.store.remove_ingestion_job", lambda _ingestion_id: pytest.fail("queue must not be touched"))
+
+    with pytest.raises(HTTPException) as exc:
+        delete_ingestion_route(ingestion.ingestion_id, _request_for_user("31"))
+
+    assert exc.value.status_code == 503
+    assert ingestion.ingestion_id in store.ingestions
+
+
+def test_delete_pending_ingestion_database_path_commits_hard_delete(monkeypatch: pytest.MonkeyPatch):
+    ingestion = _source_file_ingestion("delete-db", "31")
+    actions: list[object] = []
+
+    class FakeSession:
+        def commit(self) -> None:
+            actions.append("commit")
+
+        def rollback(self) -> None:
+            actions.append("rollback")
+
+        def close(self) -> None:
+            actions.append("close")
+
+    monkeypatch.setattr("app.store.is_database_enabled", lambda: True)
+    monkeypatch.setattr("app.store._db_session", lambda: FakeSession())
+    monkeypatch.setattr("app.store.ingestion_db.get_by_id", lambda _session, _id: ingestion)
+    monkeypatch.setattr(
+        "app.store.ingestion_db.has_other_source_object_reference",
+        lambda _session, _object_key, _id: False,
+    )
+    monkeypatch.setattr(
+        "app.store.ingestion_db.delete_by_id",
+        lambda _session, ingestion_id: actions.append(("delete", ingestion_id)) or True,
+    )
+    monkeypatch.setattr("app.store.delete_object", lambda key: actions.append(("file", key)) or True)
+    monkeypatch.setattr("app.store.remove_ingestion_job", lambda ingestion_id: actions.append(("queue", ingestion_id)) or 1)
+
+    result = delete_pending_ingestion(ingestion.ingestion_id)
+
+    assert result is not None
+    assert result.deleted is True
+    assert result.queue_removed == 1
+    assert result.source_file_deleted is True
+    assert actions == [
+        ("file", ingestion.source_file_object_key),
+        ("queue", ingestion.ingestion_id),
+        ("delete", ingestion.ingestion_id),
+        "commit",
+        "close",
+    ]
 
 
 def test_user_source_file_route_allows_owner(monkeypatch: pytest.MonkeyPatch):
