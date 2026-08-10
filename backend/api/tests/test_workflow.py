@@ -330,8 +330,19 @@ def test_workflow_uses_final_pdf_parse_without_second_ocr(monkeypatch):
     assert result.preview_data.order.customerPoNo == "POGSVC2600205"
     assert result.preview_data.details[0].customerMaterialNo == "020800003"
     assert result.preview_data.details[0].materialCode == ""
+    assert result.preview_data.details[0].productName == ""
+    assert result.preview_data.details[0].productSpec == ""
+    assert result.preview_data.details[0].ph == ""
     assert "material_code" in result.missing_fields
-    assert any("客户物料对应表" in issue.message for issue in result.issues)
+    assert any(
+        issue.message
+        == (
+            "客户物料编码 020800003 未在 ERP 客户物料对应表中找到，"
+            "请先到客户物料对应表创建客户物料与内部物料的对应关系，"
+            "然后方可显示内部物料编码、物料名称、物料规格以及物料牌号等关系。"
+        )
+        for issue in result.issues
+    )
     assert not any("forced_ocr_retry" in event.message for event in result.audit_events)
 
 

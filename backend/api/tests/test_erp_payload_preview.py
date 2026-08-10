@@ -142,20 +142,60 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
 
     assert mapped.details[0].customerMaterialNo == "N100"
     assert mapped.details[0].materialCode == "S01P019433"
-    assert mapped.details[0].productName == "Old A"
-    assert mapped.details[0].productSpec == "Spec A"
-    assert mapped.details[0].ph == ""
+    assert mapped.details[0].productName == "Internal A"
+    assert mapped.details[0].productSpec == "Internal Spec A"
+    assert mapped.details[0].ph == "55CrSiA"
     assert mapped.details[1].customerMaterialNo == "n-200"
     assert mapped.details[1].materialCode == "S01P019427"
-    assert mapped.details[1].productName == "Old B"
-    assert mapped.details[1].productSpec == "Spec B"
+    assert mapped.details[1].productName == "Internal B"
+    assert mapped.details[1].productSpec == "Internal Spec B"
+    assert mapped.details[1].ph == "60Si2Mn"
     assert mapped.details[2].customerMaterialNo == "X999"
     assert mapped.details[2].materialCode == ""
+    assert mapped.details[2].productName == ""
+    assert mapped.details[2].productSpec == ""
+    assert mapped.details[2].ph == ""
+    assert mapped.details[2].qty == 3
     assert metrics == {"mapping_rows": 2, "matched": 2, "exact": 1, "normalized": 1, "unmatched": 1}
     assert len(issues) == 1
     assert issues[0].path == "details[2].materialCode"
     assert issues[0].level == "error"
-    assert "客户物料对应表" in issues[0].message
+    assert issues[0].message == (
+        "客户物料编码 X999 未在 ERP 客户物料对应表中找到，"
+        "请先到客户物料对应表创建客户物料与内部物料的对应关系，"
+        "然后方可显示内部物料编码、物料名称、物料规格以及物料牌号等关系。"
+    )
+
+
+def test_customer_material_mapping_erp_blank_fields_clear_extracted_values() -> None:
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(customerName="Acme"),
+        details=[
+            OrderPreviewDetail(
+                materialCode="N100",
+                productName="Extracted Name",
+                productSpec="Extracted Spec",
+                ph="Extracted Grade",
+                qty=2,
+                price=10,
+            )
+        ],
+    )
+
+    mapped, metrics, issues = apply_customer_material_mapping(
+        preview,
+        [{"custMaterialCode": "N100", "materialNumber": "S01P019433"}],
+    )
+
+    assert mapped.details[0].customerMaterialNo == "N100"
+    assert mapped.details[0].materialCode == "S01P019433"
+    assert mapped.details[0].productName == ""
+    assert mapped.details[0].productSpec == ""
+    assert mapped.details[0].ph == ""
+    assert mapped.details[0].qty == 2
+    assert mapped.details[0].price == 10
+    assert metrics == {"mapping_rows": 1, "matched": 1, "exact": 1, "normalized": 0, "unmatched": 0}
+    assert issues == []
 
 
 def test_normalize_customer_material_code_handles_full_width_and_separators() -> None:

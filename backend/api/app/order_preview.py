@@ -266,7 +266,8 @@ def apply_customer_material_mapping(
                     level="error",
                     message=(
                         f"客户物料编码 {raw_code} 未在 ERP 客户物料对应表中找到，"
-                        "请先到客户物料对应表创建客户物料与内部物料的对应关系。"
+                        "请先到客户物料对应表创建客户物料与内部物料的对应关系，"
+                        "然后方可显示内部物料编码、物料名称、物料规格以及物料牌号等关系。"
                     ),
                 )
             )
@@ -275,6 +276,9 @@ def apply_customer_material_mapping(
                     update={
                         "customerMaterialNo": raw_code,
                         "materialCode": "",
+                        "productName": "",
+                        "productSpec": "",
+                        "ph": "",
                     }
                 )
             )
@@ -289,7 +293,10 @@ def apply_customer_material_mapping(
             detail.model_copy(
                 update={
                     "customerMaterialNo": raw_code,
-                    "materialCode": hit.get("materialNumber") or detail.materialCode,
+                    "materialCode": hit.get("materialNumber") or "",
+                    "productName": hit.get("materialName") or "",
+                    "productSpec": hit.get("materialModel") or "",
+                    "ph": hit.get("ph") or "",
                 }
             )
         )
