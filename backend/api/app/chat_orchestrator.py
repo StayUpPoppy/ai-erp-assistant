@@ -9,6 +9,7 @@ from app.schemas import (
     ChatTaskState,
     ChatToolMessage,
     ErrorCode,
+    IngestionResponse,
     ToolResult,
     ToolUi,
 )
@@ -18,6 +19,10 @@ from app.tools.pdf_to_erp import FIELD_LABELS, pdf_to_erp_tool
 CREATE_DRAFT_WORDS = ("确认上传", "上传", "提交", "生成草稿", "创建草稿", "入库", "确认")
 STATUS_WORDS = ("状态", "进度", "到哪", "处理", "查一下")
 CANCEL_WORDS = ("取消", "不要", "先不")
+DUPLICATE_CUSTOMER_PO_MARKER = "客户采购单号已存在"
+DUPLICATE_CUSTOMER_PO_PATTERN = re.compile(
+    r"客户采购单号已存在\s*[：:]\s*(.+?)(?=\s*[（(]|$)"
+)
 
 
 def _infer_action(payload: ChatMessageRequest) -> str:
@@ -92,6 +97,30 @@ def _not_found(session_id: Optional[str], ingestion_id: Optional[str]) -> ChatMe
     )
 
 
+def _duplicate_customer_po_upload_message(ingestion: IngestionResponse) -> Optional[str]:
+    error_details = ingestion.error_details or {}
+    erp_message = str(error_details.get("erp_message") or "").strip()
+    if DUPLICATE_CUSTOMER_PO_MARKER not in erp_message:
+        return None
+
+    customer_po_no = ""
+    if ingestion.preview_data is not None:
+        customer_po_no = str(ingestion.preview_data.order.customerPoNo or "").strip()
+    if not customer_po_no:
+        resolved_fields = ingestion.resolved_fields or {}
+        customer_po_no = str(
+            resolved_fields.get("customerPoNo") or resolved_fields.get("customer_po_no") or ""
+        ).strip()
+    if not customer_po_no:
+        match = DUPLICATE_CUSTOMER_PO_PATTERN.search(erp_message)
+        if match:
+            customer_po_no = match.group(1).strip(" \t\r\n，,。;；")
+
+    if customer_po_no:
+        return f"上传失败：客户采购单号{customer_po_no}已存在，请勿重复上传。"
+    return "上传失败：客户采购单号已存在，请勿重复上传。"
+
+
 def _response(session_id: Optional[str], result: ToolResult) -> ChatMessageResponse:
     return ChatMessageResponse(
         session_id=session_id,
@@ -155,7 +184,12 @@ def handle_chat_message(payload: ChatMessageRequest) -> ChatMessageResponse:
             status_result = pdf_to_erp_tool.get_status(ingestion_id)
             if status_result is None:
                 return _not_found(payload.session_id, ingestion_id)
-            status_result.message = "现在还不能上传 ERP，请先补齐必填字段并完成校验。"
+            duplicate_message = (
+                _duplicate_customer_po_upload_message(status_result.ingestion)
+                if status_result.ingestion is not None
+                else None
+            )
+            status_result.message = duplicate_message or "现在还不能上传 ERP，请先补齐必填字段并完成校验。"
             result = status_result
     else:
         result = pdf_to_erp_tool.get_status(ingestion_id)

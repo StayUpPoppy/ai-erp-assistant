@@ -11,7 +11,8 @@ from starlette.requests import Request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.routes import chat_files_route, chat_messages_route
-from app.schemas import ChatMessageRequest, CreateIngestionRequest, IngestionStatus
+from app.erp_client import ErpClientError
+from app.schemas import ChatMessageRequest, CreateIngestionRequest, DocType, IngestionStatus
 from app.store import create_ingestion, store
 
 
@@ -127,6 +128,122 @@ def test_chat_messages_submit_fields_then_create_draft(monkeypatch):
     assert draft.tool_result.draft.draft_no == "PO-CHAT-001"
     assert draft.ui is not None
     assert draft.ui.type == "draft_result"
+
+
+def test_chat_messages_reports_duplicate_customer_po_upload_error(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    ing = _new_ingestion("hash-chat-duplicate-customer-po")
+    ing.status = IngestionStatus.VALIDATED
+    ing.doc_type_hint = DocType.PO
+    ing.missing_fields = []
+    ing.resolved_fields = {
+        "org": "英科1厂",
+        "customerName": "测试客户",
+        "customerPoNo": "SC01PO02603020026",
+        "doc_date": "2026-08-10",
+        "currency": "CNY",
+        "delivery_date": "2026-08-20",
+        "material_code": "S01P019433",
+        "line_qty": "1",
+    }
+    store.ingestions[ing.ingestion_id] = ing
+
+    def _duplicate(*_args, **_kwargs):
+        raise ErpClientError(
+            code="400",
+            message="客户采购单号已存在：SC01PO02603020026（订单号：F01SO26080802）",
+            status_code=200,
+            details={"body": {"code": 400}},
+        )
+
+    monkeypatch.setattr("app.store.erp_client.create_draft", _duplicate)
+
+    res = chat_messages_route(
+        ChatMessageRequest(
+            action="create_draft",
+            message="确认上传",
+            org_id="org-test",
+            user_id="u-test",
+            active_task_id=ing.ingestion_id,
+        ),
+        _build_request(),
+    )
+
+    assert res.messages[0].content == "上传失败：客户采购单号SC01PO02603020026已存在，请勿重复上传。"
+    assert res.active_task is not None
+    assert res.active_task.status == "FAILED"
+    assert res.tool_result is not None
+    assert res.tool_result.ingestion is not None
+    assert res.tool_result.ingestion.error_code == "ERP_UPSTREAM_ERROR"
+    assert res.tool_result.ingestion.error_details["erp_message"] == (
+        "客户采购单号已存在：SC01PO02603020026（订单号：F01SO26080802）"
+    )
+    assert res.ui is not None
+    assert res.ui.type == "error"
+
+
+def test_chat_messages_keeps_existing_message_when_order_is_not_validated():
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    ing = _new_ingestion("hash-chat-create-before-validated")
+
+    res = chat_messages_route(
+        ChatMessageRequest(
+            action="create_draft",
+            message="确认上传",
+            org_id="org-test",
+            user_id="u-test",
+            active_task_id=ing.ingestion_id,
+        ),
+        _build_request(),
+    )
+
+    assert res.messages[0].content == "现在还不能上传 ERP，请先补齐必填字段并完成校验。"
+
+
+def test_chat_messages_does_not_use_duplicate_message_for_other_erp_errors(monkeypatch):
+    os.environ.pop("DATABASE_URL", None)
+    _reset_in_memory_store()
+    ing = _new_ingestion("hash-chat-other-erp-error")
+    ing.status = IngestionStatus.VALIDATED
+    ing.doc_type_hint = DocType.PO
+    ing.missing_fields = []
+    ing.resolved_fields = {
+        "org": "英科1厂",
+        "customerName": "测试客户",
+        "customerPoNo": "SC01PO02603020027",
+        "doc_date": "2026-08-10",
+        "currency": "CNY",
+        "delivery_date": "2026-08-20",
+        "material_code": "S01P019433",
+        "line_qty": "1",
+    }
+    store.ingestions[ing.ingestion_id] = ing
+
+    def _other_error(*_args, **_kwargs):
+        raise ErpClientError(
+            code="400",
+            message="客户主数据不可用",
+            status_code=200,
+            details={"body": {"code": 400}},
+        )
+
+    monkeypatch.setattr("app.store.erp_client.create_draft", _other_error)
+
+    res = chat_messages_route(
+        ChatMessageRequest(
+            action="create_draft",
+            message="确认上传",
+            org_id="org-test",
+            user_id="u-test",
+            active_task_id=ing.ingestion_id,
+        ),
+        _build_request(),
+    )
+
+    assert res.messages[0].content == "现在还不能上传 ERP，请先补齐必填字段并完成校验。"
+    assert "客户采购单号" not in res.messages[0].content
 
 
 def test_chat_messages_extracts_missing_fields_from_text():
