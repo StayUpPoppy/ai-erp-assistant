@@ -165,6 +165,13 @@ export interface IngestionResponse {
   };
 }
 
+export interface CustomerMaterialRemapResponse {
+  ingestion: IngestionResponse;
+  matched: number;
+  unmatched: number;
+  skipped: number;
+}
+
 export interface HistoryOrderSummary {
   ingestion_id: string;
   source_file_name?: string | null;

@@ -61,6 +61,8 @@ from app.schemas import (
     ChatErpQaRequest,
     ChatErpQaResponse,
     ConfirmPreviewRequest,
+    CustomerMaterialRemapRequest,
+    CustomerMaterialRemapResponse,
     CurrentUserResponse,
     CreateDraftResponse,
     CreateIngestionRequest,
@@ -92,6 +94,8 @@ from app.storage_client import (
     storage_health_payload,
 )
 from app.store import (
+    CustomerMaterialRemapConflict,
+    CustomerMaterialRemapUnavailable,
     PendingIngestionDeleteConflict,
     append_ingestion_event,
     confirm_preview_for_ingestion,
@@ -104,6 +108,7 @@ from app.store import (
     list_pending_ingestions_for_user,
     list_history_orders_for_user,
     process_ingestion,
+    remap_customer_materials_for_ingestion,
     resolve_ingestion,
 )
 from app.wecom_order_routes import WecomOrderRoute, resolve_wecom_order_route
@@ -153,6 +158,10 @@ def service_index() -> Dict[str, Any]:
             "ingestion_get": {"method": "GET", "path": "/ingestions/{ingestion_id}"},
             "ingestion_resolve": {"method": "POST", "path": "/ingestions/{ingestion_id}/resolve"},
             "ingestion_confirm_preview": {"method": "POST", "path": "/ingestions/{ingestion_id}/confirm-preview"},
+            "ingestion_remap_customer_materials": {
+                "method": "POST",
+                "path": "/ingestions/{ingestion_id}/remap-customer-materials",
+            },
             "ingestion_create_draft": {"method": "POST", "path": "/ingestions/{ingestion_id}/create-draft"},
             "erp_source_file": {
                 "method": "GET",
@@ -1537,6 +1546,46 @@ def confirm_preview_route(ingestion_id: str, payload: ConfirmPreviewRequest, req
         ingestion.status,
     )
     return ingestion
+
+
+@router.post(
+    "/ingestions/{ingestion_id}/remap-customer-materials",
+    response_model=CustomerMaterialRemapResponse,
+)
+def remap_customer_materials_route(
+    ingestion_id: str,
+    payload: CustomerMaterialRemapRequest,
+    request: Request,
+) -> CustomerMaterialRemapResponse:
+    existing = get_ingestion(ingestion_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    _assert_ingestion_owner_required(existing, request)
+    if not (payload.preview_data.order.customerName or "").strip():
+        raise HTTPException(status_code=400, detail="CUSTOMER_NAME_REQUIRED_FOR_MATERIAL_REMAP")
+    try:
+        result = remap_customer_materials_for_ingestion(ingestion_id, payload.preview_data)
+    except CustomerMaterialRemapConflict as exc:
+        logger.warning(
+            "customer_material_remap_conflict request_id=%s ingestion_id=%s status=%s",
+            getattr(request.state, "request_id", "n/a"),
+            ingestion_id,
+            str(exc),
+        )
+        raise HTTPException(status_code=409, detail="CUSTOMER_MATERIAL_REMAP_NOT_ALLOWED") from exc
+    except CustomerMaterialRemapUnavailable as exc:
+        raise HTTPException(status_code=503, detail="ERP 客户物料对应表查询失败，请稍后重试。") from exc
+    if not result:
+        raise HTTPException(status_code=404, detail=ErrorCode.INGESTION_NOT_FOUND.value)
+    logger.info(
+        "customer_material_remap_succeeded request_id=%s ingestion_id=%s matched=%s unmatched=%s skipped=%s",
+        getattr(request.state, "request_id", "n/a"),
+        ingestion_id,
+        result.matched,
+        result.unmatched,
+        result.skipped,
+    )
+    return result
 
 
 @router.post("/ingestions/{ingestion_id}/create-draft", response_model=CreateDraftResponse)

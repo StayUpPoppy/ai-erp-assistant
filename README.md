@@ -149,3 +149,17 @@ swagger
 http://111.170.173.2:8081/api/orchestrator/docs
 
 
+document.cookie =
+  "userinfo=" +
+  encodeURIComponent(
+    JSON.stringify({
+      userId: "31",
+      username: "张宇涵",
+      realName: "张宇涵",
+      currentOrgId: 2,
+      currentOrgName: "英科1厂"
+    })
+  ) +
+  "; path=/; SameSite=Lax";
+
+location.reload();

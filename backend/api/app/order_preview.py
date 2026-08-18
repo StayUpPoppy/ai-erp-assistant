@@ -216,6 +216,8 @@ def normalize_customer_material_code(value: Any) -> str:
 def apply_customer_material_mapping(
     preview: OrderPreviewData,
     mapping_details: Iterable[Dict[str, Any]],
+    *,
+    use_material_code_fallback: bool = True,
 ) -> Tuple[OrderPreviewData, Dict[str, int], List[PreviewIssue]]:
     exact_index: Dict[str, Dict[str, str]] = {}
     normalized_index: Dict[str, Dict[str, str]] = {}
@@ -241,12 +243,18 @@ def apply_customer_material_mapping(
     exact = 0
     normalized = 0
     unmatched = 0
+    skipped = 0
     issues: List[PreviewIssue] = []
     next_details: List[OrderPreviewDetail] = []
 
     for idx, detail in enumerate(preview.details):
-        raw_code = (detail.customerMaterialNo or detail.materialCode or "").strip()
+        raw_code = (
+            detail.customerMaterialNo
+            or (detail.materialCode if use_material_code_fallback else "")
+            or ""
+        ).strip()
         if not raw_code:
+            skipped += 1
             next_details.append(detail)
             continue
 
@@ -301,17 +309,16 @@ def apply_customer_material_mapping(
             )
         )
 
-    return (
-        preview.model_copy(update={"details": next_details}),
-        {
-            "mapping_rows": len(exact_index),
-            "matched": matched,
-            "exact": exact,
-            "normalized": normalized,
-            "unmatched": unmatched,
-        },
-        issues,
-    )
+    metrics = {
+        "mapping_rows": len(exact_index),
+        "matched": matched,
+        "exact": exact,
+        "normalized": normalized,
+        "unmatched": unmatched,
+    }
+    if not use_material_code_fallback:
+        metrics["skipped"] = skipped
+    return preview.model_copy(update={"details": next_details}), metrics, issues
 
 
 def preview_editable_fields(preview: OrderPreviewData) -> List[PreviewEditableField]:

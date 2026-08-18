@@ -108,8 +108,10 @@ export interface OrderPreviewEditorProps {
   onChange: (next: OrderPreviewData) => void;
   onConfirm: () => void | Promise<void>;
   onCreateDraft: () => void | Promise<void>;
+  onRemapCustomerMaterials?: () => void | Promise<void>;
   confirming: boolean;
   creatingDraft: boolean;
+  remappingCustomerMaterials?: boolean;
   createDraftDisabled: boolean;
   hideActions?: boolean;
   hideCreateDraftAction?: boolean;
@@ -124,8 +126,10 @@ export function OrderPreviewEditor({
   onChange,
   onConfirm,
   onCreateDraft,
+  onRemapCustomerMaterials,
   confirming,
   creatingDraft,
+  remappingCustomerMaterials = false,
   createDraftDisabled,
   hideActions = false,
   hideCreateDraftAction = false,
@@ -274,14 +278,26 @@ export function OrderPreviewEditor({
       <div className="mt-5">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm font-semibold text-slate-900">订单明细</div>
-          <button
-            type="button"
-            disabled={readOnly}
-            onClick={addDetailRow}
-            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            新增一行
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {onRemapCustomerMaterials && !readOnly ? (
+              <button
+                type="button"
+                disabled={remappingCustomerMaterials || confirming || creatingDraft}
+                onClick={() => void onRemapCustomerMaterials()}
+                className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-1.5 text-sm font-medium text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {remappingCustomerMaterials ? "匹配中..." : "重新匹配物料"}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={addDetailRow}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              新增一行
+            </button>
+          </div>
         </div>
         <div className="overflow-x-auto rounded-xl border border-slate-200">
           <table className="min-w-[1100px] border-collapse text-sm">

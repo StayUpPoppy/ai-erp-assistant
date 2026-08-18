@@ -12,6 +12,7 @@ import type {
   ChatMessageResponse,
   CreateDraftResponse,
   CurrentUserResponse,
+  CustomerMaterialRemapResponse,
   DeleteIngestionResponse,
   DocumentParseExport,
   HealthResponse,
@@ -67,6 +68,19 @@ export async function postConfirmPreview(
     method: "POST",
     jsonBody: { preview_data: previewData },
   });
+}
+
+export async function postRemapCustomerMaterials(
+  ingestionId: string,
+  previewData: OrderPreviewData,
+): Promise<CustomerMaterialRemapResponse> {
+  return apiFetchJson<CustomerMaterialRemapResponse>(
+    `/ingestions/${encodeURIComponent(ingestionId)}/remap-customer-materials`,
+    {
+      method: "POST",
+      jsonBody: { preview_data: previewData },
+    },
+  );
 }
 
 function newRequestId(): string {

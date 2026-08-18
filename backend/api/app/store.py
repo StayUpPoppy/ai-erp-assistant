@@ -14,6 +14,7 @@ from app.document_extract import resolved_upload_file_name
 from app.erp_client import ErpClientError, ErpSourceAttachment, clear_last_upstream_meta, erp_client
 from app import ingestion_db
 from app.order_preview import (
+    apply_customer_material_mapping,
     apply_preview_to_ingestion,
     build_order_preview_data,
     merge_non_empty,
@@ -40,6 +41,7 @@ from app.schemas import (
     CreateIngestionRequest,
     CreateDraftResponse,
     DeleteIngestionResponse,
+    CustomerMaterialRemapResponse,
     DocType,
     ErrorCode,
     HistoryOrderListResponse,
@@ -55,6 +57,14 @@ logger = logging.getLogger("ai_erp_api")
 
 
 class PendingIngestionDeleteConflict(RuntimeError):
+    pass
+
+
+class CustomerMaterialRemapConflict(RuntimeError):
+    pass
+
+
+class CustomerMaterialRemapUnavailable(RuntimeError):
     pass
 
 
@@ -884,6 +894,124 @@ def confirm_preview_for_ingestion(ingestion_id: str, preview_data: OrderPreviewD
                 )
         store.ingestions[ingestion_id] = ingestion
         return ingestion
+
+
+def _is_customer_material_mapping_issue(message: str) -> bool:
+    return "ERP 客户物料对应表" in str(message or "")
+
+
+def _merge_preview_issues_after_customer_material_remap(
+    ingestion: IngestionResponse,
+    previous_issues: List[Any],
+    mapping_issues: List[Any],
+) -> None:
+    combined = list(ingestion.issues)
+    combined.extend(issue for issue in previous_issues if not _is_customer_material_mapping_issue(issue.message))
+    combined.extend(mapping_issues)
+    deduplicated: List[Any] = []
+    seen: set[tuple[str, str, str]] = set()
+    for issue in combined:
+        key = (str(issue.path), str(issue.level), str(issue.message))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(issue)
+    ingestion.issues = deduplicated
+
+
+def _apply_customer_material_remap(
+    ingestion: IngestionResponse,
+    preview_data: OrderPreviewData,
+) -> CustomerMaterialRemapResponse:
+    customer_name = (preview_data.order.customerName or "").strip()
+    try:
+        mapping_rows = erp_client.get_customer_material_details_by_customer(customer_name)
+    except Exception as exc:
+        logger.warning(
+            "customer_material_remap_fetch_failed ingestion_id=%s customer=%s code=%s status=%s err=%s",
+            ingestion.ingestion_id,
+            customer_name,
+            getattr(exc, "code", ""),
+            getattr(exc, "status_code", 0),
+            exc,
+        )
+        raise CustomerMaterialRemapUnavailable("ERP_CUSTOMER_MATERIAL_LOOKUP_UNAVAILABLE") from exc
+
+    remapped_preview, metrics, mapping_issues = apply_customer_material_mapping(
+        preview_data,
+        mapping_rows,
+        use_material_code_fallback=False,
+    )
+    previous_issues = list(ingestion.issues)
+    ingestion.preview_data = remapped_preview
+    ingestion.resolved_fields = merge_non_empty(
+        ingestion.resolved_fields,
+        preview_to_resolved_fields(remapped_preview),
+    )
+    apply_preview_to_ingestion(ingestion, remapped_preview)
+    _merge_preview_issues_after_customer_material_remap(ingestion, previous_issues, mapping_issues)
+    ingestion.error_details = {}
+    if ingestion.missing_fields:
+        ingestion.error_code = ErrorCode.MISSING_REQUIRED_FIELDS.value
+    else:
+        ingestion.error_code = None
+    _append_event(
+        ingestion,
+        IngestionStatus.NEED_USER_INPUT,
+        "customer_material_remapped "
+        f"matched={metrics.get('matched', 0)} exact={metrics.get('exact', 0)} "
+        f"normalized={metrics.get('normalized', 0)} unmatched={metrics.get('unmatched', 0)} "
+        f"skipped={metrics.get('skipped', 0)} preview_confirmation_required=1",
+    )
+    return CustomerMaterialRemapResponse(
+        ingestion=ingestion,
+        matched=metrics.get("matched", 0),
+        unmatched=metrics.get("unmatched", 0),
+        skipped=metrics.get("skipped", 0),
+    )
+
+
+def remap_customer_materials_for_ingestion(
+    ingestion_id: str,
+    preview_data: OrderPreviewData,
+) -> Optional[CustomerMaterialRemapResponse]:
+    with store.lock:
+        logger.info("customer_material_remap_started ingestion_id=%s details=%s", ingestion_id, len(preview_data.details))
+        if is_database_enabled():
+            session = _db_session()
+            try:
+                ingestion = ingestion_db.get_by_id(session, ingestion_id)
+                if not ingestion:
+                    return None
+                if not _is_pending_ingestion(ingestion):
+                    raise CustomerMaterialRemapConflict(_status_value(ingestion.status))
+                result = _apply_customer_material_remap(ingestion, preview_data)
+                if not ingestion_db.update_existing_ingestion(session, ingestion):
+                    session.rollback()
+                    return None
+                session.commit()
+                return result
+            except CustomerMaterialRemapConflict:
+                session.rollback()
+                raise
+            except CustomerMaterialRemapUnavailable:
+                session.rollback()
+                raise
+            except Exception:
+                session.rollback()
+                logger.exception("customer_material_remap_failed ingestion_id=%s storage=db", ingestion_id)
+                raise
+            finally:
+                session.close()
+
+        ingestion = store.ingestions.get(ingestion_id)
+        if not ingestion:
+            return None
+        if not _is_pending_ingestion(ingestion):
+            raise CustomerMaterialRemapConflict(_status_value(ingestion.status))
+        result = _apply_customer_material_remap(ingestion, preview_data)
+        store.ingestions[ingestion_id] = ingestion
+        return result
 
 
 def process_ingestion(ingestion_id: str) -> Optional[IngestionResponse]:

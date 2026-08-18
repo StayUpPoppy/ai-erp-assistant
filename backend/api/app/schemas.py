@@ -417,6 +417,17 @@ class ConfirmPreviewRequest(BaseModel):
     preview_data: OrderPreviewData
 
 
+class CustomerMaterialRemapRequest(BaseModel):
+    preview_data: OrderPreviewData
+
+
+class CustomerMaterialRemapResponse(BaseModel):
+    ingestion: IngestionResponse
+    matched: int = 0
+    unmatched: int = 0
+    skipped: int = 0
+
+
 class DocumentParseExport(BaseModel):
     """
     对外集成用：单次 ingestion 的解析与结构化抽取快照（字段集保持稳定，便于下游 JSON 对接）。

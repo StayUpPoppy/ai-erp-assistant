@@ -30,6 +30,7 @@ import {
   postAssistantLlmProbe,
   postAssistantMessage,
   postCancelIngestion,
+  postRemapCustomerMaterials,
   streamAssistantMessage,
 } from "@/lib/api";
 import { precheckUploadFile, SUPPORTED_UPLOAD_EXTENSIONS } from "@/lib/upload-policy";
@@ -898,6 +899,8 @@ export default function HomePage() {
   const [resolvingIngestionIds, setResolvingIngestionIds] = useState<BooleanByIngestion>({});
   const [confirmingPreviewIngestionIds, setConfirmingPreviewIngestionIds] = useState<BooleanByIngestion>({});
   const [creatingDraftIngestionIds, setCreatingDraftIngestionIds] = useState<BooleanByIngestion>({});
+  const [remappingCustomerMaterialIngestionIds, setRemappingCustomerMaterialIngestionIds] =
+    useState<BooleanByIngestion>({});
 
   const lastStatusRef = useRef<IngestionStatus | null>(null);
   const lastStatusByIngestionRef = useRef<StatusByIngestion>({});
@@ -1217,8 +1220,10 @@ export default function HomePage() {
     setResolvingIngestionIds({});
     setConfirmingPreviewIngestionIds({});
     setCreatingDraftIngestionIds({});
+    setRemappingCustomerMaterialIngestionIds({});
     previewDirtyRef.current = false;
     previewDirtyByIngestionRef.current = {};
+    previewDraftsByIngestionRef.current = {};
     previewIngestionIdRef.current = null;
     poll404WarnedRef.current = false;
     poll404WarnedByIngestionRef.current = {};
@@ -1296,6 +1301,9 @@ export default function HomePage() {
         setResolvingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
         setConfirmingPreviewIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
         setCreatingDraftIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+        setRemappingCustomerMaterialIngestionIds(
+          (previous) => withoutRecordKey(previous, id) as BooleanByIngestion,
+        );
 
         if (ingestionIdRef.current === id) {
           setIngestion(null);
@@ -2783,6 +2791,10 @@ export default function HomePage() {
         delete nextState[id];
         return nextState;
       });
+      previewDraftsByIngestionRef.current = {
+        ...previewDraftsByIngestionRef.current,
+        [id]: bound,
+      };
       setPreviewDraftsByIngestion((prev) => ({ ...prev, [id]: bound }));
     }
     setPreviewDraft(bound);
@@ -2957,6 +2969,10 @@ export default function HomePage() {
       };
       setPreviewDirtyByIngestion((prev) => ({ ...prev, [targetIngestionId]: true }));
       setConfirmedPreviewIds((prev) => withoutRecordKey(prev, targetIngestionId) as Record<string, true>);
+      previewDraftsByIngestionRef.current = {
+        ...previewDraftsByIngestionRef.current,
+        [targetIngestionId]: bound,
+      };
       setPreviewDraftsByIngestion((prev) => ({ ...prev, [targetIngestionId]: bound }));
       if (ingestionIdRef.current === targetIngestionId) {
         previewDirtyRef.current = true;
@@ -2964,6 +2980,102 @@ export default function HomePage() {
       }
     },
     [userName],
+  );
+
+  const onRemapCustomerMaterialsTask = useCallback(
+    async (targetIngestionId: string) => {
+      if (!targetIngestionId || remappingCustomerMaterialIngestionIds[targetIngestionId]) return;
+      const targetIngestion =
+        ingestionsById[targetIngestionId] ?? (targetIngestionId === ingestionId ? ingestion : null);
+      const draft = previewDraftsByIngestionRef.current[targetIngestionId] ?? targetIngestion?.preview_data ?? null;
+      if (!draft) return;
+      const previewToRemap = bindPreviewSalesUser(draft, userName);
+      const submittedSnapshot = JSON.stringify(previewToRemap);
+      setRemappingCustomerMaterialIngestionIds((prev) => ({ ...prev, [targetIngestionId]: true }));
+      try {
+        clientLogger.info("remap customer materials", {
+          ingestionId: targetIngestionId,
+          details: previewToRemap.details.length,
+        });
+        const result = await postRemapCustomerMaterials(targetIngestionId, previewToRemap);
+        const data = result.ingestion;
+        if (!data || data.ingestion_id !== targetIngestionId) return;
+
+        setConfirmedPreviewIds(
+          (prev) => withoutRecordKey(prev, targetIngestionId) as Record<string, true>,
+        );
+        const latestDraft = bindPreviewSalesUser(
+          previewDraftsByIngestionRef.current[targetIngestionId] ?? previewToRemap,
+          userName,
+        );
+        const changedDuringRequest = JSON.stringify(latestDraft) !== submittedSnapshot;
+        if (!changedDuringRequest) {
+          const nextPreview = syncPreviewDefaults(data.preview_data ?? previewToRemap, userName, orgId);
+          previewDirtyByIngestionRef.current = withoutRecordKey(
+            previewDirtyByIngestionRef.current,
+            targetIngestionId,
+          ) as BooleanByIngestion;
+          previewDraftsByIngestionRef.current = {
+            ...previewDraftsByIngestionRef.current,
+            [targetIngestionId]: nextPreview,
+          };
+          setPreviewDirtyByIngestion(
+            (prev) => withoutRecordKey(prev, targetIngestionId) as BooleanByIngestion,
+          );
+          setPreviewDraftsByIngestion((prev) => ({ ...prev, [targetIngestionId]: nextPreview }));
+          if (ingestionIdRef.current === targetIngestionId) {
+            previewDirtyRef.current = false;
+            setPreviewDraft(nextPreview);
+          }
+        }
+
+        const displayData = upsertIngestionState(data, { activate: true, poll: false });
+        const workflowToolUi = buildPdfToErpToolUi(displayData);
+        if (workflowToolUi) {
+          setChatMessages((prev) => updateWorkflowToolCard(prev, displayData, workflowToolUi));
+          const displayStatus = displayIngestionStatus(displayData, clientDraftStateRef.current) ?? displayData.status;
+          const cardKey = pdfToErpWorkflowCardKey(displayData, displayStatus);
+          workflowToolCardKeyByIngestionRef.current = {
+            ...workflowToolCardKeyByIngestionRef.current,
+            [targetIngestionId]: cardKey,
+          };
+          workflowToolCardKeyRef.current = cardKey;
+        }
+        appendChat(
+          "system",
+          `重新匹配完成：成功 ${result.matched} 行，未匹配 ${result.unmatched} 行，跳过 ${result.skipped} 行。${
+            changedDuringRequest ? "匹配期间订单又有修改，请确认客户物料编码后再次匹配。" : "请重新确认预览后再上传 ERP。"
+          }`,
+        );
+      } catch (error) {
+        clientLogger.error("remap customer materials failed", error);
+        const status = (error as Error & { status?: number })?.status;
+        appendChat(
+          "system",
+          status === 400
+            ? "请先填写客户名称，再重新匹配物料。"
+            : status === 409
+              ? "该订单已经不在待处理状态，不能重新匹配物料。"
+              : status === 503
+                ? "物料重新匹配失败：ERP 客户物料对应表暂时不可用，请稍后重试。"
+                : "物料重新匹配失败，当前填写内容已保留，请稍后重试。",
+        );
+      } finally {
+        setRemappingCustomerMaterialIngestionIds(
+          (prev) => withoutRecordKey(prev, targetIngestionId) as BooleanByIngestion,
+        );
+      }
+    },
+    [
+      appendChat,
+      ingestion,
+      ingestionId,
+      ingestionsById,
+      orgId,
+      remappingCustomerMaterialIngestionIds,
+      upsertIngestionState,
+      userName,
+    ],
   );
 
   const onConfirmPreviewTask = useCallback(
@@ -3248,11 +3360,17 @@ export default function HomePage() {
           ? ingestionsById[cardIngestionId] ?? (cardIngestionId === ingestionId ? ingestion : null)
           : null;
         const isCurrentTaskCard = Boolean(cardIngestionId && taskIngestion);
+        const canRemapCustomerMaterialsCard = Boolean(
+          taskIngestion && isPendingQueueIngestion(taskIngestion),
+        );
         const cardPreviewDirty = Boolean(cardIngestionId && previewDirtyByIngestion[cardIngestionId]);
         const cardPreviewConfirmed = Boolean(cardIngestionId && confirmedPreviewIds[cardIngestionId] && !cardPreviewDirty);
         const isResolvingCard = Boolean(cardIngestionId && resolvingIngestionIds[cardIngestionId]);
         const isConfirmingPreviewCard = Boolean(cardIngestionId && confirmingPreviewIngestionIds[cardIngestionId]);
         const isCreatingDraftCard = Boolean(cardIngestionId && creatingDraftIngestionIds[cardIngestionId]);
+        const isRemappingCustomerMaterialsCard = Boolean(
+          cardIngestionId && remappingCustomerMaterialIngestionIds[cardIngestionId],
+        );
         const cardPreview =
           ui.data.preview_data && typeof ui.data.preview_data === "object"
             ? (ui.data.preview_data as OrderPreviewData)
@@ -3288,8 +3406,14 @@ export default function HomePage() {
                       onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                       onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                       onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                      onRemapCustomerMaterials={
+                        canRemapCustomerMaterialsCard
+                          ? () => onRemapCustomerMaterialsTask(cardIngestionId)
+                          : undefined
+                      }
                       confirming={isConfirmingPreviewCard}
                       creatingDraft={isCreatingDraftCard}
+                      remappingCustomerMaterials={isRemappingCustomerMaterialsCard}
                       createDraftDisabled={!canCreateDraft}
                       lockedSalesUser={userName}
                       hideCreateDraftAction
@@ -3306,8 +3430,14 @@ export default function HomePage() {
                     onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                     onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                     onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                    onRemapCustomerMaterials={
+                      canRemapCustomerMaterialsCard
+                        ? () => onRemapCustomerMaterialsTask(cardIngestionId)
+                        : undefined
+                    }
                     confirming={isConfirmingPreviewCard}
                     creatingDraft={isCreatingDraftCard}
+                    remappingCustomerMaterials={isRemappingCustomerMaterialsCard}
                     createDraftDisabled={!canCreateDraft}
                     lockedSalesUser={userName}
                     hideCreateDraftAction
@@ -3407,11 +3537,17 @@ export default function HomePage() {
           ? ingestionsById[cardIngestionId] ?? (cardIngestionId === ingestionId ? ingestion : null)
           : null;
         const isCurrentTaskCard = Boolean(cardIngestionId && taskIngestion);
+        const canRemapCustomerMaterialsCard = Boolean(
+          taskIngestion && isPendingQueueIngestion(taskIngestion),
+        );
         const disabled = !isCurrentTaskCard;
         const cardPreviewDirty = Boolean(cardIngestionId && previewDirtyByIngestion[cardIngestionId]);
         const cardPreviewConfirmed = Boolean(cardIngestionId && confirmedPreviewIds[cardIngestionId] && !cardPreviewDirty);
         const isConfirmingPreviewCard = Boolean(cardIngestionId && confirmingPreviewIngestionIds[cardIngestionId]);
         const isCreatingDraftCard = Boolean(cardIngestionId && creatingDraftIngestionIds[cardIngestionId]);
+        const isRemappingCustomerMaterialsCard = Boolean(
+          cardIngestionId && remappingCustomerMaterialIngestionIds[cardIngestionId],
+        );
         const cardPreview =
           ui.data.preview_data && typeof ui.data.preview_data === "object"
             ? (ui.data.preview_data as OrderPreviewData)
@@ -3505,8 +3641,14 @@ export default function HomePage() {
                         onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                         onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                         onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                        onRemapCustomerMaterials={
+                          canRemapCustomerMaterialsCard
+                            ? () => onRemapCustomerMaterialsTask(cardIngestionId)
+                            : undefined
+                        }
                         confirming={isConfirmingPreviewCard}
                         creatingDraft={isCreatingDraftCard}
+                        remappingCustomerMaterials={isRemappingCustomerMaterialsCard}
                         createDraftDisabled={!canCreateDraft}
                         lockedSalesUser={userName}
                         hideActions
@@ -3523,8 +3665,14 @@ export default function HomePage() {
                       onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                       onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                       onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                      onRemapCustomerMaterials={
+                        canRemapCustomerMaterialsCard
+                          ? () => onRemapCustomerMaterialsTask(cardIngestionId)
+                          : undefined
+                      }
                       confirming={isConfirmingPreviewCard}
                       creatingDraft={isCreatingDraftCard}
+                      remappingCustomerMaterials={isRemappingCustomerMaterialsCard}
                       createDraftDisabled={!canCreateDraft}
                       lockedSalesUser={userName}
                       hideActions
@@ -3673,14 +3821,17 @@ export default function HomePage() {
       onCreateDraftTask,
       onPreviewDraftChangeTask,
       onPreviewDraftChange,
+      onRemapCustomerMaterialsTask,
       onResolveTask,
       onResolve,
       previewDirtyByIngestion,
       previewDraft,
       previewDraftsByIngestion,
+      remappingCustomerMaterialIngestionIds,
       resolvingIngestionIds,
       resolveFields,
       resolveFieldsByIngestion,
+      userName,
     ],
   );
 
@@ -4340,8 +4491,16 @@ export default function HomePage() {
               onChange={onPreviewDraftChange}
               onConfirm={onConfirmPreview}
               onCreateDraft={onCreateDraft}
+              onRemapCustomerMaterials={
+                ingestion && isPendingQueueIngestion(ingestion)
+                  ? () => onRemapCustomerMaterialsTask(ingestionId ?? "")
+                  : undefined
+              }
               confirming={isConfirmingPreview}
               creatingDraft={isCreatingDraft}
+              remappingCustomerMaterials={Boolean(
+                ingestionId && remappingCustomerMaterialIngestionIds[ingestionId],
+              )}
               createDraftDisabled={
                 !ingestionId ||
                 displayIngestionStatus(ingestion, clientDraftStateRef.current) !== "VALIDATED" ||
