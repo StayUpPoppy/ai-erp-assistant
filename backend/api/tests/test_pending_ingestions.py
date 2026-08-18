@@ -195,7 +195,7 @@ def test_delete_pending_ingestion_route_hard_deletes_record_file_queue_and_sessi
 
 
 def test_delete_pending_ingestion_requires_cookie_and_exact_owner():
-    ingestion = _ingestion("delete-owner", "31", IngestionStatus.NEED_USER_INPUT, "2026-06-30T08:00:00Z")
+    ingestion = _ingestion("delete-owner", "31", IngestionStatus.DRAFT_CREATED, "2026-06-30T08:00:00Z")
     store.ingestions[ingestion.ingestion_id] = ingestion
     no_cookie = SimpleNamespace(cookies={}, state=SimpleNamespace(request_id="test-request"))
 
@@ -209,12 +209,34 @@ def test_delete_pending_ingestion_requires_cookie_and_exact_owner():
     assert ingestion.ingestion_id in store.ingestions
 
 
-def test_delete_ingestion_rejects_completed_order(monkeypatch: pytest.MonkeyPatch):
-    ingestion = _ingestion("delete-draft", "31", IngestionStatus.DRAFT_CREATED, "2026-06-30T08:00:00Z").model_copy(
-        update={"draft_no": "DRAFT-1"}
+def test_delete_history_ingestion_hard_deletes_local_record_without_calling_erp(monkeypatch: pytest.MonkeyPatch):
+    ingestion = _source_file_ingestion("delete-draft", "31").model_copy(
+        update={"status": IngestionStatus.DRAFT_CREATED, "draft_no": "DRAFT-1"}
     )
     store.ingestions[ingestion.ingestion_id] = ingestion
-    monkeypatch.setattr("app.store.delete_object", lambda _key: True)
+    store.file_hash_to_ingestion[f"31:{ingestion.file_hash}"] = ingestion.ingestion_id
+    actions: list[object] = []
+    cleaned_sessions: list[str] = []
+    monkeypatch.setattr("app.store.erp_client", object())
+    monkeypatch.setattr("app.store.delete_object", lambda key: actions.append(("file", key)) or True)
+    monkeypatch.setattr("app.store.remove_ingestion_job", lambda ingestion_id: actions.append(("queue", ingestion_id)) or 0)
+    monkeypatch.setattr("app.routes.remove_ingestion_references", lambda ingestion_id: cleaned_sessions.append(ingestion_id) or 1)
+
+    result = delete_ingestion_route(ingestion.ingestion_id, _request_for_user("31"))
+
+    assert result.deleted is True
+    assert result.queue_removed == 0
+    assert result.source_file_deleted is True
+    assert ingestion.ingestion_id not in store.ingestions
+    assert f"31:{ingestion.file_hash}" not in store.file_hash_to_ingestion
+    assert actions == [("file", ingestion.source_file_object_key), ("queue", ingestion.ingestion_id)]
+    assert cleaned_sessions == [ingestion.ingestion_id]
+
+
+def test_delete_ingestion_rejects_non_pending_non_history_status(monkeypatch: pytest.MonkeyPatch):
+    ingestion = _ingestion("delete-canceled", "31", IngestionStatus.CANCELED, "2026-06-30T08:00:00Z")
+    store.ingestions[ingestion.ingestion_id] = ingestion
+    monkeypatch.setattr("app.store.delete_object", lambda _key: pytest.fail("file delete must not run"))
 
     with pytest.raises(HTTPException) as exc:
         delete_ingestion_route(ingestion.ingestion_id, _request_for_user("31"))
@@ -225,7 +247,9 @@ def test_delete_ingestion_rejects_completed_order(monkeypatch: pytest.MonkeyPatc
 
 
 def test_delete_storage_failure_keeps_database_record(monkeypatch: pytest.MonkeyPatch):
-    ingestion = _source_file_ingestion("delete-storage-failure", "31")
+    ingestion = _source_file_ingestion("delete-storage-failure", "31").model_copy(
+        update={"status": IngestionStatus.DRAFT_CREATED, "draft_no": "DRAFT-STORAGE"}
+    )
     store.ingestions[ingestion.ingestion_id] = ingestion
     monkeypatch.setattr(
         "app.store.delete_object",
@@ -241,7 +265,9 @@ def test_delete_storage_failure_keeps_database_record(monkeypatch: pytest.Monkey
 
 
 def test_delete_pending_ingestion_database_path_commits_hard_delete(monkeypatch: pytest.MonkeyPatch):
-    ingestion = _source_file_ingestion("delete-db", "31")
+    ingestion = _source_file_ingestion("delete-db", "31").model_copy(
+        update={"status": IngestionStatus.DRAFT_CREATED, "draft_no": "DRAFT-DB"}
+    )
     actions: list[object] = []
 
     class FakeSession:
@@ -281,6 +307,25 @@ def test_delete_pending_ingestion_database_path_commits_hard_delete(monkeypatch:
         "commit",
         "close",
     ]
+
+
+def test_delete_history_ingestion_keeps_shared_source_file(monkeypatch: pytest.MonkeyPatch):
+    ingestion = _source_file_ingestion("delete-shared", "31").model_copy(
+        update={"status": IngestionStatus.DRAFT_CREATED, "draft_no": "DRAFT-SHARED"}
+    )
+    other = _source_file_ingestion("keep-shared", "31").model_copy(
+        update={"source_file_object_key": ingestion.source_file_object_key}
+    )
+    store.ingestions = {ingestion.ingestion_id: ingestion, other.ingestion_id: other}
+    monkeypatch.setattr("app.store.delete_object", lambda _key: pytest.fail("shared file must not be deleted"))
+    monkeypatch.setattr("app.store.remove_ingestion_job", lambda _ingestion_id: 0)
+
+    result = delete_pending_ingestion(ingestion.ingestion_id)
+
+    assert result is not None
+    assert result.source_file_deleted is False
+    assert ingestion.ingestion_id not in store.ingestions
+    assert other.ingestion_id in store.ingestions
 
 
 def test_user_source_file_route_allows_owner(monkeypatch: pytest.MonkeyPatch):

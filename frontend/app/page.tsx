@@ -1237,6 +1237,90 @@ export default function HomePage() {
     }
   }, []);
 
+  const clearDeletedIngestionClientState = useCallback((id: string): boolean => {
+    const wasActive = ingestionIdRef.current === id;
+    setChatMessages((previous) => removePdfToErpTaskCards(previous, id));
+    setIngestionHistory((previous) => previous.filter((entry) => entry.id !== id));
+    setChatSessions((previous) =>
+      previous.map((session) =>
+        session.taskIngestionId === id
+          ? { ...session, taskIngestionId: null, taskStatus: null, taskType: null }
+          : session,
+      ),
+    );
+    setHistoryOrders((previous) => previous.filter((entry) => entry.ingestion_id !== id));
+    setHistoryDetail((previous) => (previous?.ingestion_id === id ? null : previous));
+    setPendingQueue((previous) => previous.filter((entry) => entry.ingestion_id !== id));
+    delete taskCardRefs.current[id];
+    delete clientDraftStateRef.current[id];
+    historyInvalidatedIngestionIdsRef.current.delete(id);
+
+    ingestionsByIdRef.current = withoutRecordKey(ingestionsByIdRef.current, id) as IngestionById;
+    lastStatusByIngestionRef.current = withoutRecordKey(lastStatusByIngestionRef.current, id) as StatusByIngestion;
+    workflowToolCardKeyByIngestionRef.current = withoutRecordKey(
+      workflowToolCardKeyByIngestionRef.current,
+      id,
+    ) as StringByIngestion;
+    lastIngestionFileNameByIngestionRef.current = withoutRecordKey(
+      lastIngestionFileNameByIngestionRef.current,
+      id,
+    ) as StringByIngestion;
+    pollingInFlightRef.current = withoutRecordKey(pollingInFlightRef.current, id) as BooleanByIngestion;
+    poll404WarnedByIngestionRef.current = withoutRecordKey(
+      poll404WarnedByIngestionRef.current,
+      id,
+    ) as BooleanByIngestion;
+    resolveFieldsByIngestionRef.current = withoutRecordKey(
+      resolveFieldsByIngestionRef.current,
+      id,
+    ) as ResolveFieldsByIngestion;
+    previewDraftsByIngestionRef.current = withoutRecordKey(
+      previewDraftsByIngestionRef.current,
+      id,
+    ) as PreviewDraftByIngestion;
+    previewDirtyByIngestionRef.current = withoutRecordKey(
+      previewDirtyByIngestionRef.current,
+      id,
+    ) as BooleanByIngestion;
+    setIngestionsById((previous) => withoutRecordKey(previous, id) as IngestionById);
+    setPollingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+    setResolveFieldsByIngestion(
+      (previous) => withoutRecordKey(previous, id) as ResolveFieldsByIngestion,
+    );
+    setPreviewDraftsByIngestion(
+      (previous) => withoutRecordKey(previous, id) as PreviewDraftByIngestion,
+    );
+    setConfirmedPreviewIds((previous) => withoutRecordKey(previous, id));
+    setPreviewDirtyByIngestion(
+      (previous) => withoutRecordKey(previous, id) as BooleanByIngestion,
+    );
+    setResolvingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+    setConfirmingPreviewIngestionIds(
+      (previous) => withoutRecordKey(previous, id) as BooleanByIngestion,
+    );
+    setCreatingDraftIngestionIds(
+      (previous) => withoutRecordKey(previous, id) as BooleanByIngestion,
+    );
+    setRemappingCustomerMaterialIngestionIds(
+      (previous) => withoutRecordKey(previous, id) as BooleanByIngestion,
+    );
+
+    if (wasActive) {
+      setIngestion(null);
+      setIngestionId(null);
+      ingestionIdRef.current = null;
+      lastStatusRef.current = null;
+      workflowToolCardKeyRef.current = null;
+      lastIngestionFileNameRef.current = null;
+      setResolveFields({});
+      setPreviewDraft(null);
+      previewDirtyRef.current = false;
+      previewIngestionIdRef.current = null;
+      poll404WarnedRef.current = false;
+    }
+    return wasActive;
+  }, []);
+
   const deletePendingQueueItem = useCallback(
     async (item: IngestionResponse, index: number) => {
       const id = item.ingestion_id;
@@ -1252,71 +1336,8 @@ export default function HomePage() {
         await deleteIngestion(id);
         const remaining = pendingQueue.filter((entry) => entry.ingestion_id !== id);
         setPendingQueue(remaining);
-        setChatMessages((previous) => removePdfToErpTaskCards(previous, id));
-        setIngestionHistory((previous) => previous.filter((entry) => entry.id !== id));
-        setChatSessions((previous) =>
-          previous.map((session) =>
-            session.taskIngestionId === id
-              ? { ...session, taskIngestionId: null, taskStatus: null, taskType: null }
-              : session,
-          ),
-        );
-        delete taskCardRefs.current[id];
-        delete clientDraftStateRef.current[id];
-        historyInvalidatedIngestionIdsRef.current.delete(id);
-
-        ingestionsByIdRef.current = withoutRecordKey(ingestionsByIdRef.current, id) as IngestionById;
-        lastStatusByIngestionRef.current = withoutRecordKey(lastStatusByIngestionRef.current, id) as StatusByIngestion;
-        workflowToolCardKeyByIngestionRef.current = withoutRecordKey(
-          workflowToolCardKeyByIngestionRef.current,
-          id,
-        ) as StringByIngestion;
-        lastIngestionFileNameByIngestionRef.current = withoutRecordKey(
-          lastIngestionFileNameByIngestionRef.current,
-          id,
-        ) as StringByIngestion;
-        pollingInFlightRef.current = withoutRecordKey(pollingInFlightRef.current, id) as BooleanByIngestion;
-        poll404WarnedByIngestionRef.current = withoutRecordKey(
-          poll404WarnedByIngestionRef.current,
-          id,
-        ) as BooleanByIngestion;
-        resolveFieldsByIngestionRef.current = withoutRecordKey(
-          resolveFieldsByIngestionRef.current,
-          id,
-        ) as ResolveFieldsByIngestion;
-        previewDraftsByIngestionRef.current = withoutRecordKey(
-          previewDraftsByIngestionRef.current,
-          id,
-        ) as PreviewDraftByIngestion;
-        previewDirtyByIngestionRef.current = withoutRecordKey(
-          previewDirtyByIngestionRef.current,
-          id,
-        ) as BooleanByIngestion;
-        setIngestionsById((previous) => withoutRecordKey(previous, id) as IngestionById);
-        setPollingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
-        setResolveFieldsByIngestion((previous) => withoutRecordKey(previous, id) as ResolveFieldsByIngestion);
-        setPreviewDraftsByIngestion((previous) => withoutRecordKey(previous, id) as PreviewDraftByIngestion);
-        setConfirmedPreviewIds((previous) => withoutRecordKey(previous, id));
-        setPreviewDirtyByIngestion((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
-        setResolvingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
-        setConfirmingPreviewIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
-        setCreatingDraftIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
-        setRemappingCustomerMaterialIngestionIds(
-          (previous) => withoutRecordKey(previous, id) as BooleanByIngestion,
-        );
-
-        if (ingestionIdRef.current === id) {
-          setIngestion(null);
-          setIngestionId(null);
-          ingestionIdRef.current = null;
-          lastStatusRef.current = null;
-          workflowToolCardKeyRef.current = null;
-          lastIngestionFileNameRef.current = null;
-          setResolveFields({});
-          setPreviewDraft(null);
-          previewDirtyRef.current = false;
-          previewIngestionIdRef.current = null;
-          poll404WarnedRef.current = false;
+        const wasActive = clearDeletedIngestionClientState(id);
+        if (wasActive) {
           const next = remaining[Math.min(index, Math.max(0, remaining.length - 1))];
           if (next) activatePendingQueueItem(next);
         }
@@ -1328,7 +1349,7 @@ export default function HomePage() {
         setDeletingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
       }
     },
-    [activatePendingQueueItem, deletingIngestionIds, pendingQueue],
+    [activatePendingQueueItem, clearDeletedIngestionClientState, deletingIngestionIds, pendingQueue],
   );
 
   const restoreActiveIngestion = useCallback(
@@ -1664,6 +1685,43 @@ export default function HomePage() {
       return [...prev, nextMessage];
     });
   }, []);
+
+  const deleteHistoryOrder = useCallback(
+    async (item: HistoryOrderSummary | IngestionResponse) => {
+      const id = item.ingestion_id;
+      if (!id || deletingIngestionIds[id]) return;
+      const fileName = item.source_file_name || "历史订单";
+      const confirmed = window.confirm(
+        `确定永久删除“${fileName}”吗？\n\n此操作将删除订单助手中的历史记录和原始 PDF，但不会删除 ERP 中的销售订单，且无法恢复。`,
+      );
+      if (!confirmed) return;
+
+      setDeletingIngestionIds((previous) => ({ ...previous, [id]: true }));
+      setHistoryError(null);
+      try {
+        await deleteIngestion(id);
+        clearDeletedIngestionClientState(id);
+        clientLogger.info("历史订单已永久删除", { ingestionId: id, erpOrderDeleted: false });
+        appendChat("system", "历史记录已删除，ERP 销售订单未受影响。");
+        await loadHistoryOrders(0, false);
+      } catch (error) {
+        const status = (error as Error & { status?: number })?.status;
+        clientLogger.error("delete_history_ingestion_failed", { ingestionId: id, status, error });
+        setHistoryError(
+          status === 401 || status === 403
+            ? "历史记录删除失败：当前登录用户与订单所有者不匹配。"
+            : status === 409
+              ? "历史记录删除失败：该记录当前状态不允许删除。"
+              : status === 503
+                ? "历史记录删除失败：原始文件存储不可用，数据库记录和文件均已保留。"
+                : "历史记录删除失败，当前记录和文件已保留，请稍后重试。",
+        );
+      } finally {
+        setDeletingIngestionIds((previous) => withoutRecordKey(previous, id) as BooleanByIngestion);
+      }
+    },
+    [appendChat, clearDeletedIngestionClientState, deletingIngestionIds, loadHistoryOrders],
+  );
 
   const getAssistantSessionId = useCallback(() => {
     let sid = assistantSessionIdRef.current ?? assistantSessionId;
@@ -4816,16 +4874,26 @@ export default function HomePage() {
                         </div>
                         <div className="mt-2 font-mono text-xs text-slate-500">草稿号：{historyDetail.draft_no || "—"}</div>
                       </div>
-                      {historyDetail.draft_url ? (
-                        <a
-                          href={historyDetail.draft_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex h-9 items-center rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white hover:bg-emerald-600"
+                      <div className="flex flex-wrap items-center gap-2">
+                        {historyDetail.draft_url ? (
+                          <a
+                            href={historyDetail.draft_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex h-9 items-center rounded-lg bg-emerald-700 px-4 text-sm font-semibold text-white hover:bg-emerald-600"
+                          >
+                            打开 ERP 草稿
+                          </a>
+                        ) : null}
+                        <button
+                          type="button"
+                          disabled={Boolean(deletingIngestionIds[historyDetail.ingestion_id])}
+                          onClick={() => void deleteHistoryOrder(historyDetail)}
+                          className="inline-flex h-9 items-center rounded-lg border border-rose-200 bg-white px-4 text-sm font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          打开 ERP 草稿
-                        </a>
-                      ) : null}
+                          {deletingIngestionIds[historyDetail.ingestion_id] ? "删除中..." : "删除历史记录"}
+                        </button>
+                      </div>
                     </div>
                   </section>
 
@@ -4895,11 +4963,24 @@ export default function HomePage() {
                         >
                           查看 PDF 和订单详情
                         </button>
-                        {item.draft_url ? (
-                          <a href={item.draft_url} target="_blank" rel="noreferrer" className="text-xs font-semibold text-emerald-700 hover:text-emerald-600">
-                            打开 ERP 草稿 ↗
-                          </a>
-                        ) : null}
+                        <div className="flex flex-wrap items-center justify-end gap-3">
+                          {item.draft_url ? (
+                            <a href={item.draft_url} target="_blank" rel="noreferrer" className="text-xs font-semibold text-emerald-700 hover:text-emerald-600">
+                              打开 ERP 草稿 ↗
+                            </a>
+                          ) : null}
+                          <button
+                            type="button"
+                            disabled={Boolean(deletingIngestionIds[item.ingestion_id])}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void deleteHistoryOrder(item);
+                            }}
+                            className="text-xs font-semibold text-rose-700 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {deletingIngestionIds[item.ingestion_id] ? "删除中..." : "删除历史记录"}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))}

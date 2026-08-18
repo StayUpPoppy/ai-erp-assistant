@@ -132,6 +132,10 @@ def _is_pending_ingestion(ingestion: IngestionResponse) -> bool:
     return True
 
 
+def _is_deletable_ingestion(ingestion: IngestionResponse) -> bool:
+    return _is_pending_ingestion(ingestion) or ingestion.status == IngestionStatus.DRAFT_CREATED
+
+
 def _file_owner_key(file_hash: str, user_id: str) -> str:
     return f"{user_id}:{file_hash}"
 
@@ -703,7 +707,7 @@ def list_history_orders_for_user(user_id: str, offset: int = 0, limit: int = 20)
 
 
 def delete_pending_ingestion(ingestion_id: str) -> Optional[DeleteIngestionResponse]:
-    """Hard-delete a pending ingestion, its source file, and its queued Redis job."""
+    """Hard-delete a pending/history ingestion, its source file, and its queued Redis job."""
     with store.lock:
         if is_database_enabled():
             session = _db_session()
@@ -711,7 +715,7 @@ def delete_pending_ingestion(ingestion_id: str) -> Optional[DeleteIngestionRespo
                 ingestion = ingestion_db.get_by_id(session, ingestion_id)
                 if ingestion is None:
                     return None
-                if not _is_pending_ingestion(ingestion):
+                if not _is_deletable_ingestion(ingestion):
                     raise PendingIngestionDeleteConflict(ingestion.status.value)
                 shared_source = bool(
                     ingestion.source_file_object_key
@@ -745,7 +749,7 @@ def delete_pending_ingestion(ingestion_id: str) -> Optional[DeleteIngestionRespo
         ingestion = store.ingestions.get(ingestion_id)
         if ingestion is None:
             return None
-        if not _is_pending_ingestion(ingestion):
+        if not _is_deletable_ingestion(ingestion):
             raise PendingIngestionDeleteConflict(ingestion.status.value)
         shared_source = bool(
             ingestion.source_file_object_key
