@@ -550,8 +550,8 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert "jhq" not in body["order"]
     assert len(body["details"]) == 1
     assert body["details"][0]["materialCode"] == "S01"
-    assert body["details"][0]["customerMaterialSpec"] == "PS-01"
-    assert "productSpec" not in body["details"][0]
+    assert body["details"][0]["productSpec"] == "PS-01"
+    assert "customerMaterialSpec" not in body["details"][0]
     assert body["details"][0]["qty"] == 2.0
     assert set(body) == {"order", "details", "files"}
     assert body["files"] == [
@@ -605,7 +605,7 @@ def test_datynk_sale_order_allows_missing_detail_money_fields(monkeypatch):
     assert detail["tax"] == ""
 
 
-def test_datynk_sale_order_renames_product_spec_in_details_override(monkeypatch):
+def test_datynk_sale_order_keeps_product_spec_in_details_override(monkeypatch):
     monkeypatch.setenv("ERP_CLIENT_MODE", "real")
     monkeypatch.setenv("ERP_BASE_URL", "https://erp.example.com")
     monkeypatch.setenv("ERP_CREATE_BODY_STYLE", "datynk_sale_order")
@@ -631,16 +631,21 @@ def test_datynk_sale_order_renames_product_spec_in_details_override(monkeypatch)
             "line_qty": "1",
             "doc_date": "2026-05-13",
             "datynk_details_json": json.dumps(
-                [{"materialCode": "S01", "productSpec": "OLD-SPEC", "qty": 2}],
+                [
+                    {"materialCode": "S01", "productSpec": "NEW-SPEC", "qty": 2},
+                    {"materialCode": "S02", "customerMaterialSpec": "LEGACY-SPEC", "qty": 3},
+                ],
                 ensure_ascii=False,
             ),
         },
         "ik-spec",
     )
 
-    detail = captured["body"]["details"][0]
-    assert detail["customerMaterialSpec"] == "OLD-SPEC"
-    assert "productSpec" not in detail
+    details = captured["body"]["details"]
+    assert details[0]["productSpec"] == "NEW-SPEC"
+    assert "customerMaterialSpec" not in details[0]
+    assert details[1]["productSpec"] == "LEGACY-SPEC"
+    assert "customerMaterialSpec" not in details[1]
 
 
 def test_datynk_sale_order_uses_default_org(monkeypatch):

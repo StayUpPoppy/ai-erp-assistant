@@ -123,8 +123,8 @@ def test_confirm_preview_then_create_draft_success(monkeypatch):
         assert payload.get("orderDate") == "2026-05-13"
         assert payload.get("datynk_details_json")
         details = json.loads(payload["datynk_details_json"])
-        assert details[0]["customerMaterialSpec"] == "左旋7*55*122*8.5"
-        assert "productSpec" not in details[0]
+        assert details[0]["productSpec"] == "左旋7*55*122*8.5"
+        assert "customerMaterialSpec" not in details[0]
         return ("PO-DRAFT-PREVIEW01", "https://mock-erp.local/drafts/PO-DRAFT-PREVIEW01")
 
     monkeypatch.setattr("app.store.erp_client.create_draft", _fake_create_draft)
