@@ -211,6 +211,128 @@ def test_node_build_preview_rejects_missing_preview_when_validation_enabled(monk
     assert ing.error_details["reason"] == "missing_order_preview"
 
 
+def test_node_build_preview_resolves_external_supplier_when_model_marks_own_company_as_purchaser(monkeypatch):
+    from app.workflow import WorkflowState, _node_build_preview
+
+    external_customer = "江苏明通福路流体控制设备有限公司"
+
+    class CustomerAwareErp(MockErpClient):
+        def __init__(self):
+            self.material_customer_names = []
+
+        def search_customers(self, org_id, keyword, page_num=1, page_size=20):
+            _ = org_id, page_num, page_size
+            return [{"customerName": external_customer}] if keyword == external_customer else []
+
+        def get_customer_material_details_by_customer(self, customer_name):
+            self.material_customer_names.append(customer_name)
+            return []
+
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(
+            org="英科1厂",
+            customerName="浙江英科弹簧科技有限公司",
+            customerPoNo="PO-CUSTOMER-1",
+            currency="CNY",
+            deliveryDate="2026-08-30",
+        ),
+        details=[OrderPreviewDetail(customerMaterialNo="CUST-001", productName="弹簧", qty=2)],
+    )
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setattr("app.workflow.build_order_preview_data", lambda _ingestion: preview.model_copy(deep=True))
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-19")
+    ing = _new_ingestion()
+    ing.org_id = "英科1厂"
+    ing.resolved_fields = {
+        "extracted_purchaser_name": "浙江英科弹簧科技有限公司",
+        "extracted_supplier_name": external_customer,
+    }
+    erp = CustomerAwareErp()
+    state: WorkflowState = {
+        "ingestion": ing,
+        "erp": erp,
+        "append_event": _append_event,
+        "mapping_metrics": {},
+        "document_text": "采购合同",
+    }
+
+    _node_build_preview(state)
+
+    assert ing.preview_data is not None
+    assert ing.preview_data.order.customerName == external_customer
+    assert ing.resolved_fields["customerName"] == external_customer
+    assert ing.resolved_fields["customer_name"] == external_customer
+    assert ing.resolved_fields["extracted_purchaser_name"] == "浙江英科弹簧科技有限公司"
+    assert ing.resolved_fields["extracted_supplier_name"] == external_customer
+    assert erp.material_customer_names == [external_customer]
+    assert any(
+        "customer_resolution=erp_exact" in event.message
+        and "customer_candidate_source=model_supplier" in event.message
+        for event in ing.audit_events
+    )
+
+
+def test_node_build_preview_blanks_ambiguous_customer_and_skips_material_mapping(monkeypatch):
+    from app.workflow import WorkflowState, _node_build_preview
+
+    class AmbiguousErp(MockErpClient):
+        def __init__(self):
+            self.material_calls = 0
+
+        def search_customers(self, org_id, keyword, page_num=1, page_size=20):
+            _ = org_id, keyword, page_num, page_size
+            return []
+
+        def get_customer_material_details_by_customer(self, customer_name):
+            _ = customer_name
+            self.material_calls += 1
+            return []
+
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(
+            org="英科1厂",
+            customerName="候选客户一有限公司",
+            customerPoNo="PO-CUSTOMER-2",
+            currency="CNY",
+            deliveryDate="2026-08-30",
+        ),
+        details=[OrderPreviewDetail(customerMaterialNo="CUST-002", productName="弹簧", qty=2)],
+    )
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setattr("app.workflow.build_order_preview_data", lambda _ingestion: preview.model_copy(deep=True))
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-19")
+    ing = _new_ingestion()
+    ing.org_id = "英科1厂"
+    ing.resolved_fields = {
+        "extracted_purchaser_name": "候选客户一有限公司",
+        "extracted_supplier_name": "候选客户二有限公司",
+    }
+    erp = AmbiguousErp()
+    state: WorkflowState = {
+        "ingestion": ing,
+        "erp": erp,
+        "append_event": _append_event,
+        "mapping_metrics": {},
+        "document_text": "采购合同",
+    }
+
+    _node_build_preview(state)
+
+    assert ing.preview_data is not None
+    assert ing.preview_data.order.customerName == ""
+    assert ing.resolved_fields["customerName"] == ""
+    assert ing.resolved_fields["customer_name"] == ""
+    assert "customerName" in ing.missing_fields
+    assert erp.material_calls == 0
+    assert any(
+        issue.path == "order.customerName" and issue.level == "error" and "无法从合同双方中唯一确定" in issue.message
+        for issue in ing.issues
+    )
+    assert any("customer_resolution=ambiguous" in event.message for event in ing.audit_events)
+
+
 def test_node_map_continues_when_erp_search_raises():
     """主数据映射阶段：单个 ERP 查询失败时降级为空列表，避免简历等非单据 PDF 因上游 5xx 整单失败。"""
     from app.erp_client import ErpClientError, MockErpClient

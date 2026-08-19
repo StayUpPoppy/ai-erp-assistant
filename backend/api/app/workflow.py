@@ -35,6 +35,7 @@ from app.document_extract import (
     resolved_upload_file_name,
     truncate_for_api,
 )
+from app.customer_identity import CustomerIdentityResolution, resolve_customer_identity
 from app.erp_audit_log import append_erp_call_log_with_upstream
 from app.erp_client import ErpClientError, ErpClientProtocol, clear_last_upstream_meta
 from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus, OrderPreviewData, PreviewIssue
@@ -982,18 +983,88 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             if defaulted_order_date
             else ""
         )
+        raw_purchaser_name = (
+            ing.resolved_fields.get("extracted_purchaser_name")
+            or ing.resolved_fields.get("customer_name")
+            or preview.order.customerName
+            or ""
+        ).strip()
+        raw_supplier_name = (
+            ing.resolved_fields.get("extracted_supplier_name")
+            or ing.resolved_fields.get("supplier_name")
+            or ing.resolved_fields.get("vendor_name")
+            or ""
+        ).strip()
+        if raw_purchaser_name:
+            ing.resolved_fields["extracted_purchaser_name"] = raw_purchaser_name
+        if raw_supplier_name:
+            ing.resolved_fields["extracted_supplier_name"] = raw_supplier_name
+        customer_resolution: CustomerIdentityResolution = resolve_customer_identity(
+            org_id=ing.org_id,
+            purchaser_name=raw_purchaser_name,
+            supplier_name=raw_supplier_name,
+            erp=state["erp"],
+        )
+        preview.order.customerName = customer_resolution.customer_name
+        ing.resolved_fields["customerName"] = customer_resolution.customer_name
+        ing.resolved_fields["customer_name"] = customer_resolution.customer_name
+        customer_issues: List[PreviewIssue] = []
+        if customer_resolution.resolution_source == "ambiguous":
+            customer_issues.append(
+                PreviewIssue(
+                    path="order.customerName",
+                    level="error",
+                    message=(
+                        "客户名称无法从合同双方中唯一确定，请在订单预览中手工填写客户名称，"
+                        "然后重新匹配物料并确认。"
+                    ),
+                )
+            )
+        elif customer_resolution.erp_lookup_failed:
+            customer_issues.append(
+                PreviewIssue(
+                    path="order.customerName",
+                    level="warning",
+                    message="ERP 客户主数据校验失败，请人工核对客户名称。",
+                )
+            )
+        elif not customer_resolution.exact_erp_match:
+            customer_issues.append(
+                PreviewIssue(
+                    path="order.customerName",
+                    level="warning",
+                    message=(
+                        f"客户名称 {customer_resolution.customer_name} 未精确匹配 ERP 客户主数据，请人工核对。"
+                    ),
+                )
+            )
+        logger.info(
+            "customer_identity_resolved ingestion_id=%s resolution=%s candidate_source=%s candidates=%s customer=%s",
+            ing.ingestion_id,
+            customer_resolution.resolution_source,
+            customer_resolution.candidate_source or "none",
+            customer_resolution.candidate_count,
+            customer_resolution.customer_name or "none",
+        )
+        customer_identity_audit = (
+            f" customer_resolution={customer_resolution.resolution_source}"
+            f" customer_candidate_source={customer_resolution.candidate_source or 'none'}"
+            f" customer_candidates={customer_resolution.candidate_count}"
+        )
         preview_valid, preview_reason, preview_metrics = _validate_order_preview(preview)
         if not preview_valid:
             if _should_continue_on_incomplete_purchase_order_preview(ing, state["document_text"] or ""):
                 apply_preview_to_ingestion(ing, preview)
                 _append_parse_warnings(ing)
+                if customer_issues:
+                    ing.issues.extend(customer_issues)
                 ing.error_code = None
                 ing.error_details = {}
                 state["append_event"](
                     ing,
                     IngestionStatus.MAPPED,
                     f"order preview incomplete but purchase order evidence is strong; waiting user input "
-                    f"reason={preview_reason}{order_date_audit}",
+                    f"reason={preview_reason}{customer_identity_audit}{order_date_audit}",
                 )
                 return {
                     "preview": 1,
@@ -1016,29 +1087,7 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             )
         customer_material_metrics: Dict[str, int] = {}
         customer_name = (preview.order.customerName or "").strip()
-        customer_issues: List[PreviewIssue] = []
         if customer_name:
-            try:
-                customer_rows = state["erp"].search_customers(ing.org_id, customer_name, 1, 20)
-                normalized_customer = re.sub(r"\s+", "", customer_name).casefold()
-                exact_customer = any(
-                    re.sub(r"\s+", "", str(row.get("customerName") or row.get("name") or "")).casefold()
-                    == normalized_customer
-                    for row in customer_rows
-                )
-                if not exact_customer:
-                    customer_issues.append(
-                        PreviewIssue(
-                            path="order.customerName",
-                            level="warning",
-                            message=f"客户名称 {customer_name} 未精确匹配 ERP 客户主数据，请人工核对。",
-                        )
-                    )
-            except Exception as exc:
-                logger.warning("customer_master_validation_failed ingestion_id=%s err=%s", ing.ingestion_id, exc)
-                customer_issues.append(
-                    PreviewIssue(path="order.customerName", level="warning", message="ERP 客户主数据校验失败，请人工核对。")
-                )
             try:
                 rows = state["erp"].get_customer_material_details_by_customer(customer_name)
             except Exception as exc:
@@ -1078,7 +1127,7 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             f"customer_material matched={customer_material_metrics.get('matched', 0)} "
             f"exact={customer_material_metrics.get('exact', 0)} normalized={customer_material_metrics.get('normalized', 0)} "
             f"unmatched={customer_material_metrics.get('unmatched', 0)} "
-            f"rows={customer_material_metrics.get('mapping_rows', 0)}{order_date_audit}",
+            f"rows={customer_material_metrics.get('mapping_rows', 0)}{customer_identity_audit}{order_date_audit}",
         )
         return {
             "preview": 1,

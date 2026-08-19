@@ -307,14 +307,17 @@ def test_try_apply_llm_preview_keeps_rule_preview_when_llm_is_empty(monkeypatch)
 def test_try_apply_llm_preview_applies_llm_when_more_complete(monkeypatch) -> None:
     ingestion = _ingestion_with_fields({"customerPoNo": "PO-ROUGH"})
     request_options = {}
+    request_messages = []
 
     monkeypatch.setattr("app.llm_extract.llm_available", lambda: True)
     monkeypatch.setenv("LLM_EXTRACT_ENABLE_THINKING", "false")
 
-    def fake_completion(*_args, **kwargs):
+    def fake_completion(*args, **kwargs):
+        request_messages.extend(args[0])
         request_options.update(kwargs)
         return (
             '{"purchase_order":{"order_number":"PO-BETTER","purchaser_name":"Better Customer",'
+            '"supplier_name":"浙江英科弹簧科技有限公司",'
             '"order_date":"2026-04-01","delivery_address":"Delivery Road",'
             '"items":[{"material_code":"MAT-001","material_name":"Spring","specification":"10x20",'
             '"quantity":12,"unit_price_without_tax":3.5,"total_amount_without_tax":42,'
@@ -333,7 +336,12 @@ def test_try_apply_llm_preview_applies_llm_when_more_complete(monkeypatch) -> No
     assert ingestion.preview_data.details[0].materialCode == "MAT-001"
     assert ingestion.preview_data.details[0].qty == 12
     assert ingestion.resolved_fields["customerPoNo"] == "PO-BETTER"
+    assert ingestion.resolved_fields["extracted_purchaser_name"] == "Better Customer"
+    assert ingestion.resolved_fields["extracted_supplier_name"] == "浙江英科弹簧科技有限公司"
     assert request_options["enable_thinking"] is False
+    assert "甲方、乙方只是合同标签" in request_messages[0]["content"]
+    assert "<customer_identity_context>" in request_messages[1]["content"]
+    assert "浙江英科弹簧科技有限公司" in request_messages[1]["content"]
 
 
 def test_chat_completion_json_only_adds_thinking_when_requested(monkeypatch) -> None:

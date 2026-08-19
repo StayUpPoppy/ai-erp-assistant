@@ -468,6 +468,7 @@ def preview_to_resolved_fields(preview: OrderPreviewData) -> Dict[str, str]:
     return {
         "org": header.org,
         "customerName": header.customerName,
+        "customer_name": header.customerName,
         "customerPoNo": header.customerPoNo,
         "salesUser": header.salesUser,
         "orderDate": header.orderDate,

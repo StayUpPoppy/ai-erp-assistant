@@ -7,6 +7,7 @@ import re
 from time import perf_counter
 from typing import Any, Dict, Optional
 
+from app.customer_identity import customer_identity_prompt_context
 from app.llm_client import (
     chat_completion_json,
     llm_available,
@@ -28,8 +29,8 @@ SYSTEM_PROMPT = """你是制造业采购订单抽取引擎，只能依据用户�
 
 字段语义：
 - order_number：客户/外部采购订单号，如 PO No、采购单号、订单号、合同编号。不要填本系统内部流水号、页码、发票号。
-- purchaser_name：买方/需方/甲方/采购商/客户名称。
-- supplier_name：卖方/供方/乙方/供应商名称。
+- purchaser_name：实际买方/需方/采购商/外部客户名称。甲方、乙方只是合同标签，不能直接代表买卖角色；不得把己方公司填为 purchaser_name。
+- supplier_name：实际卖方/供方/供应商名称；如果己方公司是销售方，应填写己方公司。
 - order_date：订单签订或下单日期，统一 YYYY-MM-DD；无法确定则 ""。
 - payment_terms：付款方式或结算条款。
 - tax_rate：税率百分数,无法确定输出 0。
@@ -181,7 +182,11 @@ def _clip_llm_document_context(document_text: str, resolved_fields: Optional[Dic
     return clipped
 
 
-def _build_user_prompt(document_text: str, resolved_fields: Optional[Dict[str, str]] = None) -> str:
+def _build_user_prompt(
+    document_text: str,
+    resolved_fields: Optional[Dict[str, str]] = None,
+    org_id: str = "",
+) -> str:
     clipped_text = _clip_llm_document_context(document_text, resolved_fields)
     known_fields = {k: v for k, v in (resolved_fields or {}).items() if str(v).strip()}
     return (
@@ -189,6 +194,9 @@ def _build_user_prompt(document_text: str, resolved_fields: Optional[Dict[str, s
         + "\n<known_fields>\n"
         + json.dumps(known_fields, ensure_ascii=False)
         + "\n</known_fields>"
+        + "\n<customer_identity_context>\n"
+        + customer_identity_prompt_context(org_id)
+        + "\n</customer_identity_context>"
     )
 
 
@@ -546,7 +554,7 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
     rule_preview = build_order_preview_data(ingestion)
     try:
         llm_started = perf_counter()
-        user_prompt = _build_user_prompt(document_text, ingestion.resolved_fields)
+        user_prompt = _build_user_prompt(document_text, ingestion.resolved_fields, ingestion.org_id)
         input_chars = len(user_prompt)
         content = chat_completion_json(
             [
@@ -592,6 +600,8 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
             "customer_name": purchase_order.purchaser_name,
             "supplier_name": purchase_order.supplier_name,
             "vendor_name": purchase_order.supplier_name,
+            "extracted_purchaser_name": purchase_order.purchaser_name,
+            "extracted_supplier_name": purchase_order.supplier_name,
             "payment_terms": purchase_order.payment_terms,
             "total_order_amount": "" if purchase_order.total_order_amount == 0 else str(purchase_order.total_order_amount),
         }

@@ -29,7 +29,8 @@ def llm_model_name() -> str:
 
 
 def llm_prompt_version() -> str:
-    return (os.getenv("LLM_PROMPT_VERSION") or "qwen-order-preview-v1").strip() or "qwen-order-preview-v1"
+    default = "qwen-order-preview-v2-customer-identity"
+    return (os.getenv("LLM_PROMPT_VERSION") or default).strip() or default
 
 
 def llm_reasoning_effort() -> str:

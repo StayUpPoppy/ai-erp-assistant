@@ -21,6 +21,7 @@ from app.erp_payload_preview import build_datynk_sale_order_payload
 from app.erp_qa import answer_with_erp_tools
 from app.erp_qa_reports import erp_qa_reports_health_payload
 from app.document_extract import tesseract_health_payload
+from app.customer_identity import customer_identity_health_payload
 from app.extraction_profile import profiles_directory_stats
 from app.assistant_orchestrator import handle_assistant_message, handle_assistant_route_decision
 from app.assistant_llm_router import (
@@ -288,6 +289,7 @@ def health() -> HealthResponse:
         extraction_profile_json_count=prof_n,
         **tess,
         **qwen_vision_health_payload(),
+        **customer_identity_health_payload(),
         **storage_health_payload(),
         **queue_health_payload(),
         **erp_adapter_health_payload(),

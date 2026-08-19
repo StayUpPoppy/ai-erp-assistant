@@ -10,13 +10,14 @@ from time import perf_counter
 from typing import Any, Dict, List, Optional
 from urllib import error, request
 
+from app.customer_identity import customer_identity_prompt_context
 from app.llm_extract import _append_llm_quality_issues, _extract_json, _purchase_order_to_preview
 from app.order_preview import apply_preview_to_ingestion, preview_to_resolved_fields
 from app.schemas import DocType, IngestionResponse, OrderPreviewData, OrderPreviewDetail, PreviewIssue, PurchaseOrder
 
 logger = logging.getLogger("ai_erp_api")
 
-QWEN_VISION_PROMPT_VERSION = "qwen-vision-order-preview-v2"
+QWEN_VISION_PROMPT_VERSION = "qwen-vision-order-preview-v3-customer-identity"
 
 
 class QwenVisionError(RuntimeError):
@@ -205,8 +206,8 @@ ORDER_EXTRACTION_SYSTEM_PROMPT = """你是制造业采购订单抽取引擎，�
 
 字段语义：
 - order_number：客户/外部采购订单号，如 PO No、采购单号、订单号、合同编号。不要填本系统内部流水号、页码、发票号。
-- purchaser_name：买方/需方/甲方/采购商/客户名称。
-- supplier_name：卖方/供方/乙方/供应商名称。
+- purchaser_name：实际买方/需方/采购商/外部客户名称。甲方、乙方只是合同标签，不能直接代表买卖角色；不得把己方公司填为 purchaser_name。
+- supplier_name：实际卖方/供方/供应商名称；如果己方公司是销售方，应填写己方公司。
 - order_date：订单签订或下单日期，统一 YYYY-MM-DD；无法确定则 ""。
 - payment_terms：付款方式或结算条款。
 - tax_rate：税率百分数,无法确定输出 0。
@@ -334,6 +335,7 @@ def _user_text_prompt(
     page_count: int,
     truncated: bool,
     *,
+    org_id: str = "",
     local_text: Optional[str] = None,
     local_format: Optional[str] = None,
 ) -> str:
@@ -343,6 +345,9 @@ def _user_text_prompt(
         f"文件名：{file_name or 'upload'}\n"
         f"页数/图片数：{page_count}\n"
         f"{suffix}"
+        "\n<customer_identity_context>\n"
+        f"{customer_identity_prompt_context(org_id)}"
+        "\n</customer_identity_context>"
     )
     clipped = _clip_local_text(local_text)
     if clipped:
@@ -362,6 +367,7 @@ def _chat_completion_vision(
     file_name: str,
     page_count: int,
     truncated: bool,
+    org_id: str = "",
     local_text: Optional[str] = None,
     local_format: Optional[str] = None,
 ) -> str:
@@ -376,6 +382,7 @@ def _chat_completion_vision(
                 file_name,
                 page_count,
                 truncated,
+                org_id=org_id,
                 local_text=local_text,
                 local_format=local_format,
             ),
@@ -716,6 +723,8 @@ def _apply_purchase_order(
             "customer_name": purchase_order.purchaser_name,
             "supplier_name": purchase_order.supplier_name,
             "vendor_name": purchase_order.supplier_name,
+            "extracted_purchaser_name": purchase_order.purchaser_name,
+            "extracted_supplier_name": purchase_order.supplier_name,
             "payment_terms": purchase_order.payment_terms,
             "total_order_amount": "" if purchase_order.total_order_amount == 0 else str(purchase_order.total_order_amount),
         }
@@ -760,6 +769,7 @@ def try_apply_qwen_vision_preview(
             file_name=file_name,
             page_count=page_count,
             truncated=truncated,
+            org_id=ingestion.org_id,
             local_text=local_text,
             local_format=local_format,
         )

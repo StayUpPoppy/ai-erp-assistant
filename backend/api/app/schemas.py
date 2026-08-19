@@ -86,6 +86,9 @@ class HealthResponse(BaseModel):
     qwen_vision_fallback_to_local: bool = True
     qwen_vision_include_local_text: bool = True
     qwen_vision_local_text_max_chars: int = 12000
+    customer_own_company_aliases_configured: bool = False
+    customer_own_company_aliases_valid: bool = True
+    customer_own_company_aliases_count: int = 2
     erp_client_mode: str = "mock"
     erp_sale_order_page_enabled: bool = False
     erp_customer_page_enabled: bool = False

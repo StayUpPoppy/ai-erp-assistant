@@ -18,6 +18,7 @@ from app.schemas import (
     OrderPreviewData,
     OrderPreviewDetail,
     OrderPreviewHeader,
+    PreviewIssue,
     ResolveIngestionRequest,
 )
 from app.store import create_ingestion, store
@@ -113,6 +114,13 @@ def test_confirm_preview_then_create_draft_success(monkeypatch):
     os.environ.pop("DATABASE_URL", None)
     _reset_in_memory_store()
     created = create_ingestion(_new_ingestion_payload("hash-preview-ok"))
+    created.issues = [
+        PreviewIssue(
+            path="order.customerName",
+            level="error",
+            message="客户名称无法从合同双方中唯一确定，请手工填写。",
+        )
+    ]
 
     calls = {"count": 0}
 
@@ -169,6 +177,8 @@ def test_confirm_preview_then_create_draft_success(monkeypatch):
     assert confirmed.status == IngestionStatus.VALIDATED
     assert confirmed.preview_data is not None
     assert confirmed.resolved_fields.get("customerName") == "北京优向国际能源装备有限公司"
+    assert confirmed.resolved_fields.get("customer_name") == "北京优向国际能源装备有限公司"
+    assert not any("无法从合同双方中唯一确定" in issue.message for issue in confirmed.issues)
     assert confirmed.resolved_fields.get("doc_date") == "2026-05-13"
     assert confirmed.resolved_fields.get("orderDate") == "2026-05-13"
     assert confirmed.resolved_fields.get("material_code") == "S01P019430"

@@ -99,6 +99,8 @@ def test_qwen_vision_user_prompt_includes_local_parse_text(monkeypatch) -> None:
 
     assert "<local_parse_text format=\"pdf_native_pymupdf\">" in prompt
     assert "INCONEL X-750" in prompt
+    assert "<customer_identity_context>" in prompt
+    assert "浙江英科弹簧科技有限公司" in prompt
 
 
 def test_try_apply_qwen_vision_preview_applies_structured_result(monkeypatch) -> None:
@@ -126,7 +128,9 @@ def test_try_apply_qwen_vision_preview_applies_structured_result(monkeypatch) ->
     assert ingestion.preview_data.details[0].materialCode == "CUST-001"
     assert ingestion.preview_data.details[0].ph == "X-750"
     assert ingestion.model_version == "qwen3.7-plus"
-    assert ingestion.prompt_version == "qwen-vision-order-preview-v2"
+    assert ingestion.prompt_version == "qwen-vision-order-preview-v3-customer-identity"
+    assert ingestion.resolved_fields["extracted_purchaser_name"] == "格鲁赛特阀门配件江苏有限公司"
+    assert ingestion.resolved_fields["extracted_supplier_name"] == "YingKe"
 
 
 def test_qwen_vision_fills_material_grade_from_local_table(monkeypatch) -> None:
@@ -258,3 +262,4 @@ def test_qwen_vision_prompt_reuses_text_order_rules() -> None:
     assert "Material Grade" in VISION_SYSTEM_PROMPT
     assert "规格型号/规格/型号/Spec/Specification" in VISION_SYSTEM_PROMPT
     assert "material_name 保留完整产品名称" in VISION_SYSTEM_PROMPT
+    assert "甲方、乙方只是合同标签" in VISION_SYSTEM_PROMPT

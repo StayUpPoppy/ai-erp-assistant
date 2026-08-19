@@ -29,6 +29,10 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
         model_version="m",
         prompt_version="p",
         status=IngestionStatus.VALIDATED,
+        resolved_fields={
+            "extracted_purchaser_name": "浙江英科弹簧科技有限公司",
+            "extracted_supplier_name": "北京优向国际能源装备有限公司",
+        },
         preview_data=OrderPreviewData(
             order=OrderPreviewHeader(
                 org="英科1厂",
@@ -87,6 +91,8 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
     assert "sourceMaterialCode" not in payload["details"][0]
     assert "sourceProductSpec" not in payload["details"][0]
     assert "customerMaterialSpec" not in payload["details"][0]
+    assert "extracted_purchaser_name" not in payload["order"]
+    assert "extracted_supplier_name" not in payload["order"]
 
 
 def test_source_product_spec_persists_in_preview_context_but_not_erp_details() -> None:
