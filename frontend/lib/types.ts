@@ -73,6 +73,7 @@ export interface OrderPreviewHeader {
 
 export interface OrderPreviewDetail {
   materialCode: string;
+  sourceMaterialCode: string;
   productName: string;
   productSpec: string;
   sourceProductSpec: string;
@@ -165,6 +166,8 @@ export interface IngestionResponse {
     [key: string]: unknown;
   };
 }
+
+export type CustomerMaterialReferenceSource = "source_code" | "source_spec";
 
 export interface CustomerMaterialRemapResponse {
   ingestion: IngestionResponse;

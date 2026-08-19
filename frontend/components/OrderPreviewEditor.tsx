@@ -1,6 +1,12 @@
 "use client";
 
-import type { OrderPreviewData, PreviewEditableField, PreviewIssue } from "@/lib/types";
+import { useState } from "react";
+import type {
+  CustomerMaterialReferenceSource,
+  OrderPreviewData,
+  PreviewEditableField,
+  PreviewIssue,
+} from "@/lib/types";
 
 const HEADER_FIELDS: Array<{ key: keyof OrderPreviewData["order"]; label: string; type?: "text" | "number"; required?: boolean }> = [
   { key: "org", label: "销售组织", required: true },
@@ -40,6 +46,7 @@ const DETAIL_COLUMNS: Array<{
 function emptyDetail(): OrderPreviewData["details"][number] {
   return {
     materialCode: "",
+    sourceMaterialCode: "",
     productName: "",
     productSpec: "",
     sourceProductSpec: "",
@@ -109,7 +116,9 @@ export interface OrderPreviewEditorProps {
   onChange: (next: OrderPreviewData) => void;
   onConfirm: () => void | Promise<void>;
   onCreateDraft: () => void | Promise<void>;
-  onFillCustomerMaterialNosFromSpecs?: () => void | Promise<void>;
+  onUpdateCustomerMaterialNosFromReference?: (
+    referenceSource: CustomerMaterialReferenceSource,
+  ) => void | Promise<void>;
   onRemapCustomerMaterials?: () => void | Promise<void>;
   confirming: boolean;
   creatingDraft: boolean;
@@ -128,7 +137,7 @@ export function OrderPreviewEditor({
   onChange,
   onConfirm,
   onCreateDraft,
-  onFillCustomerMaterialNosFromSpecs,
+  onUpdateCustomerMaterialNosFromReference,
   onRemapCustomerMaterials,
   confirming,
   creatingDraft,
@@ -139,6 +148,8 @@ export function OrderPreviewEditor({
   readOnly = false,
   lockedSalesUser,
 }: OrderPreviewEditorProps) {
+  const [customerMaterialReferenceSource, setCustomerMaterialReferenceSource] =
+    useState<CustomerMaterialReferenceSource>("source_code");
   const editableByPath = new Map(editableFields.map((field) => [field.path, field]));
 
   const updateOrderField = (key: keyof OrderPreviewData["order"], raw: string) => {
@@ -282,15 +293,34 @@ export function OrderPreviewEditor({
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm font-semibold text-slate-900">订单明细</div>
           <div className="flex flex-wrap items-center gap-2">
-            {onFillCustomerMaterialNosFromSpecs && !readOnly ? (
-              <button
-                type="button"
-                disabled={remappingCustomerMaterials || confirming || creatingDraft}
-                onClick={() => void onFillCustomerMaterialNosFromSpecs()}
-                className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-1.5 text-sm font-medium text-violet-800 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                规格填入客户物料编码
-              </button>
+            {onUpdateCustomerMaterialNosFromReference && !readOnly ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-medium text-slate-600">编码来源：</span>
+                <select
+                  aria-label="客户物料编码来源"
+                  title="选择客户物料编码来源"
+                  value={customerMaterialReferenceSource}
+                  disabled={remappingCustomerMaterials || confirming || creatingDraft}
+                  onChange={(event) =>
+                    setCustomerMaterialReferenceSource(event.target.value as CustomerMaterialReferenceSource)
+                  }
+                  className="rounded-lg border border-violet-200 bg-white px-2.5 py-1.5 text-sm font-medium text-violet-800 outline-none hover:bg-violet-50 focus:border-violet-400 focus:ring-2 focus:ring-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="source_code">原始编码</option>
+                  <option value="source_spec">原始规格</option>
+                </select>
+                <button
+                  type="button"
+                  disabled={remappingCustomerMaterials || confirming || creatingDraft}
+                  title="将所选来源应用到客户物料编码"
+                  onClick={() =>
+                    void onUpdateCustomerMaterialNosFromReference(customerMaterialReferenceSource)
+                  }
+                  className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-1.5 text-sm font-medium text-violet-800 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  应用
+                </button>
+              </div>
             ) : null}
             {onRemapCustomerMaterials && !readOnly ? (
               <button

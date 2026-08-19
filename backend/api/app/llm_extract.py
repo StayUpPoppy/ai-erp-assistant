@@ -493,6 +493,7 @@ def _purchase_order_to_preview(order: PurchaseOrder, org_hint: str) -> OrderPrev
         details.append(
             OrderPreviewDetail(
                 materialCode=item.material_code,
+                sourceMaterialCode=item.material_code,
                 productName=item.material_name,
                 productSpec=item.specification,
                 sourceProductSpec=item.specification,

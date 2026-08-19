@@ -76,6 +76,7 @@ def test_purchase_order_maps_to_order_preview_for_datynk_sale_order() -> None:
     assert preview.order.customerPoNo == "PO-001"
     assert preview.order.deliveryDate == "2026-06-01"
     assert preview.details[0].materialCode == "S01P019430"
+    assert preview.details[0].sourceMaterialCode == "S01P019430"
     assert preview.details[0].productSpec == "φ7.5 × φ1.5×18（8圈）, Inconel 750\n原文第二行"
     assert preview.details[0].sourceProductSpec == "φ7.5 × φ1.5×18（8圈）, Inconel 750\n原文第二行"
     assert preview.details[0].amount == 20

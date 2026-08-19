@@ -36,6 +36,7 @@ import {
 import { precheckUploadFile, SUPPORTED_UPLOAD_EXTENSIONS } from "@/lib/upload-policy";
 import type {
   AuditEvent,
+  CustomerMaterialReferenceSource,
   HealthResponse,
   HistoryOrderSummary,
   IngestionResponse,
@@ -91,6 +92,12 @@ interface PendingReprocessUpload {
   ingestionId?: string;
 }
 
+interface UploadBatchResult {
+  successCount: number;
+  failureCount: number;
+  retryFiles: File[];
+}
+
 interface WorkspaceWindowState {
   chatInput: string;
   chatMessages: ChatMessage[];
@@ -126,6 +133,7 @@ const ASSISTANT_SESSIONS_LS_KEY = "ai_erp_assistant_sessions_v1";
 const POLL_FAST_MS = 1000;
 const POLL_STEADY_MS = 2000;
 const POLL_ERROR_MAX_MS = 5000;
+const MAX_UPLOAD_FILES_PER_BATCH = 8;
 
 function createAssistantSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -883,7 +891,7 @@ export default function HomePage() {
   /** 上传请求进行中（含网络传输与服务端读文件算哈希时间） */
   const [isUploading, setIsUploading] = useState(false);
   /** 点击文件选择器后暂存，等待用户点击右侧上传按钮确认 */
-  const [stagedUploadFile, setStagedUploadFile] = useState<File | null>(null);
+  const [stagedUploadFiles, setStagedUploadFiles] = useState<File[]>([]);
 
   /** 补全表单：键与后端 `required_field_keys` 对齐 */
   const [resolveFields, setResolveFields] = useState<Record<string, string>>({});
@@ -974,6 +982,11 @@ export default function HomePage() {
       .map((e) => `.${e}`)
       .join(",");
   }, []);
+
+  const stagedUploadFileNames = useMemo(
+    () => stagedUploadFiles.map((file) => file.name).join("、"),
+    [stagedUploadFiles],
+  );
 
   const devInternalEnabled = useMemo(() => {
     return process.env.NEXT_PUBLIC_ENABLE_DEV_INTERNAL === "1";
@@ -1899,7 +1912,7 @@ export default function HomePage() {
     pendingReprocessUploadsRef.current = {};
     setChatInput("");
     setChatMessages([]);
-    setStagedUploadFile(null);
+    setStagedUploadFiles([]);
     resetCurrentTaskState();
     const sid = createAssistantSessionId();
     const meta = createSessionMeta(sid);
@@ -2570,13 +2583,23 @@ export default function HomePage() {
   );
 
   const handleFiles = useCallback(
-    async (files: FileList | readonly File[] | null): Promise<boolean> => {
-      if (!files || files.length === 0) return false;
+    async (files: FileList | readonly File[] | null): Promise<UploadBatchResult> => {
+      if (!files || files.length === 0) {
+        return { successCount: 0, failureCount: 0, retryFiles: [] };
+      }
       if (workspaceMode !== "pdf_to_erp") {
         appendChat("system", "当前是普通对话 / ERP 查询模式。请先切换到「PDF 转 ERP」再上传 PDF。");
-        return false;
+        return { successCount: 0, failureCount: files.length, retryFiles: Array.from(files) };
       }
-      const list = Array.from(files).slice(0, 8);
+      const selectedFiles = Array.from(files);
+      const list = selectedFiles.slice(0, MAX_UPLOAD_FILES_PER_BATCH);
+      const ignoredCount = Math.max(0, selectedFiles.length - list.length);
+      if (ignoredCount > 0) {
+        appendChat(
+          "system",
+          `每批最多上传 ${MAX_UPLOAD_FILES_PER_BATCH} 个文件，已接收前 ${MAX_UPLOAD_FILES_PER_BATCH} 个，其余 ${ignoredCount} 个未加入。`,
+        );
+      }
 
       shouldAutoScrollRef.current = true;
       setIsUploading(true);
@@ -2584,110 +2607,139 @@ export default function HomePage() {
       const prof = rawProfileId.toLowerCase() === "string" ? "" : rawProfileId;
       let lastUploadedName: string | null = null;
       let uploadSuccessCount = 0;
+      let uploadFailureCount = 0;
+      const retryFiles: File[] = [];
       try {
         for (let i = 0; i < list.length; i++) {
           const file = list[i];
           const pre = precheckUploadFile(file);
           if (!pre.ok) {
             appendChat("system", `${file.name}：${pre.message}`);
+            uploadFailureCount += 1;
             continue;
           }
           clientLogger.info("用户选择文件", { name: file.name, size: file.size, type: file.type, index: i });
 
-          const prevId = ingestionIdRef.current;
-          if (prevId) {
-            const prevFileName =
-              lastIngestionFileNameRef.current ?? lastUploadedName ?? "（上一任务）";
-            const prevStatus = String(lastStatusByIngestionRef.current[prevId] ?? lastStatusRef.current ?? "");
-            setIngestionHistory((h) => {
-              if (h.some((x) => x.id === prevId)) return h;
-              return [
-                {
-                  id: prevId,
-                  fileName: prevFileName,
-                  status: prevStatus,
-                },
-                ...h,
-              ].slice(0, 30);
-            });
-          }
+          try {
+            const prevId = ingestionIdRef.current;
+            if (prevId) {
+              const prevFileName =
+                lastIngestionFileNameRef.current ?? lastUploadedName ?? "（上一任务）";
+              const prevStatus = String(lastStatusByIngestionRef.current[prevId] ?? lastStatusRef.current ?? "");
+              setIngestionHistory((h) => {
+                if (h.some((x) => x.id === prevId)) return h;
+                return [
+                  {
+                    id: prevId,
+                    fileName: prevFileName,
+                    status: prevStatus,
+                  },
+                  ...h,
+                ].slice(0, 30);
+              });
+            }
 
-          let uploadRes = await postAssistantFile(file, userId, orgId, prof || undefined, getAssistantSessionId());
-          let resp = uploadRes.tool_result?.ingestion;
-          if (!resp) {
-            appendChat("system", `${file.name} 上传后没有返回任务信息，请稍后重试。`);
-            continue;
-          }
-          if (resp.status === "DRAFT_CREATED") {
-            appendToolResponse(uploadRes);
-            const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            pendingReprocessUploadsRef.current[token] = {
+            const uploadRes = await postAssistantFile(
               file,
               userId,
               orgId,
-              extractionProfileId: prof || undefined,
-              sessionId: getAssistantSessionId(),
-              ingestionId: resp.ingestion_id,
-            };
-            appendChat("assistant", " ", {
-              toolUi: {
-                type: "reprocess_confirm",
-                data: {
-                  token,
-                  file_name: file.name,
-                  ingestion_id: resp.ingestion_id,
-                  draft_no: resp.draft_no ?? "",
-                  draft_url: resp.draft_url ?? "",
+              prof || undefined,
+              getAssistantSessionId(),
+            );
+            const resp = uploadRes.tool_result?.ingestion;
+            if (!resp) {
+              appendChat("system", `${file.name}：上传失败，服务端没有返回任务信息，请稍后重试。`);
+              uploadFailureCount += 1;
+              retryFiles.push(file);
+              continue;
+            }
+            if (resp.status === "DRAFT_CREATED") {
+              appendToolResponse(uploadRes);
+              const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              pendingReprocessUploadsRef.current[token] = {
+                file,
+                userId,
+                orgId,
+                extractionProfileId: prof || undefined,
+                sessionId: getAssistantSessionId(),
+                ingestionId: resp.ingestion_id,
+              };
+              appendChat("assistant", " ", {
+                toolUi: {
+                  type: "reprocess_confirm",
+                  data: {
+                    token,
+                    file_name: file.name,
+                    ingestion_id: resp.ingestion_id,
+                    draft_no: resp.draft_no ?? "",
+                    draft_url: resp.draft_url ?? "",
+                  },
                 },
-              },
+              });
+              uploadSuccessCount += 1;
+              continue;
+            }
+            appendToolResponse(uploadRes);
+            previewDirtyRef.current = false;
+            previewDirtyByIngestionRef.current = withoutRecordKey(
+              previewDirtyByIngestionRef.current,
+              resp.ingestion_id,
+            ) as BooleanByIngestion;
+            setPreviewDirtyByIngestion((prev) => withoutRecordKey(prev, resp.ingestion_id) as BooleanByIngestion);
+            upsertIngestionState(resp, {
+              activate: true,
+              fileName: file.name,
+              poll: isBackgroundRunningStatus(resp.status),
             });
+            setPreviewDraftsByIngestion((prev) => ({ ...prev, [resp.ingestion_id]: null }));
+            setConfirmedPreviewIds((prev) => {
+              if (!prev[resp.ingestion_id]) return prev;
+              const next = { ...prev };
+              delete next[resp.ingestion_id];
+              return next;
+            });
+            delete clientDraftStateRef.current[resp.ingestion_id];
+            lastUploadedName = file.name;
             uploadSuccessCount += 1;
-            continue;
+            clientLogger.info("上传任务创建成功（服务端已计算文件哈希）", resp);
+          } catch (e) {
+            uploadFailureCount += 1;
+            retryFiles.push(file);
+            clientLogger.error("单个文件上传或创建任务失败", {
+              name: file.name,
+              index: i,
+              error: e,
+            });
+            const detail =
+              e && typeof e === "object" && "message" in e && typeof (e as Error).message === "string"
+                ? (e as Error).message
+                : "";
+            appendChat(
+              "system",
+              `${file.name}：上传失败，请检查后端服务和网络后重试。${detail ? `\n（${detail.slice(0, 200)}）` : ""}`,
+            );
           }
-          appendToolResponse(uploadRes);
-          previewDirtyRef.current = false;
-          previewDirtyByIngestionRef.current = withoutRecordKey(
-            previewDirtyByIngestionRef.current,
-            resp.ingestion_id,
-          ) as BooleanByIngestion;
-          setPreviewDirtyByIngestion((prev) => withoutRecordKey(prev, resp.ingestion_id) as BooleanByIngestion);
-          upsertIngestionState(resp, { activate: true, fileName: file.name, poll: isBackgroundRunningStatus(resp.status) });
-          setPreviewDraftsByIngestion((prev) => ({ ...prev, [resp.ingestion_id]: null }));
-          setConfirmedPreviewIds((prev) => {
-            if (!prev[resp.ingestion_id]) return prev;
-            const next = { ...prev };
-            delete next[resp.ingestion_id];
-            return next;
-          });
-          delete clientDraftStateRef.current[resp.ingestion_id];
-          lastUploadedName = file.name;
-          uploadSuccessCount += 1;
-          clientLogger.info("上传任务创建成功（服务端已计算文件哈希）", resp);
         }
-        if (uploadSuccessCount === 0) {
-          appendChat("system", "没有成功创建解析任务：请检查文件类型与大小后重试。");
+        if (list.length > 1 || uploadFailureCount > 0) {
+          appendChat(
+            "system",
+            `本批次上传完成：成功 ${uploadSuccessCount} 个，失败 ${uploadFailureCount} 个。`,
+          );
         }
-      } catch (e) {
-        clientLogger.error("上传或创建任务失败", e);
-        const detail =
-          e && typeof e === "object" && "message" in e && typeof (e as Error).message === "string"
-            ? (e as Error).message
-            : "";
-        appendChat(
-          "system",
-          `上传没成功：请确认浏览器里配置的 API 地址能访问、后台已启动，且文件格式与大小符合要求。${detail ? `\n（${detail.slice(0, 200)}）` : ""}`,
-        );
       } finally {
         setIsUploading(false);
       }
-      return uploadSuccessCount > 0;
+      return {
+        successCount: uploadSuccessCount,
+        failureCount: uploadFailureCount,
+        retryFiles,
+      };
     },
     [
       appendChat,
       appendToolResponse,
       extractionProfileId,
       getAssistantSessionId,
-      ingestionHistory,
       orgId,
       upsertIngestionState,
       userId,
@@ -2696,13 +2748,11 @@ export default function HomePage() {
   );
 
   const onSubmitStagedUpload = useCallback(async () => {
-    if (!stagedUploadFile || isUploading) return;
-    const file = stagedUploadFile;
-    const uploaded = await handleFiles([file]);
-    if (uploaded) {
-      setStagedUploadFile((current) => (current === file ? null : current));
-    }
-  }, [handleFiles, isUploading, stagedUploadFile]);
+    if (stagedUploadFiles.length === 0 || isUploading) return;
+    const files = stagedUploadFiles;
+    const result = await handleFiles(files);
+    setStagedUploadFiles((current) => (current === files ? result.retryFiles : current));
+  }, [handleFiles, isUploading, stagedUploadFiles]);
 
   const onDrop = useCallback(
     async (e: React.DragEvent) => {
@@ -2710,6 +2760,10 @@ export default function HomePage() {
       e.stopPropagation();
       dragDepthRef.current = 0;
       setIsDragging(false);
+      if (isUploading) {
+        appendChat("system", "当前批次仍在上传，请等待完成后再添加文件。");
+        return;
+      }
       const files = e.dataTransfer.files;
       if (!files || files.length === 0) {
         appendChat(
@@ -2718,9 +2772,10 @@ export default function HomePage() {
         );
         return;
       }
-      await handleFiles(files);
+      const result = await handleFiles(files);
+      setStagedUploadFiles(result.retryFiles);
     },
-    [appendChat, handleFiles],
+    [appendChat, handleFiles, isUploading],
   );
 
   const onResolve = useCallback(async (overrideFields?: Record<string, string>) => {
@@ -3040,8 +3095,8 @@ export default function HomePage() {
     [userName],
   );
 
-  const onFillCustomerMaterialNosFromSpecsTask = useCallback(
-    (targetIngestionId: string) => {
+  const onUpdateCustomerMaterialNosFromReferenceTask = useCallback(
+    (targetIngestionId: string, referenceSource: CustomerMaterialReferenceSource) => {
       if (!targetIngestionId) return;
       const targetIngestion =
         ingestionsById[targetIngestionId] ?? (targetIngestionId === ingestionId ? ingestion : null);
@@ -3050,28 +3105,31 @@ export default function HomePage() {
         previewDraftsByIngestionRef.current[targetIngestionId] ?? targetIngestion.preview_data ?? null;
       if (!draft) return;
 
+      const referenceLabel = referenceSource === "source_spec" ? "识别原始规格" : "识别原始编码";
+      const referenceValue = (detail: OrderPreviewData["details"][number]) =>
+        referenceSource === "source_spec" ? detail.sourceProductSpec : detail.sourceMaterialCode;
       const eligibleCount = draft.details.filter((detail) =>
-        String(detail.sourceProductSpec ?? "").trim(),
+        String(referenceValue(detail) ?? "").trim(),
       ).length;
       const skippedCount = draft.details.length - eligibleCount;
       if (!eligibleCount) {
-        appendChat("system", "当前订单没有可用的识别原始规格，已有订单可能需要重新处理。");
+        appendChat("system", `当前订单没有可用的${referenceLabel}，已有订单可能需要重新处理。`);
         return;
       }
 
       const confirmed = window.confirm(
-        `将使用识别原始规格覆盖 ${eligibleCount} 行客户物料编码，并清空这些行当前的内部物料编码、名称、规格和牌号。之后需要重新匹配并重新确认，是否继续？`,
+        `将使用${referenceLabel}覆盖 ${eligibleCount} 行客户物料编码，并清空这些行当前的内部物料编码、名称、规格和牌号。之后需要重新匹配并重新确认，是否继续？`,
       );
       if (!confirmed) return;
 
       const nextPreview: OrderPreviewData = {
         ...draft,
         details: draft.details.map((detail) => {
-          const sourceProductSpec = String(detail.sourceProductSpec ?? "");
-          if (!sourceProductSpec.trim()) return detail;
+          const selectedReferenceValue = String(referenceValue(detail) ?? "");
+          if (!selectedReferenceValue.trim()) return detail;
           return {
             ...detail,
-            customerMaterialNo: sourceProductSpec,
+            customerMaterialNo: selectedReferenceValue,
             materialCode: "",
             productName: "",
             productSpec: "",
@@ -3082,7 +3140,7 @@ export default function HomePage() {
       onPreviewDraftChangeTask(targetIngestionId, nextPreview);
       appendChat(
         "system",
-        `已用原始规格更新 ${eligibleCount} 行客户物料编码，跳过 ${skippedCount} 行。请检查或修改后点击“重新匹配物料”。`,
+        `已用${referenceLabel}更新 ${eligibleCount} 行客户物料编码，跳过 ${skippedCount} 行。请检查或修改后点击“重新匹配物料”。`,
       );
     },
     [appendChat, ingestion, ingestionId, ingestionsById, onPreviewDraftChangeTask],
@@ -3512,9 +3570,10 @@ export default function HomePage() {
                       onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                       onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                       onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
-                      onFillCustomerMaterialNosFromSpecs={
+                      onUpdateCustomerMaterialNosFromReference={
                         canRemapCustomerMaterialsCard
-                          ? () => onFillCustomerMaterialNosFromSpecsTask(cardIngestionId)
+                          ? (referenceSource) =>
+                              onUpdateCustomerMaterialNosFromReferenceTask(cardIngestionId, referenceSource)
                           : undefined
                       }
                       onRemapCustomerMaterials={
@@ -3541,9 +3600,10 @@ export default function HomePage() {
                     onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                     onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                     onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
-                    onFillCustomerMaterialNosFromSpecs={
+                    onUpdateCustomerMaterialNosFromReference={
                       canRemapCustomerMaterialsCard
-                        ? () => onFillCustomerMaterialNosFromSpecsTask(cardIngestionId)
+                        ? (referenceSource) =>
+                            onUpdateCustomerMaterialNosFromReferenceTask(cardIngestionId, referenceSource)
                         : undefined
                     }
                     onRemapCustomerMaterials={
@@ -3757,9 +3817,10 @@ export default function HomePage() {
                         onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                         onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                         onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
-                        onFillCustomerMaterialNosFromSpecs={
+                        onUpdateCustomerMaterialNosFromReference={
                           canRemapCustomerMaterialsCard
-                            ? () => onFillCustomerMaterialNosFromSpecsTask(cardIngestionId)
+                            ? (referenceSource) =>
+                                onUpdateCustomerMaterialNosFromReferenceTask(cardIngestionId, referenceSource)
                             : undefined
                         }
                         onRemapCustomerMaterials={
@@ -3786,9 +3847,10 @@ export default function HomePage() {
                       onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                       onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                       onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
-                      onFillCustomerMaterialNosFromSpecs={
+                      onUpdateCustomerMaterialNosFromReference={
                         canRemapCustomerMaterialsCard
-                          ? () => onFillCustomerMaterialNosFromSpecsTask(cardIngestionId)
+                          ? (referenceSource) =>
+                              onUpdateCustomerMaterialNosFromReferenceTask(cardIngestionId, referenceSource)
                           : undefined
                       }
                       onRemapCustomerMaterials={
@@ -3945,7 +4007,7 @@ export default function HomePage() {
       onConfirmReprocessUpload,
       onCreateDraft,
       onCreateDraftTask,
-      onFillCustomerMaterialNosFromSpecsTask,
+      onUpdateCustomerMaterialNosFromReferenceTask,
       onPreviewDraftChangeTask,
       onPreviewDraftChange,
       onRemapCustomerMaterialsTask,
@@ -4618,9 +4680,10 @@ export default function HomePage() {
               onChange={onPreviewDraftChange}
               onConfirm={onConfirmPreview}
               onCreateDraft={onCreateDraft}
-              onFillCustomerMaterialNosFromSpecs={
+              onUpdateCustomerMaterialNosFromReference={
                 ingestion && isPendingQueueIngestion(ingestion)
-                  ? () => onFillCustomerMaterialNosFromSpecsTask(ingestionId ?? "")
+                  ? (referenceSource) =>
+                      onUpdateCustomerMaterialNosFromReferenceTask(ingestionId ?? "", referenceSource)
                   : undefined
               }
               onRemapCustomerMaterials={
@@ -4786,16 +4849,29 @@ export default function HomePage() {
                   type="file"
                   className="sr-only"
                   accept={uploadAcceptAttr}
+                  multiple
                   onChange={(e) => {
-                    const file = e.target.files?.[0] ?? null;
+                    const selectedFiles = Array.from(e.target.files ?? []);
                     e.target.value = "";
-                    if (!file) return;
-                    const precheck = precheckUploadFile(file);
-                    if (!precheck.ok) {
-                      appendChat("system", `${file.name}：${precheck.message}`);
-                      return;
+                    if (selectedFiles.length === 0) return;
+                    const acceptedFiles = selectedFiles.slice(0, MAX_UPLOAD_FILES_PER_BATCH);
+                    const ignoredCount = selectedFiles.length - acceptedFiles.length;
+                    if (ignoredCount > 0) {
+                      appendChat(
+                        "system",
+                        `每批最多上传 ${MAX_UPLOAD_FILES_PER_BATCH} 个文件，已选择前 ${MAX_UPLOAD_FILES_PER_BATCH} 个，其余 ${ignoredCount} 个未加入。`,
+                      );
                     }
-                    setStagedUploadFile(file);
+                    const validFiles: File[] = [];
+                    for (const file of acceptedFiles) {
+                      const precheck = precheckUploadFile(file);
+                      if (!precheck.ok) {
+                        appendChat("system", `${file.name}：${precheck.message}`);
+                        continue;
+                      }
+                      validFiles.push(file);
+                    }
+                    setStagedUploadFiles(validFiles);
                   }}
                 />
                 <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pb-[calc(16px+env(safe-area-inset-bottom))] sm:px-6 lg:px-8">
@@ -4804,12 +4880,19 @@ export default function HomePage() {
                       <div className="min-w-0 pr-16">
                         <div
                           className="truncate text-sm font-semibold text-slate-800 sm:text-base"
-                          title={stagedUploadFile?.name ?? "选择 PDF 文件或拖拽到窗口上传"}
+                          title={stagedUploadFileNames || "选择 PDF 文件或拖拽到窗口上传"}
                         >
-                          {stagedUploadFile?.name ?? "选择 PDF 文件或拖拽到窗口上传"}
+                          {stagedUploadFiles.length > 1
+                            ? `已选择 ${stagedUploadFiles.length} 个文件`
+                            : stagedUploadFiles[0]?.name ?? "选择 PDF 文件或拖拽到窗口上传"}
                         </div>
-                        <div className="mt-1 truncate text-xs text-slate-400 sm:text-sm sm:leading-4">
-                          支持拖拽上传，单个文件建议不超过 29MB
+                        <div
+                          className="mt-1 truncate text-xs text-slate-400 sm:text-sm sm:leading-4"
+                          title={stagedUploadFileNames || undefined}
+                        >
+                          {stagedUploadFiles.length > 0
+                            ? stagedUploadFileNames
+                            : `支持拖拽上传，每批最多 ${MAX_UPLOAD_FILES_PER_BATCH} 个，单个文件建议不超过 29MB`}
                         </div>
                       </div>
 
@@ -4828,9 +4911,17 @@ export default function HomePage() {
 
                         <button
                           type="button"
-                          aria-label="上传已选择的文件"
-                          title={stagedUploadFile ? "上传已选择的文件" : "请先选择文件"}
-                          disabled={!stagedUploadFile || isUploading}
+                          aria-label={
+                            stagedUploadFiles.length > 0
+                              ? `上传已选择的 ${stagedUploadFiles.length} 个文件`
+                              : "请先选择文件"
+                          }
+                          title={
+                            stagedUploadFiles.length > 0
+                              ? `上传已选择的 ${stagedUploadFiles.length} 个文件`
+                              : "请先选择文件"
+                          }
+                          disabled={stagedUploadFiles.length === 0 || isUploading}
                           onClick={() => void onSubmitStagedUpload()}
                           className="absolute bottom-[14px] right-5 flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white shadow-[0_8px_22px_rgba(37,99,235,0.3)] transition hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
                         >

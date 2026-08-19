@@ -45,6 +45,7 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
             details=[
                 OrderPreviewDetail(
                     materialCode="S01P019430",
+                    sourceMaterialCode="PDF-M001",
                     productName="压缩弹簧",
                     productSpec="左旋7*55*122*8.5",
                     sourceProductSpec="φ7×φ55×122（8.5圈）",
@@ -83,6 +84,7 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
     assert payload["order"]["rate"] == 1.0
     assert payload["details"][0]["materialCode"] == "S01P019430"
     assert payload["details"][0]["productSpec"] == "左旋7*55*122*8.5"
+    assert "sourceMaterialCode" not in payload["details"][0]
     assert "sourceProductSpec" not in payload["details"][0]
     assert "customerMaterialSpec" not in payload["details"][0]
 
@@ -103,6 +105,7 @@ def test_source_product_spec_persists_in_preview_context_but_not_erp_details() -
             details=[
                 OrderPreviewDetail(
                     materialCode="M001",
+                    sourceMaterialCode="PDF-M001\n原始编码第二行",
                     productSpec="ERP 规格",
                     sourceProductSpec="φ7.5 × φ1.5（8圈）\nInconel 750",
                     qty=2,
@@ -115,10 +118,15 @@ def test_source_product_spec_persists_in_preview_context_but_not_erp_details() -
     restored = row_to_ingestion(row)
 
     assert restored.preview_data is not None
+    assert restored.preview_data.details[0].sourceMaterialCode == "PDF-M001\n原始编码第二行"
     assert restored.preview_data.details[0].sourceProductSpec == "φ7.5 × φ1.5（8圈）\nInconel 750"
     resolved_fields = preview_to_resolved_fields(restored.preview_data)
     stored_details = json.loads(resolved_fields["datynk_details_json"])
+    assert "sourceMaterialCode" not in stored_details[0]
     assert "sourceProductSpec" not in stored_details[0]
+    assert json.loads(resolved_fields["source_material_codes_json"]) == [
+        "PDF-M001\n原始编码第二行"
+    ]
     assert json.loads(resolved_fields["source_product_specs_json"]) == [
         "φ7.5 × φ1.5（8圈）\nInconel 750"
     ]
@@ -127,6 +135,7 @@ def test_source_product_spec_persists_in_preview_context_but_not_erp_details() -
         restored.model_copy(update={"preview_data": None, "resolved_fields": resolved_fields})
     )
     assert rebuilt is not None
+    assert rebuilt.details[0].sourceMaterialCode == "PDF-M001\n原始编码第二行"
     assert rebuilt.details[0].sourceProductSpec == "φ7.5 × φ1.5（8圈）\nInconel 750"
 
 
@@ -165,6 +174,7 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
         details=[
             OrderPreviewDetail(
                 materialCode="N100",
+                sourceMaterialCode="原始编码 A",
                 productName="Old A",
                 productSpec="Spec A",
                 sourceProductSpec="原始规格 A",
@@ -172,6 +182,7 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
             ),
             OrderPreviewDetail(
                 materialCode=" n-200 ",
+                sourceMaterialCode="原始编码 B",
                 productName="Old B",
                 productSpec="Spec B",
                 sourceProductSpec="原始规格 B",
@@ -179,6 +190,7 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
             ),
             OrderPreviewDetail(
                 materialCode="X999",
+                sourceMaterialCode="原始编码 C",
                 productName="Old C",
                 productSpec="Spec C",
                 sourceProductSpec="原始规格 C",
@@ -208,18 +220,21 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
 
     assert mapped.details[0].customerMaterialNo == "N100"
     assert mapped.details[0].materialCode == "S01P019433"
+    assert mapped.details[0].sourceMaterialCode == "原始编码 A"
     assert mapped.details[0].productName == "Internal A"
     assert mapped.details[0].productSpec == "Internal Spec A"
     assert mapped.details[0].sourceProductSpec == "原始规格 A"
     assert mapped.details[0].ph == "55CrSiA"
     assert mapped.details[1].customerMaterialNo == "n-200"
     assert mapped.details[1].materialCode == "S01P019427"
+    assert mapped.details[1].sourceMaterialCode == "原始编码 B"
     assert mapped.details[1].productName == "Internal B"
     assert mapped.details[1].productSpec == "Internal Spec B"
     assert mapped.details[1].sourceProductSpec == "原始规格 B"
     assert mapped.details[1].ph == "60Si2Mn"
     assert mapped.details[2].customerMaterialNo == "X999"
     assert mapped.details[2].materialCode == ""
+    assert mapped.details[2].sourceMaterialCode == "原始编码 C"
     assert mapped.details[2].productName == ""
     assert mapped.details[2].productSpec == ""
     assert mapped.details[2].sourceProductSpec == "原始规格 C"

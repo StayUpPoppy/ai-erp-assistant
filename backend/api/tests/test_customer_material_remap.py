@@ -58,6 +58,7 @@ def _preview() -> OrderPreviewData:
             OrderPreviewDetail(
                 customerMaterialNo="A-100 D",
                 materialCode="OLD-1",
+                sourceMaterialCode="识别原始编码-1",
                 sourceProductSpec="φ7.5×φ1.5×18（8圈）, Inconel 750",
                 qty=2,
                 price=10,
@@ -65,6 +66,7 @@ def _preview() -> OrderPreviewData:
             OrderPreviewDetail(
                 customerMaterialNo="not-found",
                 materialCode="OLD-2",
+                sourceMaterialCode="识别原始编码-2",
                 productName="旧名称",
                 sourceProductSpec="原始未匹配规格",
                 qty=3,
@@ -142,9 +144,11 @@ def test_manual_remap_uses_customer_code_only_persists_results_and_reconfirmatio
         "映射规格",
         "映射牌号",
     )
+    assert first.sourceMaterialCode == "识别原始编码-1"
     assert first.sourceProductSpec == "φ7.5×φ1.5×18（8圈）, Inconel 750"
     assert second.customerMaterialNo == "not-found"
     assert (second.materialCode, second.productName, second.productSpec, second.ph) == ("", "", "", "")
+    assert second.sourceMaterialCode == "识别原始编码-2"
     assert second.sourceProductSpec == "原始未匹配规格"
     assert (second.qty, second.price) == (3, None)
     assert (third.materialCode, third.productName, third.qty) == ("A300", "保留名称", 4)

@@ -378,6 +378,7 @@ class OrderPreviewHeader(BaseModel):
 
 class OrderPreviewDetail(BaseModel):
     materialCode: str = ""
+    sourceMaterialCode: str = ""
     productName: str = ""
     productSpec: str = ""
     sourceProductSpec: str = ""
