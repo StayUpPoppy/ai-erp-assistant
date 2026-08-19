@@ -75,6 +75,7 @@ export interface OrderPreviewDetail {
   materialCode: string;
   productName: string;
   productSpec: string;
+  sourceProductSpec: string;
   ph: string;
   customerMaterialNo: string;
   qty?: number | null;

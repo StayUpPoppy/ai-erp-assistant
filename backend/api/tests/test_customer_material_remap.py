@@ -55,8 +55,20 @@ def _preview() -> OrderPreviewData:
             deliveryDate="2026-08-30",
         ),
         details=[
-            OrderPreviewDetail(customerMaterialNo="A-100 D", materialCode="OLD-1", qty=2, price=10),
-            OrderPreviewDetail(customerMaterialNo="not-found", materialCode="OLD-2", productName="旧名称", qty=3),
+            OrderPreviewDetail(
+                customerMaterialNo="A-100 D",
+                materialCode="OLD-1",
+                sourceProductSpec="φ7.5×φ1.5×18（8圈）, Inconel 750",
+                qty=2,
+                price=10,
+            ),
+            OrderPreviewDetail(
+                customerMaterialNo="not-found",
+                materialCode="OLD-2",
+                productName="旧名称",
+                sourceProductSpec="原始未匹配规格",
+                qty=3,
+            ),
             OrderPreviewDetail(customerMaterialNo="", materialCode="A300", productName="保留名称", qty=4),
         ],
     )
@@ -130,8 +142,10 @@ def test_manual_remap_uses_customer_code_only_persists_results_and_reconfirmatio
         "映射规格",
         "映射牌号",
     )
+    assert first.sourceProductSpec == "φ7.5×φ1.5×18（8圈）, Inconel 750"
     assert second.customerMaterialNo == "not-found"
     assert (second.materialCode, second.productName, second.productSpec, second.ph) == ("", "", "", "")
+    assert second.sourceProductSpec == "原始未匹配规格"
     assert (second.qty, second.price) == (3, None)
     assert (third.materialCode, third.productName, third.qty) == ("A300", "保留名称", 4)
     messages = [issue.message for issue in result.ingestion.issues]

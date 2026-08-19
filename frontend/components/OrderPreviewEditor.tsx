@@ -42,6 +42,7 @@ function emptyDetail(): OrderPreviewData["details"][number] {
     materialCode: "",
     productName: "",
     productSpec: "",
+    sourceProductSpec: "",
     ph: "",
     customerMaterialNo: "",
     qty: null,
@@ -108,6 +109,7 @@ export interface OrderPreviewEditorProps {
   onChange: (next: OrderPreviewData) => void;
   onConfirm: () => void | Promise<void>;
   onCreateDraft: () => void | Promise<void>;
+  onFillCustomerMaterialNosFromSpecs?: () => void | Promise<void>;
   onRemapCustomerMaterials?: () => void | Promise<void>;
   confirming: boolean;
   creatingDraft: boolean;
@@ -126,6 +128,7 @@ export function OrderPreviewEditor({
   onChange,
   onConfirm,
   onCreateDraft,
+  onFillCustomerMaterialNosFromSpecs,
   onRemapCustomerMaterials,
   confirming,
   creatingDraft,
@@ -279,6 +282,16 @@ export function OrderPreviewEditor({
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm font-semibold text-slate-900">订单明细</div>
           <div className="flex flex-wrap items-center gap-2">
+            {onFillCustomerMaterialNosFromSpecs && !readOnly ? (
+              <button
+                type="button"
+                disabled={remappingCustomerMaterials || confirming || creatingDraft}
+                onClick={() => void onFillCustomerMaterialNosFromSpecs()}
+                className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-1.5 text-sm font-medium text-violet-800 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                规格填入客户物料编码
+              </button>
+            ) : null}
             {onRemapCustomerMaterials && !readOnly ? (
               <button
                 type="button"

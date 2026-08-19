@@ -495,6 +495,7 @@ def _purchase_order_to_preview(order: PurchaseOrder, org_hint: str) -> OrderPrev
                 materialCode=item.material_code,
                 productName=item.material_name,
                 productSpec=item.specification,
+                sourceProductSpec=item.specification,
                 ph=item.material_texture,
                 customerMaterialNo="",
                 qty=_zero_to_none(qty),

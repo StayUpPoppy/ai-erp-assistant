@@ -87,6 +87,19 @@ def _line_items_from_resolved_fields(fields: Dict[str, str]) -> List[Dict[str, A
     return [dict(item) for item in parsed if isinstance(item, dict)]
 
 
+def _source_product_specs_from_resolved_fields(fields: Dict[str, str]) -> List[str]:
+    raw = (fields.get("source_product_specs_json") or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return ["" if value is None else str(value) for value in parsed]
+
+
 def build_order_preview_data(ingestion: IngestionResponse) -> OrderPreviewData | None:
     if ingestion.preview_data is not None:
         return ingestion.preview_data
@@ -108,7 +121,11 @@ def build_order_preview_data(ingestion: IngestionResponse) -> OrderPreviewData |
 
     details: List[OrderPreviewDetail] = []
     raw_items = _line_items_from_resolved_fields(fields)
-    for item in raw_items:
+    source_product_specs = _source_product_specs_from_resolved_fields(fields)
+    for index, item in enumerate(raw_items):
+        source_product_spec = item.get("sourceProductSpec")
+        if source_product_spec is None and index < len(source_product_specs):
+            source_product_spec = source_product_specs[index]
         details.append(
             OrderPreviewDetail(
                 materialCode=str(item.get("materialCode") or item.get("inventory_code") or item.get("material_code") or "").strip(),
@@ -116,6 +133,7 @@ def build_order_preview_data(ingestion: IngestionResponse) -> OrderPreviewData |
                 productSpec=str(
                     item.get("productSpec") or item.get("product_spec") or item.get("customerMaterialSpec") or ""
                 ).strip(),
+                sourceProductSpec="" if source_product_spec is None else str(source_product_spec),
                 ph=str(item.get("ph") or "").strip(),
                 customerMaterialNo=str(item.get("customerMaterialNo") or item.get("customer_material_no") or "").strip(),
                 qty=_float_or_none(item.get("qty") or item.get("quantity")),
@@ -135,6 +153,7 @@ def build_order_preview_data(ingestion: IngestionResponse) -> OrderPreviewData |
                 materialCode=_pick(fields, "materialCode", "material_code"),
                 productName=_pick(fields, "productName", "product_name"),
                 productSpec=_pick(fields, "productSpec", "product_spec", "customerMaterialSpec"),
+                sourceProductSpec=source_product_specs[0] if source_product_specs else "",
                 ph=_pick(fields, "ph", "material_ph"),
                 customerMaterialNo=_pick(fields, "customerMaterialNo", "customer_material_no"),
                 qty=_float_or_none(fields.get("qty") or fields.get("line_qty")),
@@ -417,6 +436,11 @@ def preview_to_resolved_fields(preview: OrderPreviewData) -> Dict[str, str]:
                 "remark": item.remark,
             }
         )
+    source_product_specs_json = (
+        json.dumps([item.sourceProductSpec for item in details], ensure_ascii=False)
+        if any(item.sourceProductSpec for item in details)
+        else ""
+    )
     return {
         "org": header.org,
         "customerName": header.customerName,
@@ -446,6 +470,7 @@ def preview_to_resolved_fields(preview: OrderPreviewData) -> Dict[str, str]:
         "taxAmount": "" if first.taxAmount is None else str(first.taxAmount),
         "gift": "true" if first.gift else "false",
         "remark": first.remark,
+        "source_product_specs_json": source_product_specs_json,
         "datynk_details_json": json.dumps(details_payload, ensure_ascii=False),
         "line_items_json": json.dumps(details_payload, ensure_ascii=False),
     }

@@ -380,6 +380,7 @@ class OrderPreviewDetail(BaseModel):
     materialCode: str = ""
     productName: str = ""
     productSpec: str = ""
+    sourceProductSpec: str = ""
     ph: str = ""
     customerMaterialNo: str = ""
     qty: Optional[float] = None

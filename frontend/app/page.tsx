@@ -3040,6 +3040,54 @@ export default function HomePage() {
     [userName],
   );
 
+  const onFillCustomerMaterialNosFromSpecsTask = useCallback(
+    (targetIngestionId: string) => {
+      if (!targetIngestionId) return;
+      const targetIngestion =
+        ingestionsById[targetIngestionId] ?? (targetIngestionId === ingestionId ? ingestion : null);
+      if (!targetIngestion || !isPendingQueueIngestion(targetIngestion)) return;
+      const draft =
+        previewDraftsByIngestionRef.current[targetIngestionId] ?? targetIngestion.preview_data ?? null;
+      if (!draft) return;
+
+      const eligibleCount = draft.details.filter((detail) =>
+        String(detail.sourceProductSpec ?? "").trim(),
+      ).length;
+      const skippedCount = draft.details.length - eligibleCount;
+      if (!eligibleCount) {
+        appendChat("system", "当前订单没有可用的识别原始规格，已有订单可能需要重新处理。");
+        return;
+      }
+
+      const confirmed = window.confirm(
+        `将使用识别原始规格覆盖 ${eligibleCount} 行客户物料编码，并清空这些行当前的内部物料编码、名称、规格和牌号。之后需要重新匹配并重新确认，是否继续？`,
+      );
+      if (!confirmed) return;
+
+      const nextPreview: OrderPreviewData = {
+        ...draft,
+        details: draft.details.map((detail) => {
+          const sourceProductSpec = String(detail.sourceProductSpec ?? "");
+          if (!sourceProductSpec.trim()) return detail;
+          return {
+            ...detail,
+            customerMaterialNo: sourceProductSpec,
+            materialCode: "",
+            productName: "",
+            productSpec: "",
+            ph: "",
+          };
+        }),
+      };
+      onPreviewDraftChangeTask(targetIngestionId, nextPreview);
+      appendChat(
+        "system",
+        `已用原始规格更新 ${eligibleCount} 行客户物料编码，跳过 ${skippedCount} 行。请检查或修改后点击“重新匹配物料”。`,
+      );
+    },
+    [appendChat, ingestion, ingestionId, ingestionsById, onPreviewDraftChangeTask],
+  );
+
   const onRemapCustomerMaterialsTask = useCallback(
     async (targetIngestionId: string) => {
       if (!targetIngestionId || remappingCustomerMaterialIngestionIds[targetIngestionId]) return;
@@ -3464,6 +3512,11 @@ export default function HomePage() {
                       onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                       onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                       onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                      onFillCustomerMaterialNosFromSpecs={
+                        canRemapCustomerMaterialsCard
+                          ? () => onFillCustomerMaterialNosFromSpecsTask(cardIngestionId)
+                          : undefined
+                      }
                       onRemapCustomerMaterials={
                         canRemapCustomerMaterialsCard
                           ? () => onRemapCustomerMaterialsTask(cardIngestionId)
@@ -3488,6 +3541,11 @@ export default function HomePage() {
                     onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                     onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                     onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                    onFillCustomerMaterialNosFromSpecs={
+                      canRemapCustomerMaterialsCard
+                        ? () => onFillCustomerMaterialNosFromSpecsTask(cardIngestionId)
+                        : undefined
+                    }
                     onRemapCustomerMaterials={
                       canRemapCustomerMaterialsCard
                         ? () => onRemapCustomerMaterialsTask(cardIngestionId)
@@ -3699,6 +3757,11 @@ export default function HomePage() {
                         onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                         onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                         onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                        onFillCustomerMaterialNosFromSpecs={
+                          canRemapCustomerMaterialsCard
+                            ? () => onFillCustomerMaterialNosFromSpecsTask(cardIngestionId)
+                            : undefined
+                        }
                         onRemapCustomerMaterials={
                           canRemapCustomerMaterialsCard
                             ? () => onRemapCustomerMaterialsTask(cardIngestionId)
@@ -3723,6 +3786,11 @@ export default function HomePage() {
                       onChange={(next) => onPreviewDraftChangeTask(cardIngestionId, next)}
                       onConfirm={() => onConfirmPreviewTask(cardIngestionId)}
                       onCreateDraft={() => onCreateDraftTask(cardIngestionId)}
+                      onFillCustomerMaterialNosFromSpecs={
+                        canRemapCustomerMaterialsCard
+                          ? () => onFillCustomerMaterialNosFromSpecsTask(cardIngestionId)
+                          : undefined
+                      }
                       onRemapCustomerMaterials={
                         canRemapCustomerMaterialsCard
                           ? () => onRemapCustomerMaterialsTask(cardIngestionId)
@@ -3877,6 +3945,7 @@ export default function HomePage() {
       onConfirmReprocessUpload,
       onCreateDraft,
       onCreateDraftTask,
+      onFillCustomerMaterialNosFromSpecsTask,
       onPreviewDraftChangeTask,
       onPreviewDraftChange,
       onRemapCustomerMaterialsTask,
@@ -4549,6 +4618,11 @@ export default function HomePage() {
               onChange={onPreviewDraftChange}
               onConfirm={onConfirmPreview}
               onCreateDraft={onCreateDraft}
+              onFillCustomerMaterialNosFromSpecs={
+                ingestion && isPendingQueueIngestion(ingestion)
+                  ? () => onFillCustomerMaterialNosFromSpecsTask(ingestionId ?? "")
+                  : undefined
+              }
               onRemapCustomerMaterials={
                 ingestion && isPendingQueueIngestion(ingestion)
                   ? () => onRemapCustomerMaterialsTask(ingestionId ?? "")

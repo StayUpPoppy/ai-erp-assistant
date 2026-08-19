@@ -55,7 +55,7 @@ def test_purchase_order_maps_to_order_preview_for_datynk_sale_order() -> None:
                 {
                     "material_code": "S01P019430",
                     "material_name": "压缩弹簧",
-                    "specification": "7*55*122",
+                    "specification": "φ7.5 × φ1.5×18（8圈）, Inconel 750\n原文第二行",
                     "material_texture": "60Si2Mn",
                     "quantity": 2,
                     "unit": "件",
@@ -76,6 +76,8 @@ def test_purchase_order_maps_to_order_preview_for_datynk_sale_order() -> None:
     assert preview.order.customerPoNo == "PO-001"
     assert preview.order.deliveryDate == "2026-06-01"
     assert preview.details[0].materialCode == "S01P019430"
+    assert preview.details[0].productSpec == "φ7.5 × φ1.5×18（8圈）, Inconel 750\n原文第二行"
+    assert preview.details[0].sourceProductSpec == "φ7.5 × φ1.5×18（8圈）, Inconel 750\n原文第二行"
     assert preview.details[0].amount == 20
     assert preview.details[0].allAmount == 22.6
     assert "图号/生产单号：DR-01" in preview.details[0].remark

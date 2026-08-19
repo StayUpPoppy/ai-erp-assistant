@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.erp_payload_preview import build_datynk_sale_order_payload
+from app.ingestion_db import new_row_from_ingestion, row_to_ingestion
 from app.order_preview import (
     apply_customer_material_mapping,
     apply_preview_to_ingestion,
@@ -11,6 +13,7 @@ from app.order_preview import (
     normalize_customer_material_code,
     preview_issues,
     preview_missing_keys,
+    preview_to_resolved_fields,
 )
 from app.schemas import IngestionResponse, IngestionStatus, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader
 
@@ -44,6 +47,7 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
                     materialCode="S01P019430",
                     productName="压缩弹簧",
                     productSpec="左旋7*55*122*8.5",
+                    sourceProductSpec="φ7×φ55×122（8.5圈）",
                     ph="60Si2Mn",
                     qty=1,
                     price=1.7699115044247788,
@@ -79,7 +83,51 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
     assert payload["order"]["rate"] == 1.0
     assert payload["details"][0]["materialCode"] == "S01P019430"
     assert payload["details"][0]["productSpec"] == "左旋7*55*122*8.5"
+    assert "sourceProductSpec" not in payload["details"][0]
     assert "customerMaterialSpec" not in payload["details"][0]
+
+
+def test_source_product_spec_persists_in_preview_context_but_not_erp_details() -> None:
+    ing = IngestionResponse(
+        ingestion_id="ing-source-spec",
+        file_id="file-source-spec",
+        file_hash="hash-source-spec",
+        user_id="u1",
+        org_id="英科1厂",
+        extract_version="v0",
+        model_version="m",
+        prompt_version="p",
+        status=IngestionStatus.NEED_USER_INPUT,
+        preview_data=OrderPreviewData(
+            order=OrderPreviewHeader(customerName="Acme"),
+            details=[
+                OrderPreviewDetail(
+                    materialCode="M001",
+                    productSpec="ERP 规格",
+                    sourceProductSpec="φ7.5 × φ1.5（8圈）\nInconel 750",
+                    qty=2,
+                )
+            ],
+        ),
+    )
+
+    row = new_row_from_ingestion(ing)
+    restored = row_to_ingestion(row)
+
+    assert restored.preview_data is not None
+    assert restored.preview_data.details[0].sourceProductSpec == "φ7.5 × φ1.5（8圈）\nInconel 750"
+    resolved_fields = preview_to_resolved_fields(restored.preview_data)
+    stored_details = json.loads(resolved_fields["datynk_details_json"])
+    assert "sourceProductSpec" not in stored_details[0]
+    assert json.loads(resolved_fields["source_product_specs_json"]) == [
+        "φ7.5 × φ1.5（8圈）\nInconel 750"
+    ]
+
+    rebuilt = build_order_preview_data(
+        restored.model_copy(update={"preview_data": None, "resolved_fields": resolved_fields})
+    )
+    assert rebuilt is not None
+    assert rebuilt.details[0].sourceProductSpec == "φ7.5 × φ1.5（8圈）\nInconel 750"
 
 
 def test_order_preview_keeps_tax_and_non_tax_fields_separate() -> None:
@@ -115,9 +163,27 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
     preview = OrderPreviewData(
         order=OrderPreviewHeader(customerName="Acme"),
         details=[
-            OrderPreviewDetail(materialCode="N100", productName="Old A", productSpec="Spec A", qty=1),
-            OrderPreviewDetail(materialCode=" n-200 ", productName="Old B", productSpec="Spec B", qty=2),
-            OrderPreviewDetail(materialCode="X999", productName="Old C", productSpec="Spec C", qty=3),
+            OrderPreviewDetail(
+                materialCode="N100",
+                productName="Old A",
+                productSpec="Spec A",
+                sourceProductSpec="原始规格 A",
+                qty=1,
+            ),
+            OrderPreviewDetail(
+                materialCode=" n-200 ",
+                productName="Old B",
+                productSpec="Spec B",
+                sourceProductSpec="原始规格 B",
+                qty=2,
+            ),
+            OrderPreviewDetail(
+                materialCode="X999",
+                productName="Old C",
+                productSpec="Spec C",
+                sourceProductSpec="原始规格 C",
+                qty=3,
+            ),
         ],
     )
     mapped, metrics, issues = apply_customer_material_mapping(
@@ -144,16 +210,19 @@ def test_customer_material_mapping_exact_and_normalized_match() -> None:
     assert mapped.details[0].materialCode == "S01P019433"
     assert mapped.details[0].productName == "Internal A"
     assert mapped.details[0].productSpec == "Internal Spec A"
+    assert mapped.details[0].sourceProductSpec == "原始规格 A"
     assert mapped.details[0].ph == "55CrSiA"
     assert mapped.details[1].customerMaterialNo == "n-200"
     assert mapped.details[1].materialCode == "S01P019427"
     assert mapped.details[1].productName == "Internal B"
     assert mapped.details[1].productSpec == "Internal Spec B"
+    assert mapped.details[1].sourceProductSpec == "原始规格 B"
     assert mapped.details[1].ph == "60Si2Mn"
     assert mapped.details[2].customerMaterialNo == "X999"
     assert mapped.details[2].materialCode == ""
     assert mapped.details[2].productName == ""
     assert mapped.details[2].productSpec == ""
+    assert mapped.details[2].sourceProductSpec == "原始规格 C"
     assert mapped.details[2].ph == ""
     assert mapped.details[2].qty == 3
     assert metrics == {"mapping_rows": 2, "matched": 2, "exact": 1, "normalized": 1, "unmatched": 1}
