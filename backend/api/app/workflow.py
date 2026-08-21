@@ -1034,7 +1034,8 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
                     path="order.customerName",
                     level="warning",
                     message=(
-                        f"客户名称 {customer_resolution.customer_name} 未精确匹配 ERP 客户主数据，请人工核对。"
+                        f"请确认系统识别的客户名称“{customer_resolution.customer_name}”"
+                        "是否与 ERP 客户对应表内的公司名称一致。"
                     ),
                 )
             )

@@ -271,6 +271,60 @@ def test_node_build_preview_resolves_external_supplier_when_model_marks_own_comp
         and "customer_candidate_source=model_supplier" in event.message
         for event in ing.audit_events
     )
+    assert not any(issue.path == "order.customerName" for issue in ing.issues)
+
+
+def test_node_build_preview_uses_plain_customer_warning_when_erp_exact_match_is_missing(monkeypatch):
+    from app.workflow import WorkflowState, _node_build_preview
+
+    external_customer = "无锡智能自控工程股份有限公司"
+
+    class CustomerLookupMissErp(MockErpClient):
+        def search_customers(self, org_id, keyword, page_num=1, page_size=20):
+            _ = org_id, keyword, page_num, page_size
+            return []
+
+        def get_customer_material_details_by_customer(self, customer_name):
+            _ = customer_name
+            return []
+
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(
+            org="英科1厂",
+            customerName=external_customer,
+            customerPoNo="PO-CUSTOMER-WARNING",
+            currency="CNY",
+            deliveryDate="2026-08-30",
+        ),
+        details=[OrderPreviewDetail(customerMaterialNo="CUST-001", productName="弹簧", qty=2)],
+    )
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setattr("app.workflow.build_order_preview_data", lambda _ingestion: preview.model_copy(deep=True))
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-19")
+    ing = _new_ingestion()
+    ing.org_id = "英科1厂"
+    ing.resolved_fields = {
+        "extracted_purchaser_name": external_customer,
+        "extracted_supplier_name": "浙江英科弹簧科技有限公司",
+    }
+    state: WorkflowState = {
+        "ingestion": ing,
+        "erp": CustomerLookupMissErp(),
+        "append_event": _append_event,
+        "mapping_metrics": {},
+        "document_text": "采购合同",
+    }
+
+    _node_build_preview(state)
+
+    assert any(
+        issue.path == "order.customerName"
+        and issue.level == "warning"
+        and issue.message
+        == "请确认系统识别的客户名称“无锡智能自控工程股份有限公司”是否与 ERP 客户对应表内的公司名称一致。"
+        for issue in ing.issues
+    )
 
 
 def test_node_build_preview_blanks_ambiguous_customer_and_skips_material_mapping(monkeypatch):

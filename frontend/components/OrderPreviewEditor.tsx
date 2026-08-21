@@ -43,6 +43,21 @@ const DETAIL_COLUMNS: Array<{
   { key: "remark", label: "备注" },
 ];
 
+function detailColumnWidth(key: keyof OrderPreviewData["details"][number]): string {
+  switch (key) {
+    case "materialCode":
+    case "ph":
+      return "min-w-[180px]";
+    case "productName":
+      return "min-w-[220px]";
+    case "productSpec":
+    case "customerMaterialNo":
+      return "min-w-[260px]";
+    default:
+      return "";
+  }
+}
+
 function emptyDetail(): OrderPreviewData["details"][number] {
   return {
     materialCode: "",
@@ -348,7 +363,10 @@ export function OrderPreviewEditor({
               <tr>
                 <th className="border-b border-slate-200 px-3 py-2 font-semibold">行</th>
                 {DETAIL_COLUMNS.map((column) => (
-                  <th key={column.key} className="border-b border-slate-200 px-3 py-2 font-semibold">
+                  <th
+                    key={column.key}
+                    className={["border-b border-slate-200 px-3 py-2 font-semibold", detailColumnWidth(column.key)].join(" ")}
+                  >
                     {column.label}
                     {column.required ? <span className="ml-1 text-red-600">*</span> : null}
                   </th>
@@ -362,8 +380,18 @@ export function OrderPreviewEditor({
                   <td className="border-b border-slate-100 px-3 py-2 font-mono text-slate-500">{index + 1}</td>
                   {DETAIL_COLUMNS.map((column) => {
                     const path = fieldPathForDetail(index, column.key);
+                    const value = stringify(detail[column.key]);
+                    const fullValue = column.type === "boolean" ? (Boolean(detail[column.key]) ? "是" : "否") : value || undefined;
                     return (
-                      <td key={String(column.key)} className={["border-b border-slate-100 px-2 py-2", missingPaths.has(path) ? "bg-red-50/50" : ""].join(" ")}>
+                      <td
+                        key={String(column.key)}
+                        title={fullValue}
+                        className={[
+                          "border-b border-slate-100 px-2 py-2",
+                          detailColumnWidth(column.key),
+                          missingPaths.has(path) ? "bg-red-50/50" : "",
+                        ].join(" ")}
+                      >
                         {column.type === "boolean" ? (
                           <label className="flex items-center justify-center pt-2">
                             <input
@@ -371,15 +399,17 @@ export function OrderPreviewEditor({
                               checked={Boolean(detail[column.key] as boolean)}
                               disabled={readOnly}
                               onChange={(event) => updateDetailField(index, column.key, event.target.checked)}
+                              title={fullValue}
                               className="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-300"
                             />
                           </label>
                         ) : (
                           <>
                             <input
-                              value={stringify(detail[column.key])}
+                              value={value}
                               disabled={readOnly}
                               onChange={(event) => updateDetailField(index, column.key, event.target.value)}
+                              title={fullValue}
                               className={[inputClass(path), "min-w-[7rem] px-2.5"].join(" ")}
                               placeholder={column.type === "number" ? "数字" : ""}
                             />

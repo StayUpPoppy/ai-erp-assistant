@@ -92,7 +92,7 @@ def _ingestion(status: IngestionStatus = IngestionStatus.VALIDATED) -> Ingestion
             PreviewIssue(
                 path="order.customerName",
                 level="warning",
-                message="客户名称 测试客户 未精确匹配 ERP 客户主数据，请人工核对。",
+                message="请确认系统识别的客户名称“测试客户”是否与 ERP 客户对应表内的公司名称一致。",
             ),
             PreviewIssue(
                 path="details[0].materialCode",
@@ -153,7 +153,10 @@ def test_manual_remap_uses_customer_code_only_persists_results_and_reconfirmatio
     assert (second.qty, second.price) == (3, None)
     assert (third.materialCode, third.productName, third.qty) == ("A300", "保留名称", 4)
     messages = [issue.message for issue in result.ingestion.issues]
-    assert any("客户名称 测试客户" in message for message in messages)
+    assert any(
+        "请确认系统识别的客户名称“测试客户”是否与 ERP 客户对应表内的公司名称一致。" == message
+        for message in messages
+    )
     assert not any("客户物料编码 OLD " in message for message in messages)
     assert any("客户物料编码 not-found " in message for message in messages)
     details_payload = json.loads(result.ingestion.resolved_fields["datynk_details_json"])
