@@ -86,6 +86,8 @@ class HealthResponse(BaseModel):
     qwen_vision_fallback_to_local: bool = True
     qwen_vision_include_local_text: bool = True
     qwen_vision_local_text_max_chars: int = 12000
+    english_po_enhanced_extraction_enabled: bool = True
+    english_po_enhanced_route_version: str = "en-po-semantic-v1"
     customer_own_company_aliases_configured: bool = False
     customer_own_company_aliases_valid: bool = True
     customer_own_company_aliases_count: int = 2
@@ -330,6 +332,10 @@ class MaterialItem(BaseModel):
     total_amount_with_tax: float = Field(default=0.0, description="单行含税金额")
     delivery_date: str = Field(default="", description="约定交货日期")
     drawing_number: str = Field(default="", description="图号/生产单号")
+    material_code_candidates: List["MaterialCodeCandidate"] = Field(
+        default_factory=list,
+        description="英文订单内部候选编码，仅供后端映射，不进入 ERP payload",
+    )
     evidence: Dict[str, Any] = Field(default_factory=dict, description="字段原文证据，按字段名记录 source_text/page/confidence")
     uncertain_fields: List[str] = Field(default_factory=list, description="本明细行中模型不确定的字段名")
 
@@ -347,6 +353,22 @@ class MaterialItem(BaseModel):
         return _parse_float_value(value)
 
 
+class MaterialCodeCandidate(BaseModel):
+    value: str = ""
+    kind: str = "material_code"
+    source_label: str = ""
+    page: int = 0
+    confidence: float = 0.0
+
+
+class OrganizationCandidate(BaseModel):
+    name: str = ""
+    role: str = "other"
+    source_label: str = ""
+    page: int = 0
+    confidence: float = 0.0
+
+
 class PurchaseOrder(BaseModel):
     """LLM 采购订单语义抽取结果。"""
 
@@ -359,6 +381,10 @@ class PurchaseOrder(BaseModel):
     delivery_address: str = Field(default="", description="送货收货地址")
     total_order_amount: float = Field(default=0.0, description="订单整体总金额")
     items: List[MaterialItem] = Field(default_factory=list, description="物料明细")
+    organization_candidates: List[OrganizationCandidate] = Field(
+        default_factory=list,
+        description="英文订单内部公司候选，仅供后端客户判定",
+    )
     evidence: Dict[str, Any] = Field(default_factory=dict, description="订单头字段原文证据，按字段名记录 source_text/page/confidence")
     uncertain_fields: List[str] = Field(default_factory=list, description="订单头中模型不确定的字段名")
     extraction_notes: List[str] = Field(default_factory=list, description="抽取过程中的非业务说明或风险备注")

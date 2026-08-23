@@ -45,6 +45,8 @@ def test_health_includes_tesseract_probe() -> None:
     assert isinstance(h.qwen_vision_fallback_to_local, bool)
     assert isinstance(h.qwen_vision_include_local_text, bool)
     assert isinstance(h.qwen_vision_local_text_max_chars, int)
+    assert isinstance(h.english_po_enhanced_extraction_enabled, bool)
+    assert isinstance(h.english_po_enhanced_route_version, str)
     assert isinstance(h.customer_own_company_aliases_configured, bool)
     assert isinstance(h.customer_own_company_aliases_valid, bool)
     assert isinstance(h.customer_own_company_aliases_count, int)

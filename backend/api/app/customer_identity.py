@@ -42,6 +42,7 @@ class OwnCompanyKeywordsConfig:
 class CustomerCandidate:
     name: str
     source: str
+    role: str = ""
 
 
 @dataclass(frozen=True)
@@ -230,19 +231,40 @@ def customer_identity_prompt_context(org_id: str) -> str:
     )
 
 
-def _candidate_list(purchaser_name: str, supplier_name: str) -> List[CustomerCandidate]:
+def _candidate_list(
+    purchaser_name: str,
+    supplier_name: str,
+    organization_candidates: Iterable[Any] | None = None,
+) -> List[CustomerCandidate]:
     result: List[CustomerCandidate] = []
     seen: set[str] = set()
-    for name, source in (
-        (purchaser_name, "model_purchaser"),
-        (supplier_name, "model_supplier"),
-    ):
+    raw_candidates: List[Tuple[Any, str, str]] = []
+    # 英文增强已将 purchaser/supplier 作为结构化候选写入，避免同一公司因旧主字段
+    # 被赋予错误角色而与 Buyer/Ship To 等候选产生假歧义。
+    if organization_candidates is None:
+        raw_candidates.extend(
+            [
+                (purchaser_name, "model_purchaser", "purchaser"),
+                (supplier_name, "model_supplier", "supplier"),
+            ]
+        )
+    for raw in organization_candidates or ():
+        if isinstance(raw, dict):
+            name = raw.get("name")
+            role = str(raw.get("role") or "other").strip().lower() or "other"
+            source_label = str(raw.get("source_label") or "").strip()
+        else:
+            name = getattr(raw, "name", "")
+            role = str(getattr(raw, "role", "other") or "other").strip().lower() or "other"
+            source_label = str(getattr(raw, "source_label", "") or "").strip()
+        raw_candidates.append((name, f"model_{role}" + (f"_{source_label}" if source_label else ""), role))
+    for name, source, role in raw_candidates:
         text = re.sub(r"\s+", " ", str(name or "")).strip()
         key = normalize_company_name(text)
         if not key or key in seen:
             continue
         seen.add(key)
-        result.append(CustomerCandidate(name=text, source=source))
+        result.append(CustomerCandidate(name=text, source=source, role=role))
     return result
 
 
@@ -258,12 +280,13 @@ def resolve_customer_identity(
     purchaser_name: str,
     supplier_name: str,
     erp: Any,
+    organization_candidates: Iterable[Any] | None = None,
 ) -> CustomerIdentityResolution:
     own_alias_keys = {normalize_company_name(alias) for alias in own_company_aliases(org_id)}
     own_keyword_keys = tuple(normalize_company_name(keyword) for keyword in own_company_keywords(org_id))
     external_candidates = [
         candidate
-        for candidate in _candidate_list(purchaser_name, supplier_name)
+        for candidate in _candidate_list(purchaser_name, supplier_name, organization_candidates)
         if normalize_company_name(candidate.name) not in own_alias_keys
         and not any(keyword in normalize_company_name(candidate.name) for keyword in own_keyword_keys)
     ]
@@ -307,7 +330,19 @@ def resolve_customer_identity(
             erp_lookup_failed=erp_lookup_failed,
             candidate_count=len(external_candidates),
         )
-    if not exact_candidates and len(external_candidates) == 1:
+    preferred_roles = {"buyer", "purchaser", "ordering_company"}
+    preferred_candidates = [candidate for candidate in external_candidates if candidate.role in preferred_roles]
+    if organization_candidates is not None and not exact_candidates and len(preferred_candidates) == 1:
+        candidate = preferred_candidates[0]
+        return CustomerIdentityResolution(
+            customer_name=candidate.name,
+            resolution_source="sole_external_buyer",
+            candidate_source=candidate.source,
+            erp_lookup_failed=erp_lookup_failed,
+            candidate_count=len(external_candidates),
+        )
+    # 中文当前路径没有扩展候选，保留原有“唯一外部公司”行为，防止回归。
+    if organization_candidates is None and not exact_candidates and len(external_candidates) == 1:
         candidate = external_candidates[0]
         return CustomerIdentityResolution(
             customer_name=candidate.name,

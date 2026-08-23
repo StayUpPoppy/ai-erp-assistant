@@ -11,6 +11,14 @@ from typing import Any, Dict, List, Optional
 from urllib import error, request
 
 from app.customer_identity import customer_identity_prompt_context
+from app.english_order_enhanced import (
+    ENGLISH_ORDER_EXTRACTION_RULES,
+    ENGLISH_PO_ROUTE_VERSION,
+    EnglishOrderRoute,
+    apply_english_raw_sources_to_preview,
+    detect_english_order_route,
+    save_english_extraction_candidates,
+)
 from app.llm_extract import _append_llm_quality_issues, _extract_json, _purchase_order_to_preview
 from app.order_preview import apply_preview_to_ingestion, preview_to_resolved_fields
 from app.schemas import DocType, IngestionResponse, OrderPreviewData, OrderPreviewDetail, PreviewIssue, PurchaseOrder
@@ -18,6 +26,7 @@ from app.schemas import DocType, IngestionResponse, OrderPreviewData, OrderPrevi
 logger = logging.getLogger("ai_erp_api")
 
 QWEN_VISION_PROMPT_VERSION = "qwen-vision-order-preview-v3-customer-identity"
+ENGLISH_QWEN_VISION_PROMPT_VERSION = f"qwen-vision-order-preview-{ENGLISH_PO_ROUTE_VERSION}"
 
 
 class QwenVisionError(RuntimeError):
@@ -43,6 +52,8 @@ class QwenVisionApplyResult:
     truncated: bool = False
     elapsed_ms: int = 0
     summary_text: str = ""
+    language_route: str = "zh_current"
+    header_signals: str = "none"
 
 
 def _env_truthy(name: str, default: bool = False) -> bool:
@@ -261,6 +272,21 @@ VISION_SYSTEM_PROMPT = (
 """.strip()
 )
 
+ENGLISH_VISION_SYSTEM_PROMPT = (
+    ORDER_EXTRACTION_SYSTEM_PROMPT
+    + "\n\n"
+    + ENGLISH_ORDER_EXTRACTION_RULES
+    + """
+
+视觉输入补充规则（英文增强）：
+- 直接依据图片可见内容抽取；本地解析文字只作为辅助，图片优先。
+- 不要因为原图没有中文而清空英文公司名称或英文地址。
+- material_code 表示订单上的原始客户物料编码，不转换为 ERP 内部物料编码。
+- Description、Specification/Spec、Material Grade/Grade/Alloy 必须分开填写；候选列表保留原始证据，不得替代主字段。
+- evidence.page 使用图片/PDF页码；confidence 范围为 0-1。
+""".strip()
+)
+
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _CHINESE_COMPANY_RE = re.compile(
     r"([\u4e00-\u9fff0-9０-９（）()·\-]{2,80}?(?:有限责任公司|股份有限公司|有限公司|公司|集团|厂))"
@@ -370,6 +396,7 @@ def _chat_completion_vision(
     org_id: str = "",
     local_text: Optional[str] = None,
     local_format: Optional[str] = None,
+    english_enhanced: bool = False,
 ) -> str:
     api_key = (os.getenv("QWEN_VISION_API_KEY") or "").strip()
     if not api_key:
@@ -402,7 +429,7 @@ def _chat_completion_vision(
     payload: Dict[str, Any] = {
         "model": qwen_vision_model_name(),
         "messages": [
-            {"role": "system", "content": VISION_SYSTEM_PROMPT},
+            {"role": "system", "content": ENGLISH_VISION_SYSTEM_PROMPT if english_enhanced else VISION_SYSTEM_PROMPT},
             {"role": "user", "content": content},
         ],
         "stream": False,
@@ -449,11 +476,12 @@ def _chat_completion_vision(
         raise QwenVisionError("qwen_vision_bad_response") from exc
 
 
-def _parse_purchase_order(raw_content: str) -> PurchaseOrder:
+def _parse_purchase_order(raw_content: str, *, english_enhanced: bool = False) -> PurchaseOrder:
     parsed = _extract_json(raw_content)
     if "purchase_order" in parsed and isinstance(parsed["purchase_order"], dict):
         parsed = parsed["purchase_order"]
-    return _prefer_chinese_header_fields(PurchaseOrder.model_validate(parsed))
+    purchase_order = PurchaseOrder.model_validate(parsed)
+    return purchase_order if english_enhanced else _prefer_chinese_header_fields(purchase_order)
 
 
 def _has_useful_detail(preview: OrderPreviewData) -> bool:
@@ -708,9 +736,12 @@ def _apply_purchase_order(
     *,
     truncated: bool,
     local_text: Optional[str] = None,
+    route: EnglishOrderRoute,
 ) -> str:
     ingestion.doc_type_hint = DocType.PO
     preview = _purchase_order_to_preview(purchase_order, ingestion.org_id)
+    if route.is_enhanced:
+        apply_english_raw_sources_to_preview(preview, purchase_order)
     _repair_qwen_material_grades(preview, local_text)
     _assert_useful_preview(preview)
     _append_llm_quality_issues(ingestion, purchase_order)
@@ -729,9 +760,17 @@ def _apply_purchase_order(
             "total_order_amount": "" if purchase_order.total_order_amount == 0 else str(purchase_order.total_order_amount),
         }
     )
+    for key in (
+        "english_order_language_route",
+        "english_order_header_signals",
+        "english_organization_candidates_json",
+        "english_material_code_candidates_json",
+    ):
+        ingestion.resolved_fields.pop(key, None)
+    save_english_extraction_candidates(fields, purchase_order, route)
     ingestion.resolved_fields.update({k: v for k, v in fields.items() if str(v).strip()})
     ingestion.model_version = qwen_vision_model_name()
-    ingestion.prompt_version = QWEN_VISION_PROMPT_VERSION
+    ingestion.prompt_version = ENGLISH_QWEN_VISION_PROMPT_VERSION if route.is_enhanced else QWEN_VISION_PROMPT_VERSION
     if truncated:
         ingestion.issues.append(
             PreviewIssue(path="qwen_vision", level="warning", message="Qwen视觉抽取只处理了PDF前几页，请人工核对是否存在遗漏明细。")
@@ -759,6 +798,7 @@ def try_apply_qwen_vision_preview(
     page_count = 0
     image_count = 0
     truncated = False
+    route = detect_english_order_route(local_text or "")
     try:
         images, page_count, truncated = _source_images(raw, file_name, content_type)
         image_count = len(images)
@@ -772,13 +812,20 @@ def try_apply_qwen_vision_preview(
             org_id=ingestion.org_id,
             local_text=local_text,
             local_format=local_format,
+            english_enhanced=route.is_enhanced,
         )
-        purchase_order = _parse_purchase_order(content)
-        summary_text = _apply_purchase_order(ingestion, purchase_order, truncated=truncated, local_text=local_text)
+        purchase_order = _parse_purchase_order(content, english_enhanced=route.is_enhanced)
+        summary_text = _apply_purchase_order(
+            ingestion,
+            purchase_order,
+            truncated=truncated,
+            local_text=local_text,
+            route=route,
+        )
         elapsed_ms = int((perf_counter() - started) * 1000)
         logger.info(
             "qwen_vision_preview_applied ingestion_id=%s model=%s pages=%s images=%s truncated=%s "
-            "elapsed_ms=%s items=%s thinking=%s",
+            "elapsed_ms=%s items=%s thinking=%s language_route=%s header_signals=%s",
             ingestion.ingestion_id,
             qwen_vision_model_name(),
             page_count,
@@ -787,6 +834,8 @@ def try_apply_qwen_vision_preview(
             elapsed_ms,
             len(purchase_order.items),
             int(qwen_vision_thinking_enabled()),
+            route.route,
+            route.audit_signals,
         )
         return QwenVisionApplyResult(
             attempted=True,
@@ -796,6 +845,8 @@ def try_apply_qwen_vision_preview(
             truncated=truncated,
             elapsed_ms=elapsed_ms,
             summary_text=summary_text,
+            language_route=route.route,
+            header_signals=route.audit_signals,
         )
     except Exception as exc:
         elapsed_ms = int((perf_counter() - started) * 1000)
@@ -817,4 +868,6 @@ def try_apply_qwen_vision_preview(
             images=image_count,
             truncated=truncated,
             elapsed_ms=elapsed_ms,
+            language_route=route.route,
+            header_signals=route.audit_signals,
         )

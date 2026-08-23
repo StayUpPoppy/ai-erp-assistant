@@ -36,6 +36,7 @@ from app.document_extract import (
     truncate_for_api,
 )
 from app.customer_identity import CustomerIdentityResolution, resolve_customer_identity
+from app.english_order_enhanced import load_material_candidate_groups, load_organization_candidates
 from app.erp_audit_log import append_erp_call_log_with_upstream
 from app.erp_client import ErpClientError, ErpClientProtocol, clear_last_upstream_meta
 from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus, OrderPreviewData, PreviewIssue
@@ -729,7 +730,8 @@ def _node_extract(state: WorkflowState) -> WorkflowState:
                     f"doc_type_hint={ing.doc_type_hint.value if ing.doc_type_hint else 'none'} "
                     f"pages={qwen_result.pages} images={qwen_result.images} truncated={int(qwen_result.truncated)} "
                     f"elapsed_ms={qwen_result.elapsed_ms} model={qwen_vision_model_name()} llm_passes=1 "
-                    f"thinking={int(qwen_vision_thinking_enabled())}",
+                    f"thinking={int(qwen_vision_thinking_enabled())} "
+                    f"language_route={qwen_result.language_route} header_signals={qwen_result.header_signals}",
                 )
                 return {
                     "missing": len(ing.missing_fields),
@@ -765,7 +767,9 @@ def _node_extract(state: WorkflowState) -> WorkflowState:
             f"{ing.doc_type_hint.value if ing.doc_type_hint else 'none'} llm_preview={metrics.get('llm_preview', 0)} "
             f"preview_score={_preview_completeness_score(_preview_for_scoring(ing))} "
             f"qwen_vision_attempted={int(state.get('qwen_vision_attempted', False))} llm_passes=1 "
-            f"thinking={int(llm_extract_thinking_enabled())}",
+            f"thinking={int(llm_extract_thinking_enabled())} "
+            f"language_route={ing.resolved_fields.get('english_order_language_route') or 'zh_current'} "
+            f"header_signals={ing.resolved_fields.get('english_order_header_signals') or 'none'}",
         )
         return metrics
 
@@ -999,11 +1003,14 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             ing.resolved_fields["extracted_purchaser_name"] = raw_purchaser_name
         if raw_supplier_name:
             ing.resolved_fields["extracted_supplier_name"] = raw_supplier_name
+        english_enhanced = (ing.resolved_fields.get("english_order_language_route") or "").strip() == "en_enhanced"
+        organization_candidates = load_organization_candidates(ing.resolved_fields) if english_enhanced else None
         customer_resolution: CustomerIdentityResolution = resolve_customer_identity(
             org_id=ing.org_id,
             purchaser_name=raw_purchaser_name,
             supplier_name=raw_supplier_name,
             erp=state["erp"],
+            organization_candidates=organization_candidates,
         )
         preview.order.customerName = customer_resolution.customer_name
         ing.resolved_fields["customerName"] = customer_resolution.customer_name
@@ -1109,7 +1116,12 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
                 ]
             else:
                 mapping_issues = []
-            preview, customer_material_metrics, detail_mapping_issues = apply_customer_material_mapping(preview, rows)
+            candidate_groups = load_material_candidate_groups(ing.resolved_fields, len(preview.details)) if english_enhanced else None
+            preview, customer_material_metrics, detail_mapping_issues = apply_customer_material_mapping(
+                preview,
+                rows,
+                candidate_groups=candidate_groups,
+            )
             mapping_issues.extend(detail_mapping_issues)
         else:
             customer_material_metrics = {"mapping_rows": 0, "matched": 0, "exact": 0, "normalized": 0, "unmatched": 0}
@@ -1128,7 +1140,9 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             f"customer_material matched={customer_material_metrics.get('matched', 0)} "
             f"exact={customer_material_metrics.get('exact', 0)} normalized={customer_material_metrics.get('normalized', 0)} "
             f"unmatched={customer_material_metrics.get('unmatched', 0)} "
-            f"rows={customer_material_metrics.get('mapping_rows', 0)}{customer_identity_audit}{order_date_audit}",
+            f"ambiguous={customer_material_metrics.get('ambiguous', 0)} "
+            f"rows={customer_material_metrics.get('mapping_rows', 0)} language_route="
+            f"{ing.resolved_fields.get('english_order_language_route') or 'zh_current'}{customer_identity_audit}{order_date_audit}",
         )
         return {
             "preview": 1,

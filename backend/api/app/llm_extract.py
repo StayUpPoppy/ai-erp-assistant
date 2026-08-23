@@ -8,6 +8,13 @@ from time import perf_counter
 from typing import Any, Dict, Optional
 
 from app.customer_identity import customer_identity_prompt_context
+from app.english_order_enhanced import (
+    ENGLISH_ORDER_EXTRACTION_RULES,
+    ENGLISH_PO_ROUTE_VERSION,
+    apply_english_raw_sources_to_preview,
+    detect_english_order_route,
+    save_english_extraction_candidates,
+)
 from app.llm_client import (
     chat_completion_json,
     llm_available,
@@ -65,6 +72,8 @@ SYSTEM_PROMPT = """你是制造业采购订单抽取引擎，只能依据用户�
 
 输出 JSON 结构：
 {"purchase_order":{"order_number":"","purchaser_name":"","supplier_name":"","order_date":"","payment_terms":"","tax_rate":0,"delivery_address":"","total_order_amount":0,"items":[{"material_code":"","material_name":"","specification":"","material_texture":"","quantity":0,"unit":"","unit_price_without_tax":0,"unit_price_with_tax":0,"total_amount":0,"total_amount_without_tax":0,"total_amount_with_tax":0,"delivery_date":"","drawing_number":"","evidence":{},"uncertain_fields":[]}],"evidence":{},"uncertain_fields":[],"extraction_notes":[]}}""".strip()
+
+ENGLISH_SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + ENGLISH_ORDER_EXTRACTION_RULES
 
 
 def _user_prompt(document_text: str) -> str:
@@ -551,6 +560,7 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
     if not document_text.strip():
         logger.info("llm_preview_skipped ingestion_id=%s reason=empty_document_text", ingestion.ingestion_id)
         return False
+    route = detect_english_order_route(document_text)
     rule_preview = build_order_preview_data(ingestion)
     try:
         llm_started = perf_counter()
@@ -558,7 +568,7 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
         input_chars = len(user_prompt)
         content = chat_completion_json(
             [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": ENGLISH_SYSTEM_PROMPT if route.is_enhanced else SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             timeout_seconds=_llm_extract_timeout_seconds(),
@@ -570,6 +580,8 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
             parsed = parsed["purchase_order"]
         purchase_order = PurchaseOrder.model_validate(parsed)
         preview = _purchase_order_to_preview(purchase_order, ingestion.org_id)
+        if route.is_enhanced:
+            apply_english_raw_sources_to_preview(preview, purchase_order)
         _preserve_rule_material_code_completions(rule_preview, preview)
     except Exception as exc:
         logger.warning("llm_preview_failed ingestion_id=%s err=%s", ingestion.ingestion_id, exc)
@@ -606,11 +618,19 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
             "total_order_amount": "" if purchase_order.total_order_amount == 0 else str(purchase_order.total_order_amount),
         }
     )
+    for key in (
+        "english_order_language_route",
+        "english_order_header_signals",
+        "english_organization_candidates_json",
+        "english_material_code_candidates_json",
+    ):
+        ingestion.resolved_fields.pop(key, None)
+    save_english_extraction_candidates(fields, purchase_order, route)
     ingestion.resolved_fields.update({k: v for k, v in fields.items() if str(v).strip()})
     ingestion.model_version = llm_model_name()
-    ingestion.prompt_version = llm_prompt_version()
+    ingestion.prompt_version = f"{llm_prompt_version()}-{ENGLISH_PO_ROUTE_VERSION}" if route.is_enhanced else llm_prompt_version()
     logger.info(
-        "llm_preview_applied ingestion_id=%s model=%s items=%s input_chars=%s source_chars=%s elapsed_ms=%s json_repaired=%s",
+        "llm_preview_applied ingestion_id=%s model=%s items=%s input_chars=%s source_chars=%s elapsed_ms=%s json_repaired=%s language_route=%s header_signals=%s",
         ingestion.ingestion_id,
         ingestion.model_version,
         len(purchase_order.items),
@@ -618,5 +638,7 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
         len(document_text),
         elapsed_ms,
         int(repaired_json),
+        route.route,
+        route.audit_signals,
     )
     return True

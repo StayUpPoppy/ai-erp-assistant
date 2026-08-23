@@ -251,11 +251,57 @@ def normalize_customer_material_code(value: Any) -> str:
     return re.sub(r"[\s\-_./\\,，、。]+", "", text)
 
 
+def _candidate_match(
+    candidates: Iterable[Dict[str, Any]],
+    exact_index: Dict[str, Dict[str, str]],
+    normalized_index: Dict[str, Dict[str, str]],
+    duplicate_normalized: set[str],
+) -> Tuple[Dict[str, str] | None, str, str, List[str]]:
+    """按英文订单候选的既定优先级找到唯一 ERP 物料。"""
+    cleaned: List[Dict[str, str]] = []
+    for candidate in candidates:
+        value = str(candidate.get("value") or "").strip()
+        if not value:
+            continue
+        kind = str(candidate.get("kind") or "material_code").strip() or "material_code"
+        cleaned.append({"value": value, "kind": kind})
+
+    phases = (
+        ("exact", {"material_code"}),
+        ("exact", {"material_code_with_revision"}),
+        ("normalized", {"material_code", "material_code_with_revision"}),
+        ("exact", {"specification"}),
+        ("normalized", {"specification"}),
+    )
+    for method, accepted_kinds in phases:
+        hits: List[Tuple[str, Dict[str, str]]] = []
+        for candidate in cleaned:
+            if candidate["kind"] not in accepted_kinds:
+                continue
+            if method == "exact":
+                hit = exact_index.get(candidate["value"])
+            else:
+                normalized = normalize_customer_material_code(candidate["value"])
+                hit = normalized_index.get(normalized) if normalized and normalized not in duplicate_normalized else None
+            if hit is not None:
+                hits.append((candidate["value"], hit))
+        if not hits:
+            continue
+        material_numbers = {str(hit.get("materialNumber") or "").strip() for _, hit in hits}
+        material_numbers.discard("")
+        if len(material_numbers) == 1:
+            value, hit = hits[0]
+            return hit, method, value, []
+        return None, "ambiguous", "", [value for value, _ in hits]
+    return None, "", "", []
+
+
 def apply_customer_material_mapping(
     preview: OrderPreviewData,
     mapping_details: Iterable[Dict[str, Any]],
     *,
     use_material_code_fallback: bool = True,
+    candidate_groups: List[List[Dict[str, Any]]] | None = None,
 ) -> Tuple[OrderPreviewData, Dict[str, int], List[PreviewIssue]]:
     exact_index: Dict[str, Dict[str, str]] = {}
     normalized_index: Dict[str, Dict[str, str]] = {}
@@ -282,6 +328,7 @@ def apply_customer_material_mapping(
     normalized = 0
     unmatched = 0
     skipped = 0
+    ambiguous = 0
     issues: List[PreviewIssue] = []
     next_details: List[OrderPreviewDetail] = []
 
@@ -291,18 +338,60 @@ def apply_customer_material_mapping(
             or (detail.materialCode if use_material_code_fallback else "")
             or ""
         ).strip()
+        candidates = candidate_groups[idx] if candidate_groups is not None and idx < len(candidate_groups) else []
+        candidate_raw_values = [str(candidate.get("value") or "").strip() for candidate in candidates if str(candidate.get("value") or "").strip()]
+        if not raw_code and candidate_raw_values:
+            raw_code = candidate_raw_values[0]
         if not raw_code:
             skipped += 1
             next_details.append(detail)
             continue
 
-        hit = exact_index.get(raw_code)
-        method = "exact"
-        if hit is None:
-            norm = normalize_customer_material_code(raw_code)
-            if norm and norm not in duplicate_normalized:
-                hit = normalized_index.get(norm)
-                method = "normalized"
+        ambiguous_values: List[str] = []
+        if candidates:
+            hit, method, matched_code, ambiguous_values = _candidate_match(
+                candidates,
+                exact_index,
+                normalized_index,
+                duplicate_normalized,
+            )
+            if hit is not None:
+                raw_code = matched_code
+        else:
+            hit = exact_index.get(raw_code)
+            method = "exact"
+            if hit is None:
+                norm = normalize_customer_material_code(raw_code)
+                if norm and norm not in duplicate_normalized:
+                    hit = normalized_index.get(norm)
+                    method = "normalized"
+
+        if method == "ambiguous":
+            ambiguous += 1
+            unmatched += 1
+            shown_values = "、".join(dict.fromkeys(ambiguous_values))
+            issues.append(
+                PreviewIssue(
+                    path=f"details[{idx}].materialCode",
+                    level="error",
+                    message=(
+                        f"客户物料编码候选（{shown_values}）匹配到多个 ERP 内部物料，"
+                        "请人工选择或修改客户物料编码后重新匹配。"
+                    ),
+                )
+            )
+            next_details.append(
+                detail.model_copy(
+                    update={
+                        "customerMaterialNo": raw_code,
+                        "materialCode": "",
+                        "productName": "",
+                        "productSpec": "",
+                        "ph": "",
+                    }
+                )
+            )
+            continue
 
         if hit is None:
             unmatched += 1
@@ -354,6 +443,8 @@ def apply_customer_material_mapping(
         "normalized": normalized,
         "unmatched": unmatched,
     }
+    if candidate_groups is not None:
+        metrics["ambiguous"] = ambiguous
     if not use_material_code_fallback:
         metrics["skipped"] = skipped
     return preview.model_copy(update={"details": next_details}), metrics, issues
