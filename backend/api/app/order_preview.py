@@ -251,6 +251,33 @@ def normalize_customer_material_code(value: Any) -> str:
     return re.sub(r"[\s\-_./\\,，、。]+", "", text)
 
 
+def preserve_customer_material_numbers_from_sources(preview: OrderPreviewData) -> Tuple[OrderPreviewData, int]:
+    """客户未确定时，将 PDF 原始物料编码移入客户物料编码供后续重新匹配。"""
+    preserved = 0
+    details: List[OrderPreviewDetail] = []
+    for detail in preview.details:
+        if str(detail.customerMaterialNo or "").strip():
+            details.append(detail)
+            continue
+        raw_value = detail.sourceMaterialCode
+        if not str(raw_value or "").strip():
+            raw_value = detail.materialCode
+        raw_code = str(raw_value or "").strip()
+        if not raw_code:
+            details.append(detail)
+            continue
+        preserved += 1
+        details.append(
+            detail.model_copy(
+                update={
+                    "customerMaterialNo": raw_code,
+                    "materialCode": "",
+                }
+            )
+        )
+    return preview.model_copy(update={"details": details}), preserved
+
+
 def _candidate_match(
     candidates: Iterable[Dict[str, Any]],
     exact_index: Dict[str, Dict[str, str]],

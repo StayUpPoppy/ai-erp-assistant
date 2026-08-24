@@ -387,6 +387,74 @@ def test_node_build_preview_blanks_ambiguous_customer_and_skips_material_mapping
     assert any("customer_resolution=ambiguous" in event.message for event in ing.audit_events)
 
 
+def test_node_build_preview_preserves_source_codes_when_customer_is_ambiguous(monkeypatch):
+    from app.workflow import WorkflowState, _node_build_preview
+
+    class AmbiguousErp(MockErpClient):
+        def __init__(self):
+            self.material_calls = 0
+
+        def search_customers(self, org_id, keyword, page_num=1, page_size=20):
+            _ = org_id, keyword, page_num, page_size
+            return []
+
+        def get_customer_material_details_by_customer(self, customer_name):
+            _ = customer_name
+            self.material_calls += 1
+            return []
+
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(
+            org="英科1厂",
+            customerName="候选客户一有限公司",
+            customerPoNo="PO-CUSTOMER-RAW-CODE",
+            currency="CNY",
+            deliveryDate="2026-08-30",
+        ),
+        details=[
+            OrderPreviewDetail(sourceMaterialCode="  98S00H-720015JU/HQU3  ", materialCode="RAW-1", productName="弹簧", qty=10),
+            OrderPreviewDetail(sourceMaterialCode="", materialCode="98S00E-720025JT/HQU3", productName="弹簧", qty=12),
+            OrderPreviewDetail(customerMaterialNo="MANUAL-KEEP", sourceMaterialCode="SOURCE-IGNORE", materialCode="RAW-3", qty=3),
+        ],
+    )
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setattr("app.workflow.build_order_preview_data", lambda _ingestion: preview.model_copy(deep=True))
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-19")
+    ing = _new_ingestion()
+    ing.org_id = "英科1厂"
+    ing.resolved_fields = {
+        "extracted_purchaser_name": "候选客户一有限公司",
+        "extracted_supplier_name": "候选客户二有限公司",
+    }
+    erp = AmbiguousErp()
+    state: WorkflowState = {
+        "ingestion": ing,
+        "erp": erp,
+        "append_event": _append_event,
+        "mapping_metrics": {},
+        "document_text": "采购合同",
+    }
+
+    _node_build_preview(state)
+
+    assert ing.preview_data is not None
+    assert ing.preview_data.order.customerName == ""
+    assert erp.material_calls == 0
+    assert [detail.customerMaterialNo for detail in ing.preview_data.details] == [
+        "98S00H-720015JU/HQU3",
+        "98S00E-720025JT/HQU3",
+        "MANUAL-KEEP",
+    ]
+    assert [detail.materialCode for detail in ing.preview_data.details] == ["", "", "RAW-3"]
+    assert ing.resolved_fields["materialCode"] == ""
+    assert ing.resolved_fields["material_code"] == ""
+    assert ing.resolved_fields["customerMaterialNo"] == "98S00H-720015JU/HQU3"
+    assert '"customerMaterialNo": "98S00E-720025JT/HQU3"' in ing.resolved_fields["line_items_json"]
+    assert "customerName" in ing.missing_fields
+    assert any("raw_preserved=2" in event.message for event in ing.audit_events)
+
+
 def test_node_map_continues_when_erp_search_raises():
     """主数据映射阶段：单个 ERP 查询失败时降级为空列表，避免简历等非单据 PDF 因上游 5xx 整单失败。"""
     from app.erp_client import ErpClientError, MockErpClient

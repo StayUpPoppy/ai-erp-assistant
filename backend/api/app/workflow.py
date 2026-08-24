@@ -43,7 +43,13 @@ from app.schemas import DocType, ErrorCode, IngestionResponse, IngestionStatus, 
 from app.extraction_profile import apply_field_aliases, get_profile, refresh_ingestion_required_keys
 from app.llm_extract import try_apply_llm_preview
 from app.llm_client import llm_extract_thinking_enabled
-from app.order_preview import apply_customer_material_mapping, apply_preview_to_ingestion, build_order_preview_data
+from app.order_preview import (
+    apply_customer_material_mapping,
+    apply_preview_to_ingestion,
+    build_order_preview_data,
+    preserve_customer_material_numbers_from_sources,
+    preview_to_resolved_fields,
+)
 from app.qwen_vision_extract import (
     qwen_vision_fallback_to_local,
     qwen_vision_max_pdf_pages,
@@ -1124,7 +1130,30 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             )
             mapping_issues.extend(detail_mapping_issues)
         else:
-            customer_material_metrics = {"mapping_rows": 0, "matched": 0, "exact": 0, "normalized": 0, "unmatched": 0}
+            preview, raw_preserved = preserve_customer_material_numbers_from_sources(preview)
+            # apply_preview_to_ingestion 只写 preview_data；这里仅同步本功能需要的
+            # 明细字段，避免将既有解析文本（例如 ``line_qty=10``）重新序列化为
+            # ``10.0``。保证刷新或数据库重载后仍能显示已移动的客户物料编码，
+            # 且内部物料编码不会恢复。
+            preview_fields = preview_to_resolved_fields(preview)
+            for key in (
+                "materialCode",
+                "material_code",
+                "customerMaterialNo",
+                "source_material_codes_json",
+                "source_product_specs_json",
+                "datynk_details_json",
+                "line_items_json",
+            ):
+                ing.resolved_fields[key] = preview_fields[key]
+            customer_material_metrics = {
+                "mapping_rows": 0,
+                "matched": 0,
+                "exact": 0,
+                "normalized": 0,
+                "unmatched": 0,
+                "raw_preserved": raw_preserved,
+            }
             mapping_issues = []
         apply_preview_to_ingestion(ing, preview)
         _append_parse_warnings(ing)
@@ -1141,6 +1170,7 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             f"exact={customer_material_metrics.get('exact', 0)} normalized={customer_material_metrics.get('normalized', 0)} "
             f"unmatched={customer_material_metrics.get('unmatched', 0)} "
             f"ambiguous={customer_material_metrics.get('ambiguous', 0)} "
+            f"raw_preserved={customer_material_metrics.get('raw_preserved', 0)} "
             f"rows={customer_material_metrics.get('mapping_rows', 0)} language_route="
             f"{ing.resolved_fields.get('english_order_language_route') or 'zh_current'}{customer_identity_audit}{order_date_audit}",
         )
@@ -1152,6 +1182,7 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             "customer_material_matched": customer_material_metrics.get("matched", 0),
             "customer_material_exact": customer_material_metrics.get("exact", 0),
             "customer_material_normalized": customer_material_metrics.get("normalized", 0),
+            "customer_material_raw_preserved": customer_material_metrics.get("raw_preserved", 0),
             "customer_material_unmatched": customer_material_metrics.get("unmatched", 0),
             "preview_header_signals": preview_metrics.get("header_signals", 0),
             "preview_valid_detail_rows": preview_metrics.get("valid_detail_rows", 0),

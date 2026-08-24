@@ -149,7 +149,8 @@ def test_process_ingestion_parses_text_object_when_bytes_available(monkeypatch):
     assert result.resolved_fields.get("order_date") == "2026-08-09"
     assert result.resolved_fields.get("currency") == "CNY"
     assert result.resolved_fields.get("vendor_code") == "V001"
-    assert result.resolved_fields.get("material_code") == "M001"
+    assert result.resolved_fields.get("material_code") == ""
+    assert result.resolved_fields.get("customerMaterialNo") == "M001"
     assert result.resolved_fields.get("line_qty") == "10"
     assert result.missing_fields
     assert len(result.vendor_candidates) >= 1
@@ -192,7 +193,8 @@ def test_process_ingestion_rebuilds_stale_preview_data(monkeypatch):
     assert result.preview_data is not None
     assert result.preview_data.order.orderDate == "2026-08-09"
     assert result.preview_data.order.deliveryDate == "2026-05-06"
-    assert result.preview_data.details[0].materialCode == "M001"
+    assert result.preview_data.details[0].customerMaterialNo == "M001"
+    assert result.preview_data.details[0].materialCode == ""
     assert result.preview_data.details[0].qty == 10
 
 

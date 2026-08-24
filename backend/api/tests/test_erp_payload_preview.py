@@ -11,11 +11,82 @@ from app.order_preview import (
     apply_preview_to_ingestion,
     build_order_preview_data,
     normalize_customer_material_code,
+    preserve_customer_material_numbers_from_sources,
     preview_issues,
     preview_missing_keys,
     preview_to_resolved_fields,
 )
 from app.schemas import IngestionResponse, IngestionStatus, OrderPreviewData, OrderPreviewDetail, OrderPreviewHeader
+
+
+def test_preserve_customer_material_numbers_from_sources_moves_only_the_material_code() -> None:
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(customerName=""),
+        details=[
+            OrderPreviewDetail(
+                customerMaterialNo="",
+                sourceMaterialCode="  98S00H-720015JU/HQU3  ",
+                materialCode="INTERNAL-IGNORED",
+                productName="Spring A",
+                productSpec="Spec A",
+                ph="X750",
+                qty=10,
+                price=20,
+            ),
+            OrderPreviewDetail(
+                customerMaterialNo="",
+                sourceMaterialCode="   ",
+                materialCode="98S00E-720025JT/HQU3",
+                productName="Spring B",
+                productSpec="Spec B",
+                ph="718",
+                qty=12,
+            ),
+            OrderPreviewDetail(customerMaterialNo="MANUAL-KEEP", sourceMaterialCode="SOURCE-IGNORE", materialCode="M-3", qty=3),
+            OrderPreviewDetail(customerMaterialNo="", sourceMaterialCode="", materialCode="", qty=4),
+        ],
+    )
+
+    preserved, count = preserve_customer_material_numbers_from_sources(preview)
+
+    assert count == 2
+    assert [detail.customerMaterialNo for detail in preserved.details] == [
+        "98S00H-720015JU/HQU3",
+        "98S00E-720025JT/HQU3",
+        "MANUAL-KEEP",
+        "",
+    ]
+    first = preserved.details[0]
+    assert (first.materialCode, first.productName, first.productSpec, first.ph, first.qty, first.price) == (
+        "",
+        "Spring A",
+        "Spec A",
+        "X750",
+        10,
+        20,
+    )
+
+    ingestion = IngestionResponse(
+        ingestion_id="ing-preserve-customer-material",
+        file_id="file",
+        file_hash="hash",
+        user_id="user",
+        org_id="英科1厂",
+        extract_version="v0",
+        model_version="model",
+        prompt_version="prompt",
+        status=IngestionStatus.NEED_USER_INPUT,
+        resolved_fields=preview_to_resolved_fields(preserved),
+    )
+    rebuilt = build_order_preview_data(ingestion)
+    assert rebuilt is not None
+    assert [detail.customerMaterialNo for detail in rebuilt.details] == [
+        "98S00H-720015JU/HQU3",
+        "98S00E-720025JT/HQU3",
+        "MANUAL-KEEP",
+        "",
+    ]
+    assert [detail.materialCode for detail in rebuilt.details] == ["", "", "M-3", ""]
 
 
 def test_datynk_payload_preview_matches_order_interface_fields() -> None:
