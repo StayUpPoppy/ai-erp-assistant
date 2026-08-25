@@ -90,10 +90,10 @@ class HealthResponse(BaseModel):
     english_po_enhanced_route_version: str = "en-po-semantic-v1"
     customer_own_company_aliases_configured: bool = False
     customer_own_company_aliases_valid: bool = True
-    customer_own_company_aliases_count: int = 2
+    customer_own_company_aliases_count: int = 3
     customer_own_company_keywords_configured: bool = False
     customer_own_company_keywords_valid: bool = True
-    customer_own_company_keywords_count: int = 2
+    customer_own_company_keywords_count: int = 3
     erp_client_mode: str = "mock"
     erp_sale_order_page_enabled: bool = False
     erp_customer_page_enabled: bool = False

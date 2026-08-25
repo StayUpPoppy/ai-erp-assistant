@@ -34,15 +34,15 @@ def test_default_aliases_and_health_do_not_expose_names(monkeypatch):
     keywords = own_company_keywords("英科1厂")
     health = customer_identity_health_payload()
 
-    assert aliases == ("浙江英科弹簧科技有限公司", "浙江英科弹簧科技")
-    assert keywords == ("yingke", "incospring")
+    assert aliases == ("浙江英科弹簧科技有限公司", "浙江英科弹簧科技", "英科")
+    assert keywords == ("yingke", "incospring", "浙江英科")
     assert health == {
         "customer_own_company_aliases_configured": False,
         "customer_own_company_aliases_valid": True,
-        "customer_own_company_aliases_count": 2,
+        "customer_own_company_aliases_count": 3,
         "customer_own_company_keywords_configured": False,
         "customer_own_company_keywords_valid": True,
-        "customer_own_company_keywords_count": 2,
+        "customer_own_company_keywords_count": 3,
     }
     assert "浙江英科" not in str(health)
     assert "yingke" not in str(health)
@@ -56,6 +56,7 @@ def test_org_aliases_merge_with_defaults_and_invalid_json_falls_back(monkeypatch
     assert own_company_aliases("英科1厂") == (
         "浙江英科弹簧科技有限公司",
         "浙江英科弹簧科技",
+        "英科",
         "英科集团",
         "英科一厂有限公司",
     )
@@ -64,7 +65,7 @@ def test_org_aliases_merge_with_defaults_and_invalid_json_falls_back(monkeypatch
     health = customer_identity_health_payload()
     assert health["customer_own_company_aliases_configured"] is True
     assert health["customer_own_company_aliases_valid"] is False
-    assert own_company_aliases("英科1厂") == ("浙江英科弹簧科技有限公司", "浙江英科弹簧科技")
+    assert own_company_aliases("英科1厂") == ("浙江英科弹簧科技有限公司", "浙江英科弹簧科技", "英科")
 
 
 def test_org_keywords_merge_with_defaults_and_invalid_json_falls_back(monkeypatch):
@@ -75,6 +76,7 @@ def test_org_keywords_merge_with_defaults_and_invalid_json_falls_back(monkeypatc
     assert own_company_keywords("英科1厂") == (
         "yingke",
         "incospring",
+        "浙江英科",
         "global brand",
         "factory-brand",
     )
@@ -83,7 +85,7 @@ def test_org_keywords_merge_with_defaults_and_invalid_json_falls_back(monkeypatc
     health = customer_identity_health_payload()
     assert health["customer_own_company_keywords_configured"] is True
     assert health["customer_own_company_keywords_valid"] is False
-    assert own_company_keywords("英科1厂") == ("yingke", "incospring")
+    assert own_company_keywords("英科1厂") == ("yingke", "incospring", "浙江英科")
 
 
 def test_company_normalization_handles_unicode_spaces_and_punctuation():
@@ -126,6 +128,46 @@ def test_external_purchaser_is_kept_and_name_containing_yingke_is_not_fuzzy_excl
     assert result.customer_name == external
     assert result.candidate_source == "model_purchaser"
     assert result.resolution_source == "erp_exact"
+
+
+def test_short_own_alias_and_zhejiang_yingke_keyword_filter_without_broad_yingke_match(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    external = "安久莱实业（上海）有限公司"
+
+    for own_company in (
+        "英科",
+        "  英科  ",
+        "浙江英科弹簧制造有限公司",
+        "浙江英科（某某）有限公司",
+    ):
+        erp = CustomerErp()
+        result = resolve_customer_identity(
+            org_id="英科1厂",
+            purchaser_name=external,
+            supplier_name=own_company,
+            erp=erp,
+        )
+
+        assert result.customer_name == external
+        assert result.resolution_source == "sole_external"
+        assert result.candidate_source == "model_purchaser"
+        assert result.candidate_count == 1
+        assert erp.calls == [("英科1厂", external, 1, 20)]
+
+    unrelated_yingke_customer = "某某英科技术有限公司"
+    erp = CustomerErp({unrelated_yingke_customer: [{"customerName": unrelated_yingke_customer}]})
+    result = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name=unrelated_yingke_customer,
+        supplier_name="浙江英科弹簧制造有限公司",
+        erp=erp,
+    )
+
+    assert result.customer_name == unrelated_yingke_customer
+    assert result.resolution_source == "erp_exact"
+    assert result.candidate_source == "model_purchaser"
+    assert erp.calls == [("英科1厂", unrelated_yingke_customer, 1, 20)]
 
 
 def test_english_own_company_keywords_filter_case_spacing_punctuation_and_suffixes(monkeypatch):
@@ -236,4 +278,6 @@ def test_prompt_context_includes_org_and_own_aliases(monkeypatch):
     assert "浙江英科弹簧科技有限公司" in context
     assert "yingke" in context
     assert "incospring" in context
+    assert "浙江英科" in context
+    assert "英科" in context
     assert "甲方和乙方只是合同标签" in context

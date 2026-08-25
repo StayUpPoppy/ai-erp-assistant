@@ -15,10 +15,12 @@ CUSTOMER_OWN_COMPANY_KEYWORDS_ENV = "CUSTOMER_OWN_COMPANY_KEYWORDS_JSON"
 DEFAULT_OWN_COMPANY_ALIASES: Tuple[str, ...] = (
     "浙江英科弹簧科技有限公司",
     "浙江英科弹簧科技",
+    "英科",
 )
 DEFAULT_OWN_COMPANY_KEYWORDS: Tuple[str, ...] = (
     "yingke",
     "incospring",
+    "浙江英科",
 )
 _last_config_log_signature: Tuple[bool, bool, int] | None = None
 _last_keyword_config_log_signature: Tuple[bool, bool, int] | None = None
