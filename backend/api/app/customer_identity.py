@@ -55,6 +55,11 @@ class CustomerIdentityResolution:
     exact_erp_match: bool = False
     erp_lookup_failed: bool = False
     candidate_count: int = 0
+    language_alias_count: int = 0
+    exact_match_alias_count: int = 0
+    selected_language: str = ""
+    alias_match_summary: str = ""
+    erp_conflict: bool = False
 
 
 def normalize_company_name(value: str) -> str:
@@ -270,6 +275,259 @@ def _candidate_list(
     return result
 
 
+def _candidate_language(value: str) -> str:
+    text = str(value or "")
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return "zh"
+    if re.search(r"[a-z]", text, re.IGNORECASE):
+        return "en"
+    return "other"
+
+
+def _split_bilingual_company_aliases(value: Any) -> Tuple[str, ...]:
+    """只拆分明确的中英文并列名称，避免误拆纯英文换行公司名。"""
+    text = str(value or "").strip()
+    if not text:
+        return ()
+    raw_parts = re.split(r"(?:\r?\n+|[|｜]+)", text)
+    parts = _deduplicate_aliases(
+        re.sub(r"^[\s+|｜;；]+|[\s+|｜;；]+$", "", part)
+        for part in raw_parts
+    )
+    languages = {_candidate_language(part) for part in parts}
+    if len(parts) >= 2 and "zh" in languages and "en" in languages:
+        return parts
+    return (re.sub(r"\s+", " ", text).strip(),)
+
+
+def _english_candidate_groups(
+    purchaser_name: str,
+    supplier_name: str,
+    organization_candidates: Iterable[Any],
+    *,
+    own_alias_keys: set[str],
+    own_keyword_keys: Tuple[str, ...],
+) -> List[List[CustomerCandidate]]:
+    raw_candidates: List[Tuple[Any, str, str]] = [
+        (purchaser_name, "model_purchaser", "purchaser"),
+        (supplier_name, "model_supplier", "supplier"),
+    ]
+    for raw in organization_candidates:
+        if isinstance(raw, dict):
+            name = raw.get("name")
+            role = str(raw.get("role") or "other").strip().lower() or "other"
+            source_label = str(raw.get("source_label") or "").strip()
+        else:
+            name = getattr(raw, "name", "")
+            role = str(getattr(raw, "role", "other") or "other").strip().lower() or "other"
+            source_label = str(getattr(raw, "source_label", "") or "").strip()
+        raw_candidates.append((name, f"model_{role}" + (f"_{source_label}" if source_label else ""), role))
+
+    candidates_by_key: Dict[str, CustomerCandidate] = {}
+    linked_alias_sets: List[set[str]] = []
+    for raw_name, source, role in raw_candidates:
+        aliases = _split_bilingual_company_aliases(raw_name)
+        alias_keys: set[str] = set()
+        for alias in aliases:
+            cleaned = re.sub(r"\s+", " ", str(alias or "")).strip()
+            key = normalize_company_name(cleaned)
+            if not key:
+                continue
+            alias_keys.add(key)
+            candidates_by_key.setdefault(key, CustomerCandidate(name=cleaned, source=source, role=role))
+        if len(alias_keys) >= 2:
+            linked_alias_sets.append(alias_keys)
+
+    external_keys = [
+        key
+        for key in candidates_by_key
+        if key not in own_alias_keys and not any(keyword in key for keyword in own_keyword_keys)
+    ]
+    if not external_keys:
+        return []
+
+    parent = {key: key for key in external_keys}
+
+    def find(key: str) -> str:
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    external_key_set = set(external_keys)
+    for linked_keys in linked_alias_sets:
+        available = [key for key in linked_keys if key in external_key_set]
+        for key in available[1:]:
+            union(available[0], key)
+
+    grouped: Dict[str, List[CustomerCandidate]] = {}
+    for key in external_keys:
+        grouped.setdefault(find(key), []).append(candidates_by_key[key])
+    return list(grouped.values())
+
+
+def _row_customer_identity(row: Any, canonical_name: str) -> str:
+    if isinstance(row, dict):
+        for field in ("customerNumber", "customerId", "id"):
+            value = row.get(field)
+            if value is not None and str(value).strip():
+                return f"{field}:{str(value).strip()}"
+    return f"name:{normalize_company_name(canonical_name)}"
+
+
+def _preferred_group_candidate(group: Sequence[CustomerCandidate]) -> CustomerCandidate:
+    preferred_roles = {"buyer", "purchaser", "ordering_company"}
+    preferred = [candidate for candidate in group if candidate.role in preferred_roles]
+    candidates = preferred or list(group)
+    return next(
+        (candidate for candidate in candidates if _candidate_language(candidate.name) == "zh"),
+        candidates[0],
+    )
+
+
+def _resolve_english_customer_identity(
+    *,
+    org_id: str,
+    purchaser_name: str,
+    supplier_name: str,
+    erp: Any,
+    organization_candidates: Iterable[Any],
+    own_alias_keys: set[str],
+    own_keyword_keys: Tuple[str, ...],
+) -> CustomerIdentityResolution:
+    groups = _english_candidate_groups(
+        purchaser_name,
+        supplier_name,
+        organization_candidates,
+        own_alias_keys=own_alias_keys,
+        own_keyword_keys=own_keyword_keys,
+    )
+    alias_count = sum(len(group) for group in groups)
+    if not groups:
+        return CustomerIdentityResolution(
+            customer_name="",
+            resolution_source="ambiguous",
+            candidate_count=0,
+            language_alias_count=0,
+        )
+
+    exact_matches: List[Tuple[int, CustomerCandidate, str, str]] = []
+    failed_group_indexes: set[int] = set()
+    erp_lookup_failed = False
+    outcomes: List[str] = []
+    for group_index, group in enumerate(groups):
+        for candidate in group:
+            language = _candidate_language(candidate.name)
+            try:
+                rows: Sequence[Any] = erp.search_customers(org_id, candidate.name, 1, 20)
+            except Exception as exc:
+                erp_lookup_failed = True
+                failed_group_indexes.add(group_index)
+                outcomes.append(f"{language}:error")
+                logger.warning(
+                    "customer_identity_erp_lookup_failed org_id=%s candidate_source=%s language=%s error=%s",
+                    org_id,
+                    candidate.source,
+                    language,
+                    exc,
+                )
+                continue
+            candidate_key = normalize_company_name(candidate.name)
+            exact_rows = [
+                row
+                for row in rows
+                if normalize_company_name(_row_customer_name(row)) == candidate_key
+            ]
+            outcomes.append(f"{language}:{'exact' if exact_rows else 'miss'}")
+            for row in exact_rows:
+                canonical_name = _row_customer_name(row) or candidate.name
+                exact_matches.append(
+                    (
+                        group_index,
+                        candidate,
+                        canonical_name,
+                        _row_customer_identity(row, canonical_name),
+                    )
+                )
+
+    matches_by_identity: Dict[str, List[Tuple[int, CustomerCandidate, str, str]]] = {}
+    for match in exact_matches:
+        matches_by_identity.setdefault(match[3], []).append(match)
+    summary = ",".join(outcomes)
+    if len(matches_by_identity) > 1:
+        identities_by_group: Dict[int, set[str]] = {}
+        for identity, matches in matches_by_identity.items():
+            for match in matches:
+                identities_by_group.setdefault(match[0], set()).add(identity)
+        bilingual_alias_conflict = any(len(identities) > 1 for identities in identities_by_group.values())
+        return CustomerIdentityResolution(
+            customer_name="",
+            resolution_source="erp_conflict" if bilingual_alias_conflict else "ambiguous",
+            erp_lookup_failed=erp_lookup_failed,
+            candidate_count=len(groups),
+            language_alias_count=alias_count,
+            exact_match_alias_count=len(exact_matches),
+            alias_match_summary=summary,
+            erp_conflict=bilingual_alias_conflict,
+        )
+    if len(matches_by_identity) == 1:
+        matches = next(iter(matches_by_identity.values()))
+        matched_group_indexes = {match[0] for match in matches}
+        unsafe_failed_groups = failed_group_indexes - matched_group_indexes
+        if not unsafe_failed_groups:
+            selected = next(
+                (match for match in matches if _candidate_language(match[1].name) == "zh"),
+                matches[0],
+            )
+            _, candidate, canonical_name, _ = selected
+            return CustomerIdentityResolution(
+                customer_name=canonical_name or candidate.name,
+                resolution_source="erp_exact",
+                candidate_source=candidate.source,
+                exact_erp_match=True,
+                erp_lookup_failed=erp_lookup_failed,
+                candidate_count=len(groups),
+                language_alias_count=alias_count,
+                exact_match_alias_count=len(exact_matches),
+                selected_language=_candidate_language(candidate.name),
+                alias_match_summary=summary,
+            )
+
+    preferred_roles = {"buyer", "purchaser", "ordering_company"}
+    preferred_groups = [
+        group
+        for group in groups
+        if any(candidate.role in preferred_roles for candidate in group)
+    ]
+    if not exact_matches and len(preferred_groups) == 1:
+        candidate = _preferred_group_candidate(preferred_groups[0])
+        return CustomerIdentityResolution(
+            customer_name=candidate.name,
+            resolution_source="sole_external_buyer",
+            candidate_source=candidate.source,
+            erp_lookup_failed=erp_lookup_failed,
+            candidate_count=len(groups),
+            language_alias_count=alias_count,
+            selected_language=_candidate_language(candidate.name),
+            alias_match_summary=summary,
+        )
+    return CustomerIdentityResolution(
+        customer_name="",
+        resolution_source="ambiguous",
+        erp_lookup_failed=erp_lookup_failed,
+        candidate_count=len(groups),
+        language_alias_count=alias_count,
+        exact_match_alias_count=len(exact_matches),
+        alias_match_summary=summary,
+    )
+
+
 def _row_customer_name(row: Any) -> str:
     if not isinstance(row, dict):
         return ""
@@ -286,6 +544,16 @@ def resolve_customer_identity(
 ) -> CustomerIdentityResolution:
     own_alias_keys = {normalize_company_name(alias) for alias in own_company_aliases(org_id)}
     own_keyword_keys = tuple(normalize_company_name(keyword) for keyword in own_company_keywords(org_id))
+    if organization_candidates is not None:
+        return _resolve_english_customer_identity(
+            org_id=org_id,
+            purchaser_name=purchaser_name,
+            supplier_name=supplier_name,
+            erp=erp,
+            organization_candidates=organization_candidates,
+            own_alias_keys=own_alias_keys,
+            own_keyword_keys=own_keyword_keys,
+        )
     external_candidates = [
         candidate
         for candidate in _candidate_list(purchaser_name, supplier_name, organization_candidates)
@@ -329,17 +597,6 @@ def resolve_customer_identity(
             resolution_source="erp_exact",
             candidate_source=candidate.source,
             exact_erp_match=True,
-            erp_lookup_failed=erp_lookup_failed,
-            candidate_count=len(external_candidates),
-        )
-    preferred_roles = {"buyer", "purchaser", "ordering_company"}
-    preferred_candidates = [candidate for candidate in external_candidates if candidate.role in preferred_roles]
-    if organization_candidates is not None and not exact_candidates and len(preferred_candidates) == 1:
-        candidate = preferred_candidates[0]
-        return CustomerIdentityResolution(
-            customer_name=candidate.name,
-            resolution_source="sole_external_buyer",
-            candidate_source=candidate.source,
             erp_lookup_failed=erp_lookup_failed,
             candidate_count=len(external_candidates),
         )

@@ -1022,7 +1022,18 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
         ing.resolved_fields["customerName"] = customer_resolution.customer_name
         ing.resolved_fields["customer_name"] = customer_resolution.customer_name
         customer_issues: List[PreviewIssue] = []
-        if customer_resolution.resolution_source == "ambiguous":
+        if customer_resolution.erp_conflict:
+            customer_issues.append(
+                PreviewIssue(
+                    path="order.customerName",
+                    level="error",
+                    message=(
+                        "客户的中文名称和英文名称分别匹配到不同的 ERP 客户记录，"
+                        "请在订单预览中手工填写正确的客户名称，然后重新匹配物料并确认。"
+                    ),
+                )
+            )
+        elif customer_resolution.resolution_source == "ambiguous":
             customer_issues.append(
                 PreviewIssue(
                     path="order.customerName",
@@ -1033,7 +1044,7 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
                     ),
                 )
             )
-        elif customer_resolution.erp_lookup_failed:
+        elif customer_resolution.erp_lookup_failed and not customer_resolution.exact_erp_match:
             customer_issues.append(
                 PreviewIssue(
                     path="order.customerName",
@@ -1053,17 +1064,26 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
                 )
             )
         logger.info(
-            "customer_identity_resolved ingestion_id=%s resolution=%s candidate_source=%s candidates=%s customer=%s",
+            "customer_identity_resolved ingestion_id=%s resolution=%s candidate_source=%s candidates=%s "
+            "language_aliases=%s exact_aliases=%s selected_language=%s alias_matches=%s customer=%s",
             ing.ingestion_id,
             customer_resolution.resolution_source,
             customer_resolution.candidate_source or "none",
             customer_resolution.candidate_count,
+            customer_resolution.language_alias_count,
+            customer_resolution.exact_match_alias_count,
+            customer_resolution.selected_language or "none",
+            customer_resolution.alias_match_summary or "none",
             customer_resolution.customer_name or "none",
         )
         customer_identity_audit = (
             f" customer_resolution={customer_resolution.resolution_source}"
             f" customer_candidate_source={customer_resolution.candidate_source or 'none'}"
             f" customer_candidates={customer_resolution.candidate_count}"
+            f" customer_language_aliases={customer_resolution.language_alias_count}"
+            f" customer_exact_aliases={customer_resolution.exact_match_alias_count}"
+            f" customer_selected_language={customer_resolution.selected_language or 'none'}"
+            f" customer_alias_matches={customer_resolution.alias_match_summary or 'none'}"
         )
         preview_valid, preview_reason, preview_metrics = _validate_order_preview(preview)
         if not preview_valid:

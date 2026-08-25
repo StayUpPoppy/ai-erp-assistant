@@ -214,6 +214,202 @@ def test_english_own_company_keywords_leave_customer_blank_when_every_candidate_
     assert erp.calls == []
 
 
+def test_english_bilingual_buyer_uses_chinese_alias_when_neither_alias_matches_erp(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    english_name = "Global-set Valve Components Jiangsu Co., LTD"
+    chinese_name = "格鲁赛特阀门配件江苏有限公司"
+    erp = CustomerErp()
+
+    result = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name=f"{english_name}+\n | {chinese_name}",
+        supplier_name="浙江英科弹簧科技有限公司",
+        organization_candidates=[
+            {"name": english_name, "role": "buyer", "source_label": "Buyer"},
+            {"name": chinese_name, "role": "buyer", "source_label": "需方"},
+            {"name": "浙江英科弹簧科技有限公司", "role": "supplier", "source_label": "Supplier"},
+        ],
+        erp=erp,
+    )
+
+    assert result.customer_name == chinese_name
+    assert result.resolution_source == "sole_external_buyer"
+    assert result.exact_erp_match is False
+    assert result.candidate_count == 1
+    assert result.language_alias_count == 2
+    assert result.selected_language == "zh"
+    assert erp.calls == [
+        ("英科1厂", english_name, 1, 20),
+        ("英科1厂", chinese_name, 1, 20),
+    ]
+
+
+def test_english_bilingual_buyer_uses_whichever_alias_matches_erp(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    english_name = "Global-set Valve Components Jiangsu Co., LTD"
+    chinese_name = "格鲁赛特阀门配件江苏有限公司"
+
+    for matched_name, expected_language in ((english_name, "en"), (chinese_name, "zh")):
+        erp = CustomerErp(
+            {matched_name: [{"customerNumber": "CUST-1", "customerName": matched_name}]}
+        )
+        result = resolve_customer_identity(
+            org_id="英科1厂",
+            purchaser_name=f"{english_name}\n{chinese_name}",
+            supplier_name="浙江英科弹簧科技有限公司",
+            organization_candidates=[],
+            erp=erp,
+        )
+
+        assert result.customer_name == matched_name
+        assert result.resolution_source == "erp_exact"
+        assert result.exact_erp_match is True
+        assert result.exact_match_alias_count == 1
+        assert result.selected_language == expected_language
+
+
+def test_english_bilingual_aliases_pointing_to_same_erp_customer_are_one_match(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    english_name = "Global-set Valve Components Jiangsu Co., LTD"
+    chinese_name = "格鲁赛特阀门配件江苏有限公司"
+    erp = CustomerErp(
+        {
+            english_name: [{"customerNumber": "CUST-1", "customerName": english_name}],
+            chinese_name: [{"customerNumber": "CUST-1", "customerName": chinese_name}],
+        }
+    )
+
+    result = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name=f"{english_name}｜{chinese_name}",
+        supplier_name="浙江英科弹簧科技有限公司",
+        organization_candidates=[],
+        erp=erp,
+    )
+
+    assert result.customer_name == chinese_name
+    assert result.resolution_source == "erp_exact"
+    assert result.exact_match_alias_count == 2
+    assert result.erp_conflict is False
+
+
+def test_english_bilingual_aliases_matching_different_erp_customers_are_blocked(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    english_name = "Global-set Valve Components Jiangsu Co., LTD"
+    chinese_name = "格鲁赛特阀门配件江苏有限公司"
+    erp = CustomerErp(
+        {
+            english_name: [{"customerNumber": "CUST-EN", "customerName": english_name}],
+            chinese_name: [{"customerNumber": "CUST-ZH", "customerName": chinese_name}],
+        }
+    )
+
+    result = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name=f"{english_name}|{chinese_name}",
+        supplier_name="浙江英科弹簧科技有限公司",
+        organization_candidates=[],
+        erp=erp,
+    )
+
+    assert result.customer_name == ""
+    assert result.resolution_source == "erp_conflict"
+    assert result.erp_conflict is True
+    assert result.exact_match_alias_count == 2
+
+
+def test_english_bilingual_buyer_accepts_exact_alias_when_other_alias_lookup_fails(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    english_name = "Global-set Valve Components Jiangsu Co., LTD"
+    chinese_name = "格鲁赛特阀门配件江苏有限公司"
+    erp = CustomerErp(
+        {chinese_name: [{"customerNumber": "CUST-1", "customerName": chinese_name}]},
+        fail_names={english_name},
+    )
+
+    result = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name=f"{english_name}\n{chinese_name}",
+        supplier_name="浙江英科弹簧科技有限公司",
+        organization_candidates=[],
+        erp=erp,
+    )
+
+    assert result.customer_name == chinese_name
+    assert result.resolution_source == "erp_exact"
+    assert result.exact_erp_match is True
+    assert result.erp_lookup_failed is True
+
+
+def test_english_bilingual_buyer_keeps_chinese_alias_when_all_erp_lookups_fail(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    english_name = "Global-set Valve Components Jiangsu Co., LTD"
+    chinese_name = "格鲁赛特阀门配件江苏有限公司"
+    erp = CustomerErp(fail_names={english_name, chinese_name})
+
+    result = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name=f"{english_name}\n{chinese_name}",
+        supplier_name="浙江英科弹簧科技有限公司",
+        organization_candidates=[],
+        erp=erp,
+    )
+
+    assert result.customer_name == chinese_name
+    assert result.resolution_source == "sole_external_buyer"
+    assert result.exact_erp_match is False
+    assert result.erp_lookup_failed is True
+    assert result.alias_match_summary == "en:error,zh:error"
+
+
+def test_english_customer_candidates_fall_back_to_top_level_fields_without_false_merging(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    erp = CustomerErp()
+
+    fallback = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name="External Buyer Ltd",
+        supplier_name="Yingke Holding Co Ltd",
+        organization_candidates=[],
+        erp=erp,
+    )
+    assert fallback.customer_name == "External Buyer Ltd"
+    assert fallback.resolution_source == "sole_external_buyer"
+    assert erp.calls == [("英科1厂", "External Buyer Ltd", 1, 20)]
+
+    separate_buyers_erp = CustomerErp(
+        {
+            "External Buyer One Ltd": [
+                {"customerNumber": "BUYER-1", "customerName": "External Buyer One Ltd"}
+            ],
+            "External Buyer Two Ltd": [
+                {"customerNumber": "BUYER-2", "customerName": "External Buyer Two Ltd"}
+            ],
+        }
+    )
+    ambiguous = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name="External Buyer One Ltd",
+        supplier_name="Yingke Holding Co Ltd",
+        organization_candidates=[
+            {"name": "External Buyer One Ltd", "role": "buyer", "source_label": "Buyer"},
+            {"name": "External Buyer Two Ltd", "role": "buyer", "source_label": "Ordering Company"},
+        ],
+        erp=separate_buyers_erp,
+    )
+    assert ambiguous.customer_name == ""
+    assert ambiguous.resolution_source == "ambiguous"
+    assert ambiguous.candidate_count == 2
+    assert ambiguous.erp_conflict is False
+
+
 def test_sole_external_is_used_with_non_exact_result(monkeypatch):
     monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
     erp = CustomerErp()

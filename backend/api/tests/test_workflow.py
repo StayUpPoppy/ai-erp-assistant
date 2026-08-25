@@ -387,6 +387,80 @@ def test_node_build_preview_blanks_ambiguous_customer_and_skips_material_mapping
     assert any("customer_resolution=ambiguous" in event.message for event in ing.audit_events)
 
 
+def test_node_build_preview_blocks_bilingual_names_matching_different_erp_customers(monkeypatch):
+    from app.workflow import WorkflowState, _node_build_preview
+
+    english_name = "Global-set Valve Components Jiangsu Co., LTD"
+    chinese_name = "格鲁赛特阀门配件江苏有限公司"
+
+    class ConflictingCustomerErp(MockErpClient):
+        def __init__(self):
+            self.material_calls = 0
+
+        def search_customers(self, org_id, keyword, page_num=1, page_size=20):
+            _ = org_id, page_num, page_size
+            if keyword == english_name:
+                return [{"customerNumber": "CUST-EN", "customerName": english_name}]
+            if keyword == chinese_name:
+                return [{"customerNumber": "CUST-ZH", "customerName": chinese_name}]
+            return []
+
+        def get_customer_material_details_by_customer(self, customer_name):
+            _ = customer_name
+            self.material_calls += 1
+            return []
+
+    preview = OrderPreviewData(
+        order=OrderPreviewHeader(
+            org="英科1厂",
+            customerName=f"{english_name}\n{chinese_name}",
+            customerPoNo="PO-BILINGUAL-CONFLICT",
+            currency="CNY",
+            deliveryDate="2026-08-30",
+        ),
+        details=[OrderPreviewDetail(customerMaterialNo="CUST-002", productName="弹簧", qty=2)],
+    )
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    monkeypatch.setenv("WORKFLOW_VALIDATE_ORDER_PREVIEW", "true")
+    monkeypatch.setattr("app.workflow.build_order_preview_data", lambda _ingestion: preview.model_copy(deep=True))
+    monkeypatch.setattr("app.workflow._current_po_order_date", lambda: "2026-08-19")
+    ing = _new_ingestion()
+    ing.org_id = "英科1厂"
+    ing.resolved_fields = {
+        "extracted_purchaser_name": f"{english_name}\n|{chinese_name}",
+        "extracted_supplier_name": "浙江英科弹簧科技有限公司",
+        "english_order_language_route": "en_enhanced",
+        "english_organization_candidates_json": "[]",
+    }
+    erp = ConflictingCustomerErp()
+    state: WorkflowState = {
+        "ingestion": ing,
+        "erp": erp,
+        "append_event": _append_event,
+        "mapping_metrics": {},
+        "document_text": "Material | Qty-UOM | Unit Price | Required",
+    }
+
+    _node_build_preview(state)
+
+    assert ing.preview_data is not None
+    assert ing.preview_data.order.customerName == ""
+    assert erp.material_calls == 0
+    assert any(
+        issue.path == "order.customerName"
+        and issue.level == "error"
+        and "中文名称和英文名称分别匹配到不同的 ERP 客户记录" in issue.message
+        for issue in ing.issues
+    )
+    assert any(
+        "customer_resolution=erp_conflict" in event.message
+        and "customer_language_aliases=2" in event.message
+        and "customer_exact_aliases=2" in event.message
+        for event in ing.audit_events
+    )
+
+
 def test_node_build_preview_preserves_source_codes_when_customer_is_ambiguous(monkeypatch):
     from app.workflow import WorkflowState, _node_build_preview
 
