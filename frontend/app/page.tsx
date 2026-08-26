@@ -241,6 +241,25 @@ function isPendingQueueIngestion(ingestion: IngestionResponse): boolean {
   return true;
 }
 
+function pendingQueueStatusBadge(status: IngestionStatus | null | undefined): { label: string; className: string } {
+  if (isBackgroundRunningStatus(status)) {
+    return {
+      label: "识别中",
+      className: "bg-blue-600",
+    };
+  }
+  if (status === "FAILED") {
+    return {
+      label: "失败",
+      className: "bg-rose-600",
+    };
+  }
+  return {
+    label: "待处理",
+    className: "bg-amber-500",
+  };
+}
+
 function pendingQueueFileName(ingestion: IngestionResponse): string {
   return (
     ingestion.file?.source_file_name ||
@@ -4181,6 +4200,7 @@ export default function HomePage() {
                         <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
                           {pendingQueue.map((item, index) => {
                             const displayStatus = displayIngestionStatus(item, clientDraftStateRef.current) ?? item.status;
+                            const statusBadge = pendingQueueStatusBadge(displayStatus);
                             const selected = item.ingestion_id === ingestionId;
                             const poNo = pendingQueuePoNo(item);
                             const deleting = Boolean(deletingIngestionIds[item.ingestion_id]);
@@ -4205,8 +4225,8 @@ export default function HomePage() {
                                       {pendingQueueFileName(item)}
                                     </span>
                                     <span className="flex shrink-0 items-center gap-1">
-                                      <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-sm">
-                                        未处理
+                                      <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold text-white shadow-sm ${statusBadge.className}`}>
+                                        {statusBadge.label}
                                       </span>
                                       {selected ? (
                                         <span className="rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">

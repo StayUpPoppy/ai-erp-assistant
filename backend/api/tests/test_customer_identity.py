@@ -426,6 +426,25 @@ def test_sole_external_is_used_with_non_exact_result(monkeypatch):
     assert result.exact_erp_match is False
 
 
+def test_full_group_company_name_uses_erp_exact_match(monkeypatch):
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_OWN_COMPANY_KEYWORDS_JSON", raising=False)
+    customer_name = "方正阀门集团股份有限公司"
+    erp = CustomerErp({customer_name: [{"customerNumber": "FZ-1", "customerName": customer_name}]})
+
+    result = resolve_customer_identity(
+        org_id="英科1厂",
+        purchaser_name=customer_name,
+        supplier_name="浙江英科弹簧科技有限公司",
+        erp=erp,
+    )
+
+    assert result.customer_name == customer_name
+    assert result.resolution_source == "erp_exact"
+    assert result.exact_erp_match is True
+    assert erp.calls == [("英科1厂", customer_name, 1, 20)]
+
+
 def test_multiple_external_candidates_without_unique_erp_match_are_ambiguous(monkeypatch):
     monkeypatch.delenv("CUSTOMER_OWN_COMPANY_ALIASES_JSON", raising=False)
     erp = CustomerErp(

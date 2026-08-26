@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.qwen_vision_extract import (
     VisionImage,
+    _prefer_chinese_company,
     is_qwen_vision_supported_file,
     qwen_vision_health_payload,
     try_apply_qwen_vision_preview,
@@ -103,6 +104,17 @@ def test_qwen_vision_user_prompt_includes_local_parse_text(monkeypatch) -> None:
     assert "浙江英科弹簧科技有限公司" in prompt
 
 
+def test_prefer_chinese_company_keeps_complete_group_legal_suffixes() -> None:
+    assert _prefer_chinese_company("采购商：方正阀门集团股份有限公司") == "方正阀门集团股份有限公司"
+    assert _prefer_chinese_company("某某集团有限责任公司") == "某某集团有限责任公司"
+    assert _prefer_chinese_company("某某集团有限公司") == "某某集团有限公司"
+    assert _prefer_chinese_company("某某集团公司") == "某某集团公司"
+    assert _prefer_chinese_company("某某集团") == "某某集团"
+    assert _prefer_chinese_company("无锡智能自控工程股份有限公司") == "无锡智能自控工程股份有限公司"
+    assert _prefer_chinese_company("浙江英科弹簧科技有限公司") == "浙江英科弹簧科技有限公司"
+    assert _prefer_chinese_company("某某弹簧厂") == "某某弹簧厂"
+
+
 def test_try_apply_qwen_vision_preview_applies_structured_result(monkeypatch) -> None:
     monkeypatch.setenv("QWEN_VISION_EXTRACT_ENABLED", "true")
     monkeypatch.setenv("QWEN_VISION_API_KEY", "secret")
@@ -131,6 +143,30 @@ def test_try_apply_qwen_vision_preview_applies_structured_result(monkeypatch) ->
     assert ingestion.prompt_version == "qwen-vision-order-preview-v3-customer-identity"
     assert ingestion.resolved_fields["extracted_purchaser_name"] == "格鲁赛特阀门配件江苏有限公司"
     assert ingestion.resolved_fields["extracted_supplier_name"] == "YingKe"
+
+
+def test_try_apply_qwen_vision_preview_keeps_full_group_company_name(monkeypatch) -> None:
+    monkeypatch.setenv("QWEN_VISION_EXTRACT_ENABLED", "true")
+    monkeypatch.setenv("QWEN_VISION_API_KEY", "secret")
+    monkeypatch.setattr(
+        "app.qwen_vision_extract._source_images",
+        lambda *_args: ([VisionImage(bytes=b"img", mime_type="image/jpeg", page_number=1)], 1, False),
+    )
+    monkeypatch.setattr(
+        "app.qwen_vision_extract._chat_completion_vision",
+        lambda *_args, **_kwargs: """
+        {"purchase_order":{"order_number":"1P44-26080174","purchaser_name":"方正阀门集团股份有限公司","supplier_name":"浙江英科弹簧科技有限公司","order_date":"2026-08-26","items":[{"material_code":"302100100284","material_name":"弹簧","specification":"7.3*28","material_texture":"X-750","quantity":200,"unit":"PCS","unit_price_without_tax":1.11,"unit_price_with_tax":1.25,"total_amount":250,"total_amount_without_tax":221.24,"total_amount_with_tax":250,"delivery_date":"2026-09-19","drawing_number":"","evidence":{},"uncertain_fields":[]}],"evidence":{},"uncertain_fields":[],"extraction_notes":[]}}
+        """,
+    )
+    ingestion = _new_ingestion()
+
+    result = try_apply_qwen_vision_preview(ingestion, b"\xff\xd8\xff\xe0", "order.jpg", "image/jpeg")
+
+    assert result.applied is True
+    assert ingestion.preview_data is not None
+    assert ingestion.preview_data.order.customerName == "方正阀门集团股份有限公司"
+    assert ingestion.resolved_fields["extracted_purchaser_name"] == "方正阀门集团股份有限公司"
+    assert ingestion.resolved_fields["customer_name"] == "方正阀门集团股份有限公司"
 
 
 def test_qwen_vision_fills_material_grade_from_local_table(monkeypatch) -> None:

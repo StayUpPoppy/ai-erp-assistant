@@ -288,8 +288,10 @@ ENGLISH_VISION_SYSTEM_PROMPT = (
 )
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_CHINESE_COMPANY_CHARS = r"[\u4e00-\u9fff0-9０-９（）()·\-]"
 _CHINESE_COMPANY_RE = re.compile(
-    r"([\u4e00-\u9fff0-9０-９（）()·\-]{2,80}?(?:有限责任公司|股份有限公司|有限公司|公司|集团|厂))"
+    rf"({_CHINESE_COMPANY_CHARS}{{2,80}}?(?:有限责任公司|股份有限公司|有限公司|公司|"
+    rf"集团(?!{_CHINESE_COMPANY_CHARS}*(?:有限责任公司|股份有限公司|有限公司|公司))|厂))"
 )
 _HEADER_LABEL_RE = re.compile(
     r"(?:客户名称|客户|买方|需方|甲方|采购商|收货方|收货人|收货地址|客户地址|送货地址|交货地点|交货地址|地址)\s*[:：]?\s*"
