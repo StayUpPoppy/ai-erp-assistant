@@ -1375,6 +1375,7 @@ class RealErpClient:
             "org": org,
             "customerName": customer,
             "customerPoNo": customer_po,
+            "remark": "来源AI助手",
             "salesUser": sales_user,
             "createUser": sales_user,
             "orderDate": doc_date,

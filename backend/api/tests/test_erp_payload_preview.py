@@ -133,7 +133,7 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
                     tax=13,
                     taxAmount=0.23008849557522115,
                     gift=False,
-                    remark="",
+                    remark="明细业务备注",
                 )
             ],
         ),
@@ -145,6 +145,7 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
         "org",
         "customerName",
         "customerPoNo",
+        "remark",
         "salesUser",
         "createUser",
         "orderDate",
@@ -155,10 +156,12 @@ def test_datynk_payload_preview_matches_order_interface_fields() -> None:
         "deliveryDate",
     }
     assert "jhq" not in payload["order"]
+    assert payload["order"]["remark"] == "来源AI助手"
     assert payload["order"]["createUser"] == payload["order"]["salesUser"]
     assert payload["order"]["rate"] == 1.0
     assert payload["details"][0]["materialCode"] == "S01P019430"
     assert payload["details"][0]["productSpec"] == "左旋7*55*122*8.5"
+    assert payload["details"][0]["remark"] == "明细业务备注"
     assert "sourceMaterialCode" not in payload["details"][0]
     assert "sourceProductSpec" not in payload["details"][0]
     assert "customerMaterialSpec" not in payload["details"][0]

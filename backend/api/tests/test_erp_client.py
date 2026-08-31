@@ -527,6 +527,7 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
             "rate": "1",
             "deliveryDate": "2026-05-20",
             "productSpec": "PS-01",
+            "line_remark": "明细业务备注",
             **_datynk_detail_money_fields(),
         },
         "ik-1",
@@ -543,6 +544,7 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert isinstance(body, dict)
     assert body["order"]["org"] == "英科1厂"
     assert body["order"]["customerName"] == "北京某公司"
+    assert body["order"]["remark"] == "来源AI助手"
     assert body["order"]["rate"] == 1.0
     assert body["order"]["deliveryDate"] == "2026-05-20"
     assert body["order"]["createUser"] == body["order"]["salesUser"]
@@ -551,6 +553,7 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert len(body["details"]) == 1
     assert body["details"][0]["materialCode"] == "S01"
     assert body["details"][0]["productSpec"] == "PS-01"
+    assert body["details"][0]["remark"] == "明细业务备注"
     assert "customerMaterialSpec" not in body["details"][0]
     assert body["details"][0]["qty"] == 2.0
     assert set(body) == {"order", "details", "files"}
@@ -632,8 +635,13 @@ def test_datynk_sale_order_keeps_product_spec_in_details_override(monkeypatch):
             "doc_date": "2026-05-13",
             "datynk_details_json": json.dumps(
                 [
-                    {"materialCode": "S01", "productSpec": "NEW-SPEC", "qty": 2},
-                    {"materialCode": "S02", "customerMaterialSpec": "LEGACY-SPEC", "qty": 3},
+                    {"materialCode": "S01", "productSpec": "NEW-SPEC", "qty": 2, "remark": "第一行备注"},
+                    {
+                        "materialCode": "S02",
+                        "customerMaterialSpec": "LEGACY-SPEC",
+                        "qty": 3,
+                        "remark": "第二行备注",
+                    },
                 ],
                 ensure_ascii=False,
             ),
@@ -643,8 +651,10 @@ def test_datynk_sale_order_keeps_product_spec_in_details_override(monkeypatch):
 
     details = captured["body"]["details"]
     assert details[0]["productSpec"] == "NEW-SPEC"
+    assert details[0]["remark"] == "第一行备注"
     assert "customerMaterialSpec" not in details[0]
     assert details[1]["productSpec"] == "LEGACY-SPEC"
+    assert details[1]["remark"] == "第二行备注"
     assert "customerMaterialSpec" not in details[1]
 
 
