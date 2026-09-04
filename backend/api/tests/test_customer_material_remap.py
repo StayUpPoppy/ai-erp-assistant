@@ -52,6 +52,7 @@ def _preview() -> OrderPreviewData:
             salesUser="测试用户",
             orderDate="2026-08-18",
             currency="CNY",
+            rate=1,
             deliveryDate="2026-08-30",
         ),
         details=[

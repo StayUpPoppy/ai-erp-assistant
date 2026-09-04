@@ -21,6 +21,13 @@ const HEADER_FIELDS: Array<{ key: keyof OrderPreviewData["order"]; label: string
   { key: "deliveryDate", label: "交货期", required: true },
 ];
 
+const PRESET_CURRENCY_RATES: Record<string, number> = {
+  CNY: 1,
+  USD: 7.2,
+  EUR: 7.8,
+  JPY: 0.048,
+};
+
 const DETAIL_COLUMNS: Array<{
   key: keyof OrderPreviewData["details"][number];
   label: string;
@@ -169,6 +176,18 @@ export function OrderPreviewEditor({
 
   const updateOrderField = (key: keyof OrderPreviewData["order"], raw: string) => {
     if (key === "salesUser" && lockedSalesUser !== undefined) return;
+    if (key === "currency") {
+      const currency = raw.trim().toUpperCase();
+      onChange({
+        ...preview,
+        order: {
+          ...preview.order,
+          currency,
+          rate: PRESET_CURRENCY_RATES[currency] ?? null,
+        },
+      });
+      return;
+    }
     onChange({
       ...preview,
       order: {
@@ -204,6 +223,13 @@ export function OrderPreviewEditor({
     const meta = editableByPath.get(path);
     if ((field.required || meta?.required) && isBlank(preview.order[field.key])) missingPaths.add(path);
   }
+  const rate = preview.order.rate;
+  if (
+    stringify(preview.order.currency).trim() &&
+    (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0)
+  ) {
+    missingPaths.add(fieldPathForOrder("rate"));
+  }
   preview.details.forEach((detail, index) => {
     for (const column of DETAIL_COLUMNS) {
       const path = fieldPathForDetail(index, column.key);
@@ -216,7 +242,11 @@ export function OrderPreviewEditor({
     ...Array.from(missingPaths).map((path) => ({
       path,
       level: "error",
-      message: editableByPath.get(path)?.reason || "LLM 未识别到该必填字段，请在表格中补充。",
+      message:
+        editableByPath.get(path)?.reason ||
+        (path === "order.rate"
+          ? "当前币别需要填写大于 0 的有效汇率。"
+          : "LLM 未识别到该必填字段，请在表格中补充。"),
     })),
     ...issues,
   ];

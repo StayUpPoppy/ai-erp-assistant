@@ -376,6 +376,7 @@ class PurchaseOrder(BaseModel):
     purchaser_name: str = Field(default="", description="采购方名称")
     supplier_name: str = Field(default="", description="供应商名称")
     order_date: str = Field(default="", description="订单签订日期")
+    currency: str = Field(default="", description="订单币别代码，如 CNY、USD、EUR、JPY")
     payment_terms: str = Field(default="", description="付款结算条件")
     tax_rate: float = Field(default=0.0, description="税率")
     delivery_address: str = Field(default="", description="送货收货地址")

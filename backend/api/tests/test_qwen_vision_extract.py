@@ -125,24 +125,35 @@ def test_try_apply_qwen_vision_preview_applies_structured_result(monkeypatch) ->
     monkeypatch.setattr(
         "app.qwen_vision_extract._chat_completion_vision",
         lambda *_args, **_kwargs: """
-        {"purchase_order":{"order_number":"PO-QWEN","purchaser_name":"Acme 格鲁赛特阀门配件江苏有限公司","supplier_name":"YingKe","order_date":"2026-06-26","payment_terms":"","tax_rate":13,"delivery_address":"Yao Lane 江苏省丹阳市埤城镇122省道尧巷段（212300）","total_order_amount":20,"items":[{"material_code":"CUST-001","material_name":"Spring","specification":"D10","material_texture":"X-750","quantity":2,"unit":"pcs","unit_price_without_tax":10,"unit_price_with_tax":11.3,"total_amount":20,"total_amount_without_tax":20,"total_amount_with_tax":22.6,"delivery_date":"2026-07-01","drawing_number":"","evidence":{},"uncertain_fields":[]}],"evidence":{},"uncertain_fields":[],"extraction_notes":[]}}
+        {"purchase_order":{"order_number":"PO-QWEN","purchaser_name":"Acme 格鲁赛特阀门配件江苏有限公司","supplier_name":"YingKe","order_date":"2026-06-26","currency":"CNY","payment_terms":"","tax_rate":13,"delivery_address":"Yao Lane 江苏省丹阳市埤城镇122省道尧巷段（212300）","total_order_amount":20,"items":[{"material_code":"CUST-001","material_name":"Spring","specification":"D10","material_texture":"X-750","quantity":2,"unit":"pcs","unit_price_without_tax":10,"unit_price_with_tax":11.3,"total_amount":20,"total_amount_without_tax":20,"total_amount_with_tax":22.6,"delivery_date":"2026-07-01","drawing_number":"","evidence":{},"uncertain_fields":[]}],"evidence":{},"uncertain_fields":[],"extraction_notes":[]}}
         """,
     )
     ingestion = _new_ingestion()
 
-    result = try_apply_qwen_vision_preview(ingestion, b"\xff\xd8\xff\xe0", "order.jpg", "image/jpeg")
+    result = try_apply_qwen_vision_preview(
+        ingestion,
+        b"\xff\xd8\xff\xe0",
+        "order.jpg",
+        "image/jpeg",
+        local_text="Purchase Order\nCurrency USD\nNet price 6,00 USD",
+    )
 
     assert result.applied is True
     assert ingestion.preview_data is not None
     assert ingestion.preview_data.order.customerPoNo == "PO-QWEN"
     assert ingestion.preview_data.order.customerName == "格鲁赛特阀门配件江苏有限公司"
     assert ingestion.preview_data.order.deliveryAddr == "江苏省丹阳市埤城镇122省道尧巷段（212300）"
+    assert ingestion.preview_data.order.currency == "USD"
+    assert ingestion.preview_data.order.rate == 7.2
     assert ingestion.preview_data.details[0].materialCode == "CUST-001"
     assert ingestion.preview_data.details[0].ph == "X-750"
     assert ingestion.model_version == "qwen3.7-plus"
-    assert ingestion.prompt_version == "qwen-vision-order-preview-v3-customer-identity"
+    assert ingestion.prompt_version == "qwen-vision-order-preview-v4-currency"
     assert ingestion.resolved_fields["extracted_purchaser_name"] == "格鲁赛特阀门配件江苏有限公司"
     assert ingestion.resolved_fields["extracted_supplier_name"] == "YingKe"
+    assert ingestion.resolved_fields["currency"] == "USD"
+    assert ingestion.resolved_fields["rate"] == "7.2"
+    assert ingestion.resolved_fields["currency_detection_source"] == "labeled_text"
 
 
 def test_try_apply_qwen_vision_preview_keeps_full_group_company_name(monkeypatch) -> None:

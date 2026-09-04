@@ -148,6 +148,8 @@ def test_process_ingestion_parses_text_object_when_bytes_available(monkeypatch):
     assert result.resolved_fields.get("orderDate") == "2026-08-09"
     assert result.resolved_fields.get("order_date") == "2026-08-09"
     assert result.resolved_fields.get("currency") == "CNY"
+    assert result.resolved_fields.get("rate") == "1.0"
+    assert result.resolved_fields.get("currency_detection_source") == "labeled_text"
     assert result.resolved_fields.get("vendor_code") == "V001"
     assert result.resolved_fields.get("material_code") == ""
     assert result.resolved_fields.get("customerMaterialNo") == "M001"

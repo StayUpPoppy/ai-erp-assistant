@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from typing import Any, Dict, Iterable, List, Tuple
@@ -494,6 +495,20 @@ def preview_editable_fields(preview: OrderPreviewData) -> List[PreviewEditableFi
                     confidence=0.0,
                 )
             )
+    rate = order.rate
+    if str(order.currency or "").strip() and (
+        rate is None or not math.isfinite(float(rate)) or float(rate) <= 0
+    ):
+        out.append(
+            PreviewEditableField(
+                path="order.rate",
+                label="汇率",
+                current_value="" if rate is None else str(rate),
+                required=True,
+                reason="当前币别需要填写大于 0 的有效汇率",
+                confidence=0.0,
+            )
+        )
     for idx, detail in enumerate(preview.details):
         for key, label in DETAIL_REQUIRED_FIELDS:
             raw = getattr(detail, key, None)
@@ -521,6 +536,8 @@ def _missing_key_for_editable_path(path: str) -> str:
         return "doc_date"
     if path == "order.currency":
         return "currency"
+    if path == "order.rate":
+        return "rate"
     if path == "order.deliveryDate":
         return "delivery_date"
 

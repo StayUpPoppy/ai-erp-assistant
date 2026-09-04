@@ -420,3 +420,52 @@ def test_preview_does_not_require_price_amount_and_tax_fields() -> None:
     apply_preview_to_ingestion(ing, preview)
 
     assert not ({"price", "taxPrice", "amount", "allAmount", "tax"} & set(ing.missing_fields))
+
+
+def test_preview_requires_positive_rate_when_currency_is_present() -> None:
+    base = OrderPreviewData(
+        order=OrderPreviewHeader(
+            org="英科1厂",
+            customerName="Acme",
+            orderDate="2026-06-23",
+            currency="GBP",
+            rate=None,
+            deliveryDate="2026-06-30",
+        ),
+        details=[OrderPreviewDetail(materialCode="M001", qty=2)],
+    )
+
+    assert "rate" in preview_missing_keys(base)
+    assert "rate" in preview_missing_keys(base.model_copy(update={"order": base.order.model_copy(update={"rate": 0})}))
+    assert "rate" in preview_missing_keys(base.model_copy(update={"order": base.order.model_copy(update={"rate": -1})}))
+    assert "rate" not in preview_missing_keys(base.model_copy(update={"order": base.order.model_copy(update={"rate": 8.9})}))
+
+
+def test_erp_payload_preview_preserves_confirmed_currency_and_rate() -> None:
+    ing = IngestionResponse(
+        ingestion_id="ing-usd-rate",
+        file_id="file-usd-rate",
+        file_hash="hash-usd-rate",
+        user_id="u1",
+        org_id="英科1厂",
+        extract_version="v0",
+        model_version="m",
+        prompt_version="p",
+        status=IngestionStatus.VALIDATED,
+        preview_data=OrderPreviewData(
+            order=OrderPreviewHeader(
+                org="英科1厂",
+                customerName="Acme",
+                orderDate="2026-06-23",
+                currency="USD",
+                rate=7.35,
+                deliveryDate="2026-06-30",
+            ),
+            details=[OrderPreviewDetail(materialCode="M001", qty=2)],
+        ),
+    )
+
+    payload = build_datynk_sale_order_payload(ing)
+
+    assert payload["order"]["currency"] == "USD"
+    assert payload["order"]["rate"] == 7.35

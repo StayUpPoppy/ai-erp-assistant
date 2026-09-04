@@ -7,6 +7,7 @@ import re
 from time import perf_counter
 from typing import Any, Dict, Optional
 
+from app.currency_rules import CurrencyResolution, resolve_order_currency
 from app.customer_identity import customer_identity_prompt_context
 from app.english_order_enhanced import (
     ENGLISH_ORDER_EXTRACTION_RULES,
@@ -39,6 +40,7 @@ SYSTEM_PROMPT = """你是制造业采购订单抽取引擎，只能依据用户�
 - purchaser_name：实际买方/需方/采购商/外部客户名称。甲方、乙方只是合同标签，不能直接代表买卖角色；不得把己方公司填为 purchaser_name。
 - supplier_name：实际卖方/供方/供应商名称；如果己方公司是销售方，应填写己方公司。
 - order_date：订单签订或下单日期，统一 YYYY-MM-DD；无法确定则 ""。
+- currency：订单交易币别，统一输出三位大写币别代码（如 CNY、USD、EUR、JPY）；优先依据 Currency/币别/币种表头和金额旁币别，无法确定则 ""。不要仅凭 ¥/￥ 判断 CNY 或 JPY。
 - payment_terms：付款方式或结算条款。
 - tax_rate：税率百分数,无法确定输出 0。
 - delivery_address：收货/送货地址，只保留地址正文。
@@ -71,7 +73,7 @@ SYSTEM_PROMPT = """你是制造业采购订单抽取引擎，只能依据用户�
 - 识别数字时候不要遗漏小数点。
 
 输出 JSON 结构：
-{"purchase_order":{"order_number":"","purchaser_name":"","supplier_name":"","order_date":"","payment_terms":"","tax_rate":0,"delivery_address":"","total_order_amount":0,"items":[{"material_code":"","material_name":"","specification":"","material_texture":"","quantity":0,"unit":"","unit_price_without_tax":0,"unit_price_with_tax":0,"total_amount":0,"total_amount_without_tax":0,"total_amount_with_tax":0,"delivery_date":"","drawing_number":"","evidence":{},"uncertain_fields":[]}],"evidence":{},"uncertain_fields":[],"extraction_notes":[]}}""".strip()
+{"purchase_order":{"order_number":"","purchaser_name":"","supplier_name":"","order_date":"","currency":"","payment_terms":"","tax_rate":0,"delivery_address":"","total_order_amount":0,"items":[{"material_code":"","material_name":"","specification":"","material_texture":"","quantity":0,"unit":"","unit_price_without_tax":0,"unit_price_with_tax":0,"total_amount":0,"total_amount_without_tax":0,"total_amount_with_tax":0,"delivery_date":"","drawing_number":"","evidence":{},"uncertain_fields":[]}],"evidence":{},"uncertain_fields":[],"extraction_notes":[]}}""".strip()
 
 ENGLISH_SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + ENGLISH_ORDER_EXTRACTION_RULES
 
@@ -104,6 +106,11 @@ LLM_CONTEXT_KEYWORDS = (
     "amount",
     "total",
     "tax",
+    "currency",
+    "usd",
+    "eur",
+    "jpy",
+    "rmb",
     "delivery",
     "address",
     "采购",
@@ -119,6 +126,8 @@ LLM_CONTEXT_KEYWORDS = (
     "金额",
     "合计",
     "税率",
+    "币别",
+    "币种",
     "交货",
     "地址",
 )
@@ -489,7 +498,12 @@ def _preserve_rule_material_code_completions(
             llm_detail.materialCode = rule_detail.materialCode
 
 
-def _purchase_order_to_preview(order: PurchaseOrder, org_hint: str) -> OrderPreviewData:
+def _purchase_order_to_preview(
+    order: PurchaseOrder,
+    org_hint: str,
+    currency_resolution: CurrencyResolution | None = None,
+) -> OrderPreviewData:
+    currency_resolution = currency_resolution or resolve_order_currency("", order.currency)
     details: list[OrderPreviewDetail] = []
     for item in order.items:
         qty = item.quantity
@@ -538,8 +552,8 @@ def _purchase_order_to_preview(order: PurchaseOrder, org_hint: str) -> OrderPrev
             orderDate=order.order_date,
             orderStatus="pending",
             deliveryAddr=order.delivery_address,
-            rate=1,
-            currency="CNY",
+            rate=currency_resolution.rate,
+            currency=currency_resolution.currency,
             deliveryDate=_first_delivery_date(order) or order.order_date,
         ),
         details=details,
@@ -579,7 +593,8 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
         if "purchase_order" in parsed and isinstance(parsed["purchase_order"], dict):
             parsed = parsed["purchase_order"]
         purchase_order = PurchaseOrder.model_validate(parsed)
-        preview = _purchase_order_to_preview(purchase_order, ingestion.org_id)
+        currency_resolution = resolve_order_currency(document_text, purchase_order.currency)
+        preview = _purchase_order_to_preview(purchase_order, ingestion.org_id, currency_resolution)
         if route.is_enhanced:
             apply_english_raw_sources_to_preview(preview, purchase_order)
         _preserve_rule_material_code_completions(rule_preview, preview)
@@ -616,6 +631,9 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
             "extracted_supplier_name": purchase_order.supplier_name,
             "payment_terms": purchase_order.payment_terms,
             "total_order_amount": "" if purchase_order.total_order_amount == 0 else str(purchase_order.total_order_amount),
+            "currency_detection_source": currency_resolution.source,
+            "currency_detection_conflict": "1" if currency_resolution.conflict else "0",
+            "currency_detection_evidence": ",".join(currency_resolution.evidence),
         }
     )
     for key in (
@@ -626,9 +644,15 @@ def try_apply_llm_preview(ingestion: IngestionResponse, document_text: str) -> b
     ):
         ingestion.resolved_fields.pop(key, None)
     save_english_extraction_candidates(fields, purchase_order, route)
+    ingestion.resolved_fields["currency"] = fields["currency"]
+    ingestion.resolved_fields["rate"] = fields["rate"]
+    ingestion.resolved_fields["currency_detection_source"] = fields["currency_detection_source"]
+    ingestion.resolved_fields["currency_detection_conflict"] = fields["currency_detection_conflict"]
+    ingestion.resolved_fields["currency_detection_evidence"] = fields["currency_detection_evidence"]
     ingestion.resolved_fields.update({k: v for k, v in fields.items() if str(v).strip()})
     ingestion.model_version = llm_model_name()
-    ingestion.prompt_version = f"{llm_prompt_version()}-{ENGLISH_PO_ROUTE_VERSION}" if route.is_enhanced else llm_prompt_version()
+    prompt_version = f"{llm_prompt_version()}-currency-v1"
+    ingestion.prompt_version = f"{prompt_version}-{ENGLISH_PO_ROUTE_VERSION}" if route.is_enhanced else prompt_version
     logger.info(
         "llm_preview_applied ingestion_id=%s model=%s items=%s input_chars=%s source_chars=%s elapsed_ms=%s json_repaired=%s language_route=%s header_signals=%s",
         ingestion.ingestion_id,

@@ -523,8 +523,8 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
             "material_code": "S01",
             "line_qty": "2",
             "doc_date": "2026-05-13",
-            "currency": "CNY",
-            "rate": "1",
+            "currency": "USD",
+            "rate": "7.35",
             "deliveryDate": "2026-05-20",
             "productSpec": "PS-01",
             "line_remark": "明细业务备注",
@@ -545,7 +545,8 @@ def test_datynk_sale_order_create_draft_success(monkeypatch):
     assert body["order"]["org"] == "英科1厂"
     assert body["order"]["customerName"] == "北京某公司"
     assert body["order"]["remark"] == "来源AI助手"
-    assert body["order"]["rate"] == 1.0
+    assert body["order"]["currency"] == "USD"
+    assert body["order"]["rate"] == 7.35
     assert body["order"]["deliveryDate"] == "2026-05-20"
     assert body["order"]["createUser"] == body["order"]["salesUser"]
     assert "sourceIngestionId" not in body["order"]

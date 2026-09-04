@@ -35,6 +35,7 @@ from app.document_extract import (
     resolved_upload_file_name,
     truncate_for_api,
 )
+from app.currency_rules import resolve_order_currency
 from app.customer_identity import CustomerIdentityResolution, resolve_customer_identity
 from app.english_order_enhanced import load_material_candidate_groups, load_organization_candidates
 from app.erp_audit_log import append_erp_call_log_with_upstream
@@ -678,9 +679,20 @@ def _apply_extraction_pass(ing: IngestionResponse, text: str) -> Dict[str, int]:
     if dt_val == "PO":
         hints.update(extract_po_cn_layout_entities(text))
     apply_field_aliases(hints, prof)
+    currency_resolution = resolve_order_currency(text, hints.get("currency", ""))
+    hints["currency"] = currency_resolution.currency
+    hints["rate"] = "" if currency_resolution.rate is None else str(currency_resolution.rate)
+    hints["currency_detection_source"] = currency_resolution.source
+    hints["currency_detection_conflict"] = "1" if currency_resolution.conflict else "0"
+    hints["currency_detection_evidence"] = ",".join(currency_resolution.evidence)
     for k, v in hints.items():
         if v and not (ing.resolved_fields.get(k) or "").strip():
             ing.resolved_fields[k] = v
+    ing.resolved_fields["currency"] = hints["currency"]
+    ing.resolved_fields["rate"] = hints["rate"]
+    ing.resolved_fields["currency_detection_source"] = hints["currency_detection_source"]
+    ing.resolved_fields["currency_detection_conflict"] = hints["currency_detection_conflict"]
+    ing.resolved_fields["currency_detection_evidence"] = hints["currency_detection_evidence"]
     lj = (ing.resolved_fields.get("line_items_json") or "").strip()
     if lj and dt_val == "PO":
         try:
@@ -936,6 +948,10 @@ def _node_build_preview(state: WorkflowState) -> WorkflowState:
             if ("parse", message) not in existing:
                 ing.issues.append(PreviewIssue(path="parse", level="warning", message=message))
                 existing.add(("parse", message))
+        if (ing.resolved_fields.get("currency_detection_conflict") or "").strip() == "1":
+            message = "订单中识别到多个相互冲突的币别，请在订单预览中确认并填写正确币别和汇率。"
+            if ("order.currency", message) not in existing:
+                ing.issues.append(PreviewIssue(path="order.currency", level="error", message=message))
 
     def _append_total_amount_issue(ing: IngestionResponse, preview: OrderPreviewData) -> None:
         raw_total = (ing.resolved_fields.get("total_order_amount") or "").strip().replace(",", "")

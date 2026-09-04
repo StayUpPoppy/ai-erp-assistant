@@ -84,6 +84,15 @@ def test_purchase_order_maps_to_order_preview_for_datynk_sale_order() -> None:
     assert "图号/生产单号：DR-01" in preview.details[0].remark
 
 
+def test_purchase_order_currency_sets_fixed_preview_rate() -> None:
+    order = PurchaseOrder.model_validate({"currency": "usd", "items": []})
+
+    preview = _purchase_order_to_preview(order, "英科1厂")
+
+    assert preview.order.currency == "USD"
+    assert preview.order.rate == 7.2
+
+
 def test_purchase_order_preview_does_not_infer_missing_tax_amounts() -> None:
     order = PurchaseOrder.model_validate(
         {
@@ -318,7 +327,7 @@ def test_try_apply_llm_preview_applies_llm_when_more_complete(monkeypatch) -> No
         return (
             '{"purchase_order":{"order_number":"PO-BETTER","purchaser_name":"Better Customer",'
             '"supplier_name":"浙江英科弹簧科技有限公司",'
-            '"order_date":"2026-04-01","delivery_address":"Delivery Road",'
+            '"order_date":"2026-04-01","currency":"CNY","delivery_address":"Delivery Road",'
             '"items":[{"material_code":"MAT-001","material_name":"Spring","specification":"10x20",'
             '"quantity":12,"unit_price_without_tax":3.5,"total_amount_without_tax":42,'
             '"delivery_date":"2026-04-15"}]}}'
@@ -326,18 +335,23 @@ def test_try_apply_llm_preview_applies_llm_when_more_complete(monkeypatch) -> No
 
     monkeypatch.setattr("app.llm_extract.chat_completion_json", fake_completion)
 
-    applied = try_apply_llm_preview(ingestion, "Purchase Order PO-BETTER MAT-001")
+    applied = try_apply_llm_preview(ingestion, "Purchase Order PO-BETTER MAT-001 Currency USD")
 
     assert applied is True
     assert ingestion.preview_data is not None
     assert ingestion.preview_data.order.customerName == "Better Customer"
     assert ingestion.preview_data.order.customerPoNo == "PO-BETTER"
     assert ingestion.preview_data.order.orderDate == "2026-04-01"
+    assert ingestion.preview_data.order.currency == "USD"
+    assert ingestion.preview_data.order.rate == 7.2
     assert ingestion.preview_data.details[0].materialCode == "MAT-001"
     assert ingestion.preview_data.details[0].qty == 12
     assert ingestion.resolved_fields["customerPoNo"] == "PO-BETTER"
     assert ingestion.resolved_fields["extracted_purchaser_name"] == "Better Customer"
     assert ingestion.resolved_fields["extracted_supplier_name"] == "浙江英科弹簧科技有限公司"
+    assert ingestion.resolved_fields["currency"] == "USD"
+    assert ingestion.resolved_fields["rate"] == "7.2"
+    assert ingestion.resolved_fields["currency_detection_source"] == "labeled_text"
     assert request_options["enable_thinking"] is False
     assert "甲方、乙方只是合同标签" in request_messages[0]["content"]
     assert "<customer_identity_context>" in request_messages[1]["content"]
